@@ -27,8 +27,8 @@
       "description": "文档处理所需组件是否齐全",
       "required": true,
       "itemVersion": "1.0",
-      "check": "逐个 import 并比较版本（python-docx / Pillow / lxml 核心库）",
-      "remediation": "复制安装命令到终端执行后重试",
+      "check": "逐个深导入（docx.api / PIL.Image / lxml.etree）并比较版本；失败记录 errors/pylibs 来源",
+      "remediation": "按 installHint 安装到 /data/bidgenie/pylibs 后重试；也可用 BIDGENIE_PYLIBS 指定完整目录",
       "degradeImpact": "",
       "introducedIn": "M2",
       "config": {
@@ -50,17 +50,17 @@
           }
         ],
         "installTarget": "$DSH_HOME/data/bidgenie/pylibs/",
-        "installHint": "pip install --target <DSH_HOME>/data/bidgenie/pylibs -r libexec/requirements.txt"
+        "installHint": "pip install --target <DSH_HOME>/data/bidgenie/pylibs -r <plugin>/libexec/requirements.txt（或设置 BIDGENIE_PYLIBS）"
       }
     },
     {
       "id": "pdf_libraries",
       "label": "PDF 读取组件",
-      "description": "是否能读取 PDF 招标文件",
+      "description": "是否能读取 PDF 招标文件（依赖 .pyd/.so 二进制完整）",
       "required": false,
       "itemVersion": "1.0",
-      "check": "逐个 import：PyMuPDF(fitz) / pymupdf4llm / pdfplumber",
-      "remediation": "复制安装命令后重试；否则只能用 Word 文件",
+      "check": "逐个 import：PyMuPDF(fitz) / pymupdf4llm / pdfplumber；记录异常详情与 pylibs 二进制完整性",
+      "remediation": "按 installHint 安装到 /data/bidgenie/pylibs；若缺 .pyd 用 BIDGENIE_PYLIBS 指向完整目录",
       "degradeImpact": ".pdf 附件不可用（.docx 仍可用）",
       "introducedIn": "M3",
       "config": {
@@ -70,7 +70,7 @@
           "pdfplumber"
         ],
         "primary": "fitz",
-        "installHint": "pip install --target <DSH_HOME>/data/bidgenie/pylibs PyMuPDF==1.24.14 pdfplumber pymupdf4llm"
+        "installHint": "pip install --target <DSH_HOME>/data/bidgenie/pylibs PyMuPDF==1.24.14 pdfplumber pymupdf4llm（或设置 BIDGENIE_PYLIBS）"
       }
     },
     {

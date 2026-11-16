@@ -259,11 +259,15 @@ def check_python_runtime(ctx: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def check_python_packages(ctx: Mapping[str, Any]) -> dict[str, Any]:
-    """python_packages：核心库 import + 版本比较（python-docx / Pillow / lxml）。"""
+    """python_packages：核心库 import + 深导入 + 版本比较（python-docx / Pillow / lxml）。"""
+    deps.ensure_dependency_path()
     config = ctx["item"].get("config") or {}
     found: dict[str, str] = {}
     missing: list[str] = []
     mismatched: list[str] = []
+    errors: dict[str, dict[str, str]] = {}
+    deep_imports = {"docx": "docx.api", "PIL": "PIL.Image", "lxml": "lxml.etree"}
+    deep_checked: dict[str, str] = {}
     for module in config.get("modules") or []:
         if not isinstance(module, Mapping):
             continue
@@ -272,26 +276,36 @@ def check_python_packages(ctx: Mapping[str, Any]) -> dict[str, Any]:
         expected = str(module.get("version") or "")
         try:
             installed = _module_version(import_name)
-        except Exception:  # noqa: BLE001 - 任意导入失败都视为缺失
+        except Exception as exc:  # noqa: BLE001 - 任意导入失败都视为缺失
             missing.append(f"{display}（import {import_name}）")
+            errors[import_name] = {"type": type(exc).__name__, "message": str(exc), "module": str(getattr(exc, "name", "") or import_name)}
             continue
+        deep_name = deep_imports.get(import_name)
+        if deep_name:
+            try:
+                importlib.import_module(deep_name)
+                deep_checked[import_name] = "ok"
+            except Exception as exc:  # noqa: BLE001 - 深导入失败（如 _extra 缺失）
+                deep_checked[import_name] = f"{type(exc).__name__}: {exc}"
+                errors[import_name] = {"type": type(exc).__name__, "message": str(exc), "module": str(getattr(exc, "name", "") or deep_name), "deepImport": deep_name}
         found[display] = installed
         if expected and installed:
             parsed_installed = _parse_version(installed)
             parsed_expected = _parse_version(expected)
             if parsed_installed is not None and parsed_expected is not None and parsed_installed != parsed_expected:
                 mismatched.append(f"{display} 需要 {expected}，实际 {installed}")
-    problems = missing + mismatched
+    problems = missing + mismatched + [f"{key} 深导入失败" for key, value in deep_checked.items() if value != "ok"]
+    active = deps.active_pylibs()
     if problems:
         hint = config.get("installHint")
-        detail: dict[str, Any] = {"found": found, "missing": missing, "mismatched": mismatched}
+        detail: dict[str, Any] = {"found": found, "missing": missing, "mismatched": mismatched, "errors": errors, "deepImports": deep_checked, "pylibs": active["path"], "pylibsSource": active["source"]}
         if hint:
             detail["installHint"] = hint
         return _result(STATUS_FAILED, "；".join(problems), detail)
     return _result(
         STATUS_PASSED,
-        " / ".join(f"{name} {version}" for name, version in found.items()),
-        {"found": found, "missing": [], "mismatched": []},
+        " / ".join(f"{name} {version}" for name, version in found.items()) + "（深导入 ok）",
+        {"found": found, "missing": [], "mismatched": [], "errors": errors, "deepImports": deep_checked, "pylibs": active["path"], "pylibsSource": active["source"]},
     )
 
 
@@ -321,6 +335,9 @@ def check_pdf_libraries(ctx: Mapping[str, Any]) -> dict[str, Any]:
     found: list[str] = []
     missing: list[str] = []
     versions: dict[str, str] = {}
+    errors: dict[str, dict[str, str]] = {}
+    deps.ensure_dependency_path()
+    binary = deps.binary_integrity()
     for name in modules:
         try:
             _module_version(name)
@@ -328,8 +345,10 @@ def check_pdf_libraries(ctx: Mapping[str, Any]) -> dict[str, Any]:
             version = _distribution_version(*distribution_names.get(name, (name,)))
             if version:
                 versions[name] = version
-        except Exception:  # noqa: BLE001 - 导入失败即缺失
+        except Exception as exc:  # noqa: BLE001 - 导入失败即缺失，保留异常详情
             missing.append(name)
+            errors[name] = {"type": type(exc).__name__, "message": str(exc), "module": str(getattr(exc, "name", "") or name)}
+    active = deps.active_pylibs()
     if primary in found:
         version_text = " / ".join(
             f"{name} {versions[name]}" if name in versions else name for name in found
@@ -337,12 +356,12 @@ def check_pdf_libraries(ctx: Mapping[str, Any]) -> dict[str, Any]:
         return _result(
             STATUS_PASSED,
             f"可导入：{version_text}",
-            {"found": found, "missing": missing, "versions": versions, "pylibs": str(deps.pylibs_dir())},
+            {"found": found, "missing": missing, "versions": versions, "errors": errors, "pylibs": active["path"], "pylibsSource": active["source"], "binaryIntegrity": binary},
         )
     return _result(
         STATUS_FAILED,
         f"缺少 PDF 读取组件：{', '.join(missing) or primary}",
-        {"found": found, "missing": missing, "versions": versions, "installHint": config.get("installHint", "")},
+        {"found": found, "missing": missing, "versions": versions, "errors": errors, "pylibs": active["path"], "pylibsSource": active["source"], "binaryIntegrity": binary, "installHint": config.get("installHint", "")},
     )
 
 
@@ -1089,6 +1108,31 @@ def build_report(
         items.append(item_payload)
     status = "ready" if env_document is not None else "not-run"
     blocked = (required_passed + required_deferred) < required_count
+    failed_items = [item for item in items if item["status"] == STATUS_FAILED]
+    diagnostic = deps.dependency_report()
+    binary_integrity = diagnostic.get("binaryIntegrity") or {}
+    root_cause: dict[str, Any] | None = None
+    install_hint = ""
+    if failed_items:
+        error_text = " ".join(str(item.get("detail")) for item in failed_items)
+        if binary_integrity.get("ok") is False or "pyd" in error_text or "_extra" in error_text or not binary_integrity.get("binaryCount"):
+            root_cause = {
+                "code": "pylibs_binary_incomplete",
+                "message": "pylibs 二进制不完整（常见根因：GitHub 仓库 .gitignore *.py[cod] 误伤 .pyd）",
+                "pylibs": diagnostic.get("pylibs") or "",
+                "source": diagnostic.get("source") or "",
+                "binaryIntegrity": binary_integrity,
+                "candidates": diagnostic.get("candidates") or [],
+            }
+        else:
+            root_cause = {
+                "code": "dependency_import_failed",
+                "message": "依赖可导入性失败，见 items[].detail.errors",
+                "pylibs": diagnostic.get("pylibs") or "",
+                "source": diagnostic.get("source") or "",
+                "candidates": diagnostic.get("candidates") or [],
+            }
+        install_hint = f"pip install --target <DSH_HOME>/data/bidgenie/pylibs -r <plugin>/libexec/requirements.txt（或设置 BIDGENIE_PYLIBS 指向完整 pylibs）"
     payload: dict[str, Any] = {
         "ok": True,
         "command": command,
@@ -1116,6 +1160,9 @@ def build_report(
         },
         "changed": list(changed or []),
         "skipped": [],
+        "rootCause": root_cause,
+        "installHint": install_hint,
+        "dependencyDiagnostics": diagnostic,
     }
     if run is not None:
         payload["run"] = dict(run)

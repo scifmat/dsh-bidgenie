@@ -2394,7 +2394,7 @@ window.__ModuleLoader__.load({
               { className: 'bgp-card' },
               h(EmptyState, {
                 title: '还没有检查过',
-                text: '一共 16 项检查，其中 8 项是必需的。第一次检查大约需要 1–2 分钟；已经通过的项下次会跳过，更快。',
+                text: '一共 15 项检查，其中 8 项是必需的。第一次检查大约需要 1–2 分钟；已经通过的项下次会跳过，更快。',
                 actions: h('div', { className: 'bgp-actions' }, h(Button, { variant: 'primary', icon: 'refresh', onClick: runCheck, disabled: running }, '开始检查')),
               }),
             )
