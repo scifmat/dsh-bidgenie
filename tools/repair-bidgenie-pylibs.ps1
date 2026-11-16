@@ -20,6 +20,12 @@
 
 .PARAMETER DryRun
     只打印计划，不做任何改动。
+.PARAMETER Mirror
+    自定义 pip 源（默认清华 https://pypi.tuna.tsinghua.edu.cn/simple；http 源自动加 --trusted-host）。
+.PARAMETER NoMirror
+    不使用镜像，走 pip 默认源（通常是 pypi.org）。
+.PARAMETER NoOfficialFallback
+    镜像安装失败时不回退官方源（默认会回退 https://pypi.org/simple）。
 .PARAMETER Rollback
     把最近一次 pylibs.broken-* 换回 pylibs（用于验证/应急）。
 .PARAMETER Force
@@ -31,11 +37,17 @@ param(
     [string]$Python = '',
     [string]$DataHome = '',
     [string]$Workspace = (Get-Location).Path,
-    [string]$Mirror = 'https://pypi.tuna.tsinghua.edu.cn/simple',
+    [string]$Mirror = '',
+    [switch]$NoMirror,
+    [switch]$NoOfficialFallback,
     [switch]$Force,
     [switch]$Rollback,
     [switch]$DryRun
 )
+
+#: 默认国内镜像（清华）与官方回退源
+$script:DefaultMirror = 'https://pypi.tuna.tsinghua.edu.cn/simple'
+$script:OfficialIndex = 'https://pypi.org/simple'
 
 $ErrorActionPreference = 'Stop'
 $script:Fail = $false
@@ -94,10 +106,30 @@ function Resolve-Python {
     param([string]$Explicit)
     $candidates = @()
     if ($Explicit) { $candidates += $Explicit }
+    if ($env:BIDGENIE_PYTHON) { $candidates += $env:BIDGENIE_PYTHON }
+    if ($env:DSH_PYTHON) { $candidates += $env:DSH_PYTHON }
+
+    # 1) DSH 自带运行时（优先，避免装到系统 Python）
+    $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+    $runtimeRoot = Join-Path $dshHome 'dsh-runtimes\dsh-primary-runtime\dependencies\python'
+    $candidates += (Join-Path $runtimeRoot 'python.exe')
+    $candidates += (Join-Path $runtimeRoot 'Scripts\python.exe')
+    # 常见 DSH 安装目录里的 runtime（LocalAppData\Programs\DeepSeek Harness）
+    $programs = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'
+    if (Test-Path $programs) {
+        Get-ChildItem $programs -Recurse -Filter 'python.exe' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'dsh-runtimes.*dependencies\\python' } |
+            Select-Object -First 3 | ForEach-Object { $candidates += $_.FullName }
+    }
+
+    # 2) PATH / 系统 Python
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd) { $candidates += $cmd.Source }
+
+    # 3) 本地 Python 安装
     $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311\python.exe')
     $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe')
+
     foreach ($c in $candidates) {
         if ($c -and (Test-Path $c)) {
             $v = & $c -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null
@@ -108,6 +140,26 @@ function Resolve-Python {
         }
     }
     throw "找不到 Python >= 3.10（请用 -Python 指定解释器路径）"
+}
+
+function Get-PipIndexArgs {
+    param([string]$IndexUrl)
+    $result = @('--retries', '3', '--timeout', '60')
+    if (-not $IndexUrl) { return $result }
+    $result += @('--index-url', $IndexUrl)
+    try {
+        $uri = [System.Uri]$IndexUrl
+        if ($uri.Scheme -eq 'http') { $result += @('--trusted-host', $uri.Host) }
+    }
+    catch { }
+    return $result
+}
+
+function Get-MirrorLabel {
+    param([string]$IndexUrl)
+    if (-not $IndexUrl) { return 'pip 默认源（未显式指定，通常是 pypi.org）' }
+    if ($IndexUrl -eq $script:OfficialIndex) { return "官方源 $IndexUrl" }
+    return "镜像 $IndexUrl"
 }
 
 # ---------------------------------------------------------------- 数据目录 / 插件链接
@@ -198,10 +250,44 @@ try {
     $live = Join-Path $dataHome 'pylibs'
     $new = Join-Path $dataHome 'pylibs.new'
 
+    # ---- 镜像解析：-NoMirror > -Mirror > BIDGENIE_PIP_INDEX_URL > 默认清华
+    $mirrorUrl = $null
+    $mirrorSource = ''
+    if ($NoMirror) {
+        $mirrorUrl = $null
+        $mirrorSource = '-NoMirror'
+    }
+    elseif ($Mirror) {
+        $mirrorUrl = $Mirror.Trim()
+        $mirrorSource = '-Mirror'
+    }
+    elseif ($env:BIDGENIE_PIP_INDEX_URL) {
+        $mirrorUrl = $env:BIDGENIE_PIP_INDEX_URL.Trim()
+        $mirrorSource = 'BIDGENIE_PIP_INDEX_URL'
+    }
+    else {
+        $mirrorUrl = $script:DefaultMirror
+        $mirrorSource = '默认（清华镜像）'
+    }
+
+    # 尝试顺序：镜像 →（可选）官方回退；-NoMirror 时用 pip 默认源
+    $attempts = @()
+    if ($mirrorUrl) {
+        $attempts += @{ Label = (Get-MirrorLabel $mirrorUrl); Index = $mirrorUrl }
+        if (-not $NoOfficialFallback -and $mirrorUrl -ne $script:OfficialIndex) {
+            $attempts += @{ Label = "官方回退 $script:OfficialIndex"; Index = $script:OfficialIndex }
+        }
+    }
+    else {
+        $attempts += @{ Label = (Get-MirrorLabel $null); Index = $null }
+    }
+
     Write-Step "环境"
     Write-Host "  插件：$plugin"
     Write-Host "  数据目录：$dataHome"
-    Write-Host "  Python：$py"
+    Write-Host "  Python：$py（优先 DSH 自带运行时）"
+    Write-Host "  源：$(Get-MirrorLabel $mirrorUrl)（来源：$mirrorSource）"
+    Write-Host "  回退：$(if ($attempts.Count -gt 1) { '镜像失败时尝试官方源（-NoOfficialFallback 可关闭）' } else { '无（-NoMirror 或已指定官方源）' })"
     Write-Host "  工作区：$Workspace"
 
     # ---- 回滚模式
@@ -244,27 +330,46 @@ try {
     # ---- 计划
     Write-Step "修复计划"
     Write-Host "  1. 安装到临时目录：$new"
-    Write-Host "     命令：`"$py`" -m pip install --target `"$new`" -r `"$req`" -i $Mirror"
+    $primaryArgs = @('-m', 'pip', 'install', '--target', $new, '--no-cache-dir', '--disable-pip-version-check', '-r', $req) + (Get-PipIndexArgs $attempts[0].Index)
+    Write-Host "     命令：`"$py`" $($primaryArgs -join ' ')"
+    Write-Host "     尝试顺序：$((($attempts | ForEach-Object { $_.Label }) -join ' → '))"
     Write-Host "     预计下载约 90 MB（PyMuPDF / pymupdf4llm / pdfplumber / Pillow / pywin32 / cryptography 等）"
     Write-Host "  2. 在临时目录逐个 import 验证（fitz/pymupdf/pdfplumber/PIL.Image/cryptography/win32com/lxml）"
     Write-Host "  3. 原子替换：pylibs -> pylibs.broken-<时间戳>，pylibs.new -> pylibs"
     Write-Host "  4. 在插件目录建立链接：$plugin\pylibs -> $live"
     Write-Host "  5. 复跑环境检查：bg_env_check.py --apply --item python_packages --item pdf_libraries --item scripts_integrity"
 
+    if (-not $NoOfficialFallback -and $mirrorUrl -and $mirrorUrl -ne $script:OfficialIndex) {
+        $fallbackArgs = @('-m', 'pip', 'install', '--target', $new, '--no-cache-dir', '--disable-pip-version-check', '-r', $req) + (Get-PipIndexArgs $script:OfficialIndex)
+        Write-Host "     镜像失败时回退命令：`"$py`" $($fallbackArgs -join ' ')"
+    }
+
     if ($DryRun) { Write-Host "`n[DRY] 只打印计划，未做任何改动。" -ForegroundColor Yellow; Ensure-PylibsLink -Plugin $plugin -Target $live -DryRun; exit 0 }
 
-    # ---- 1. 安装
+    # ---- 1. 安装（镜像失败自动回退官方，除非 -NoOfficialFallback）
     Write-Step "安装依赖到临时目录"
-    if (Test-Path $new) {
-        Write-Host "  清理旧的临时目录：$new"
-        Remove-Item -LiteralPath $new -Recurse -Force
+    $install = $null
+    for ($i = 0; $i -lt $attempts.Count; $i++) {
+        $attempt = $attempts[$i]
+        if ($i -gt 0) {
+            Write-Warn "上一个源安装失败，回退：$($attempt.Label)"
+            if (Test-Path $new) { Remove-Item -LiteralPath $new -Recurse -Force }
+        }
+        if (Test-Path $new) {
+            Write-Host "  清理旧的临时目录：$new"
+            Remove-Item -LiteralPath $new -Recurse -Force
+        }
+        $pipArgs = @('-m', 'pip', 'install', '--target', $new, '--no-cache-dir', '--disable-pip-version-check', '-r', $req) + (Get-PipIndexArgs $attempt.Index)
+        Write-Host "  尝试：$($attempt.Label)"
+        $install = Invoke-Native -Exe $py -Arguments $pipArgs
+        @($install.Output) | Select-Object -Last 12 | ForEach-Object { Write-Host "    $_" }
+        if ($install.ExitCode -ne 0) {
+            Write-Warn "安装失败（exit=$($install.ExitCode)）：$($attempt.Label)"
+        }
     }
-    $install = Invoke-Native -Exe $py -Arguments @(
-        '-m', 'pip', 'install', '--target', $new, '--no-cache-dir',
-        '--disable-pip-version-check', '-r', $req, '-i', $Mirror
-    )
-    @($install.Output) | Select-Object -Last 12 | ForEach-Object { Write-Host "    $_" }
-    if ($install.ExitCode -ne 0) { throw "pip 安装失败（exit=$($install.ExitCode)）" }
+    if ($null -eq $install -or $install.ExitCode -ne 0) {
+        throw "pip 安装失败（所有源均失败）；可换源重试：-Mirror <url>、-NoMirror、设置 BIDGENIE_PIP_INDEX_URL，或检查网络/代理"
+    }
     if (@($install.Output) -match 'dependency conflicts') {
         Write-Warn "上面 pip 的 'dependency conflicts' 是系统 Python 里另一份 pymupdf 的冲突提示，不影响本次 --target 安装"
     }

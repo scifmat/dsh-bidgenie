@@ -123,8 +123,20 @@ powershell -ExecutionPolicy Bypass -File tools\repair-bidgenie-pylibs.ps1 -DryRu
 powershell -ExecutionPolicy Bypass -File tools\repair-bidgenie-pylibs.ps1
 ```
 
+**国内源与换源**（默认走清华镜像）：
+
+```powershell
+tools\repair-env.cmd -Mirror https://mirrors.aliyun.com/pypi/simple   # 换其他镜像
+tools\repair-env.cmd -Mirror http://pypi.internal/simple               # http 源自动加 --trusted-host
+tools\repair-env.cmd -NoMirror                                         # 不走镜像，用 pip 默认源
+tools\repair-env.cmd -NoOfficialFallback                               # 镜像失败时禁止回退官方源
+$env:BIDGENIE_PIP_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple" # 环境变量指定镜像
+```
+
+- **Python 选择**：`-Python <路径>` → `BIDGENIE_PYTHON` / `DSH_PYTHON` → **DSH 自带运行时**（优先，避免装到系统 Python）→ PATH 里的 `python` → 本地 Python 3.10+。
+- **镜像与回退**：默认清华 `https://pypi.tuna.tsinghua.edu.cn/simple`；pip 自动加 `--retries 3 --timeout 60`，http 源自动加 `--trusted-host`；镜像失败会打印 warning 并自动回退官方 `https://pypi.org/simple`（`-NoOfficialFallback` 可关闭）。
+- **失败提示**：若所有源都失败，按提示换源重试（`-Mirror` / `-NoMirror` / `BIDGENIE_PIP_INDEX_URL`）或检查网络/代理。
 - 依赖安装到 `%USERPROFILE%\.dsh\data\bidgenie\pylibs`（设置 `DSH_HOME` 时用 `%DSH_HOME%\data\bidgenie\pylibs`），并在插件目录建立 `pylibs` 链接；升级/重装插件后重复运行即可，不用重新下载。
-- 脚本优先使用 DSH 自带运行时，无需单独安装 Python/pip；默认使用清华镜像，可加 `-Mirror <url>` 换源。
 - 安装完成后在面板跑一次「环境检查」；`-Rollback` 可回滚到最近一次安装前的版本，`-Force` 可强制重装。
 - 本地开发目录可保留自己的 `plugin/pylibs`，不会被本工具删除（会先移动到 `data/bidgenie/plugin-pylibs.legacy-*`）。
 
