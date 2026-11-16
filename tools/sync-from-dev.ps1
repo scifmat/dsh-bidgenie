@@ -125,4 +125,5 @@ if ($Commit -or $Push) {
     }
 }
 
-Write-Host "`n完成。发布仓库未包含 tests/docs/pylibs；依赖由 tools\repair-env.cmd 安装。" -ForegroundColor Green
+Write-Host ''
+Write-Host '完成。发布仓库未包含 tests/docs/pylibs；依赖由 tools/repair-env.cmd 安装。' -ForegroundColor Green
