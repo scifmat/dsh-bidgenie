@@ -21,7 +21,7 @@
 - 🛡️ **严苛的质检员**：写完自动审查（评分覆盖、图文核对），揪出 blocker 级问题。
 - 🔄 **随时打断，随时继续**：关掉电脑，明天回来说一句「继续这个项目」就能接着走。
 
-> **内测版（Alpha）**：当前版本由 `package.json.version` 单一来源驱动；Alpha / Beta / RC 由版本后缀自动识别，面板与 npm 徽章同步显示。
+> **内测版（Alpha）**：当前版本由 `package.json.version` 单一来源驱动；Alpha / Beta / RC 由版本后缀自动识别，面板与 README 徽章同步显示。
 
 ## 功能一览
 
@@ -87,26 +87,7 @@ https://github.com/scifmat/dsh-bidgenie
 
 安装后重启 DSH（或按面板提示加载），再打开一个工作区。
 
-### 方式 B：npm 包
-
-npm 包名：`dsh-bidgenie`；预发布版本使用 `alpha` dist-tag。
-
-在 DSH 插件面板/插件管理器中输入：
-
-```text
-dsh-bidgenie@alpha
-```
-
-或让 Agent 调用：
-
-```text
-action = install_bundle
-target = "dsh-bidgenie@alpha"
-```
-
-> 直接执行 `npm install dsh-bidgenie` 只会装到当前 Node 项目，不会注册 DSH bundle；请使用 DSH 的插件安装入口。
-
-### 方式 C：让 Agent 从 GitHub 安装
+### 方式 B：让 Agent 从 GitHub 安装
 
 在 DSH 会话里让 Agent 调用 `plugin_manager`：
 
@@ -115,7 +96,7 @@ action = install_bundle
 target = "https://github.com/scifmat/dsh-bidgenie"
 ```
 
-### 方式 D：本地目录安装
+### 方式 C：本地目录安装
 
 ```powershell
 git clone https://github.com/scifmat/dsh-bidgenie.git
