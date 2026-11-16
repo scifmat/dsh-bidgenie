@@ -1,7 +1,6 @@
 {
   "name": "dsh-bidgenie",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.0-alpha.0",
   "type": "module",
   "description": "标代精灵（BidGenie）DSH 插件：投标技术方案自动化。",
   "exports": {
@@ -45,5 +44,8 @@
   "homepage": "https://github.com/scifmat/dsh-bidgenie",
   "bugs": {
     "url": "https://github.com/scifmat/dsh-bidgenie/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

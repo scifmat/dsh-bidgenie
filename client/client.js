@@ -1,4 +1,4 @@
-﻿/**
+/**
  * dsh-bidgenie —— 标代精灵 · 左栏面板（Client half，M1）
  *
  * 纯动态模块（无构建）：由 DSH 的 Client ModuleLoader 加载。
@@ -322,6 +322,24 @@ window.__ModuleLoader__.load({
 
     function trimText(value) {
       return textOf(value).trim();
+    }
+
+    function versionStage(rawVersion) {
+      const value = trimText(rawVersion).toLowerCase();
+      if (!value) return '';
+      const suffix = value.includes('-') ? value.slice(value.indexOf('-') + 1) : '';
+      if (suffix.startsWith('alpha')) return 'Alpha';
+      if (suffix.startsWith('beta')) return 'Beta';
+      if (suffix.startsWith('rc')) return 'RC';
+      return 'Stable';
+    }
+
+    function displayVersion(rawVersion) {
+      const value = trimText(rawVersion);
+      if (!value) return '';
+      const base = value.replace(/^v/i, '').split('-')[0];
+      const stage = versionStage(value);
+      return 'v' + base + (stage && stage !== 'Stable' ? ' ' + stage : '');
     }
 
     function getPath(obj, path) {
@@ -2446,7 +2464,7 @@ window.__ModuleLoader__.load({
       }, [props.workspace, mounted]);
 
       const rawVersion = health.data && health.data.version ? trimText(health.data.version) : '';
-      const version = rawVersion ? (rawVersion.charAt(0) === 'v' ? rawVersion : 'v' + rawVersion) : 'v0.1.0';
+      const version = displayVersion(rawVersion) || '—';
       const hostVersion = health.data && health.data.hostVersion ? textOf(health.data.hostVersion) : '—';
 
       return h(
@@ -3924,6 +3942,7 @@ window.__ModuleLoader__.load({
       const [wsState, setWsState] = useState({ status: 'loading', list: [], error: null });
       const [workspace, setWorkspace] = useState(() => readStoredWorkspace());
       const [ready, setReady] = useState({ status: 'idle', error: null });
+      const [pluginVersion, setPluginVersion] = useState('');
       const [page, setPage] = useState('projects');
       const [returnTo, setReturnTo] = useState('projects');
       const [refreshKey, setRefreshKey] = useState(0);
@@ -4010,6 +4029,7 @@ window.__ModuleLoader__.load({
           .health(workspace)
           .then((data) => {
             if (!mounted.current) return;
+            if (data && data.version) setPluginVersion(data.version);
             if (data && data.initialized === false) {
               setReady({ status: 'uninitialized', error: null });
               return;
@@ -4167,7 +4187,7 @@ window.__ModuleLoader__.load({
             'span',
             { className: 'bgp-brand-title' },
             h('span', null, '标代精灵'),
-            h('span', { className: 'bgp-brand-version' }, 'v0.1.0 Alpha'),
+            h('span', { className: 'bgp-brand-version' }, displayVersion(pluginVersion)),
           ),
         ),
         h('div', { className: 'bgp-header-spacer' }),
