@@ -1,0 +1,121 @@
+{
+  "schemaVersion": "2.0",
+  "templateVersion": "3.0.0",
+  "templates": [
+    {
+      "id": "01",
+      "docClass": "common",
+      "fileName": "01-Basic-Information.md",
+      "title": "基础信息",
+      "path": "common/01-Basic-Information.md",
+      "expectedSections": [
+        "项目信息",
+        "资金与限价",
+        "保证金相关",
+        "投标方式与说明",
+        "时间与地点",
+        "组织单位与联系"
+      ]
+    },
+    {
+      "id": "02",
+      "docClass": "common",
+      "fileName": "02-Eligibility-Review.md",
+      "title": "资格审查",
+      "path": "common/02-Eligibility-Review.md",
+      "expectedSections": [
+        "投标人的资格要求",
+        "符合性审查",
+        "资格性审查"
+      ]
+    },
+    {
+      "id": "03",
+      "docClass": "common",
+      "fileName": "03-Invalid_Bid-Item.md",
+      "title": "无效投标项",
+      "path": "common/03-Invalid_Bid-Item.md",
+      "expectedSections": [
+        "废标情形",
+        "无效投标情形",
+        "不得存在的情形"
+      ]
+    },
+    {
+      "id": "04",
+      "docClass": "common",
+      "fileName": "04-Compilation-Requirements.md",
+      "title": "投标文件编制要求",
+      "path": "common/04-Compilation-Requirements.md",
+      "expectedSections": [
+        "投标文件格式",
+        "投标文件编制要求"
+      ]
+    },
+    {
+      "id": "05",
+      "docClass": "common",
+      "fileName": "05-Substantive-Response.md",
+      "title": "实质性应标资料",
+      "path": "common/05-Substantive-Response.md",
+      "expectedSections": [
+        "企业证书证明",
+        "拟派人员要求",
+        "业绩与车辆要求",
+        "书面承诺/声明",
+        "各信用平台查询截图",
+        "产品/服务厂商授权、第三方检测报告",
+        "其它实质性应标资料"
+      ]
+    },
+    {
+      "id": "06",
+      "docClass": "packages",
+      "fileName": "06-Procurement-Content.md",
+      "title": "采购内容",
+      "path": "packages/06-Procurement-Content.md",
+      "expectedSections": [
+        "标段信息",
+        "采购内容"
+      ]
+    },
+    {
+      "id": "07",
+      "docClass": "packages",
+      "fileName": "07-Evaluation-Criteria.md",
+      "title": "评审标准",
+      "path": "packages/07-Evaluation-Criteria.md",
+      "expectedSections": [
+        "评标办法",
+        "商务评分标准",
+        "技术评分标准",
+        "报价评分标准",
+        "分值合计"
+      ]
+    },
+    {
+      "id": "08",
+      "docClass": "packages",
+      "fileName": "08-Business-Requirements.md",
+      "title": "商务要求",
+      "path": "packages/08-Business-Requirements.md",
+      "expectedSections": [
+        "企业资质要求",
+        "人员资质要求",
+        "业绩要求",
+        "财务要求",
+        "服务要求",
+        "材料要求",
+        "付款方式"
+      ]
+    },
+    {
+      "id": "09",
+      "docClass": "packages",
+      "fileName": "09-Technical-Requirements.md",
+      "title": "技术服务要求",
+      "path": "packages/09-Technical-Requirements.md",
+      "expectedSections": []
+    }
+  ]
+}

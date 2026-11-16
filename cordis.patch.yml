@@ -1,0 +1,6 @@
+# BidGenie（标代精灵）bundle patch:
+# insert the Host half (`index.js`) as loader row `bidgenie`;
+# the Client half is loaded from package.json `dsh.client` (platform: web).
+- insert:
+    - id: bidgenie
+      name: 'dsh-bidgenie'

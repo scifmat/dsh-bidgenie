@@ -1,0 +1,49 @@
+{
+  "name": "dsh-bidgenie",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "标代精灵（BidGenie）DSH 插件：投标技术方案自动化。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client/",
+    "lib/",
+    "libexec/",
+    "skills/",
+    "templates/",
+    "cordis.patch.yml",
+    "assets/",
+    "tools/",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scifmat/dsh-bidgenie.git"
+  },
+  "homepage": "https://github.com/scifmat/dsh-bidgenie",
+  "bugs": {
+    "url": "https://github.com/scifmat/dsh-bidgenie/issues"
+  }
+}

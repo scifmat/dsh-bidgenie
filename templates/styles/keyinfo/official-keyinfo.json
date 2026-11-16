@@ -1,0 +1,94 @@
+{
+  "schemaVersion": "1.0",
+  "id": "official-keyinfo",
+  "name": "官方关键信息样式",
+  "label": "官方-关键信息导出样式",
+  "docType": "keyInfo",
+  "description": "关键信息汇总导出 v3：人类可读正文，无封面/目录/页眉页脚；标题黑体、正文宋体小四 12pt、1.5 倍行距，Word 原生多级自动编号；表格按内容自适应列宽、单元格水平/垂直居中、表头加粗灰底。；M8：全部文字 Word 自动色（auto），标题中文黑体/Arial、正文与题注表格中文宋体/Times New Roman（Windows 自带字体）。",
+  "basedOn": null,
+  "params": {
+    "fontFamily": "宋体",
+    "headingFontFamily": "黑体",
+    "fontLatin": "Times New Roman",
+    "fontSizePt": 12,
+    "lineSpacing": 1.5,
+    "headingSizesPt": {
+      "h1": 16,
+      "h2": 14,
+      "h3": 12,
+      "h4": 12,
+      "h5": 12,
+      "h6": 12
+    },
+    "pageMarginMm": {
+      "top": 25.4,
+      "bottom": 25.4,
+      "left": 31.8,
+      "right": 31.8
+    },
+    "headingNumbering": true,
+    "headingNumberingScheme": {
+      "h1": "第%1章",
+      "h2": "%1.%2",
+      "h3": "%1.%2.%3",
+      "h4": "%1.%2.%3.%4",
+      "h5": "%1.%2.%3.%4.%5",
+      "h6": "%1.%2.%3.%4.%5.%6"
+    },
+    "firstLineIndentChars": 2,
+    "bodyAlignment": "justify",
+    "title": {
+      "fontFamily": "黑体",
+      "fontSizePt": 18,
+      "bold": true,
+      "align": "center",
+      "spaceAfterPt": 6,
+      "fontLatin": "Arial",
+      "color": "auto"
+    },
+    "table": {
+      "autoFit": true,
+      "cellAlign": "center",
+      "cellVerticalAlign": "center",
+      "headerBold": true,
+      "headerShading": "D9D9D9",
+      "fontSizePt": 10.5,
+      "style": "Table Grid",
+      "minColumnWidthCm": 1.2,
+      "maxColumnWeight": 40,
+      "fontFamily": "宋体",
+      "fontLatin": "Times New Roman",
+      "color": "auto"
+    },
+    "captions": {
+      "tablePrefix": "表",
+      "figurePrefix": "图",
+      "fontSizePt": 10.5,
+      "align": "center",
+      "spaceBeforePt": 3,
+      "spaceAfterPt": 3,
+      "fontFamily": "宋体",
+      "fontLatin": "Times New Roman",
+      "color": "auto"
+    },
+    "captionPrefix": {
+      "table": "表",
+      "figure": "图"
+    },
+    "tableFontSizePt": 10.5,
+    "tableHeaderFill": "D9D9D9",
+    "tableHeaderBold": true,
+    "tableStyle": "Table Grid",
+    "headingFontLatin": "Arial",
+    "captionFontFamily": "宋体",
+    "captionFontLatin": "Times New Roman",
+    "tableFontFamily": "宋体",
+    "tableFontLatin": "Times New Roman",
+    "textColor": "auto",
+    "headingColor": "auto",
+    "captionColor": "auto",
+    "tableColor": "auto"
+  },
+  "createdAt": "2026-11-09T21:25:23+08:00",
+  "updatedAt": "2026-11-14T16:00:00+08:00"
+}

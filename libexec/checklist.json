@@ -1,0 +1,291 @@
+{
+  "schemaVersion": "1.0",
+  "checklistVersion": "1.0.0",
+  "hostVersionBaseline": "0.2.x",
+  "generatedFor": "M2",
+  "items": [
+    {
+      "id": "python_runtime",
+      "label": "运行环境",
+      "description": "Python 是否可用（≥3.10）",
+      "required": true,
+      "itemVersion": "1.0",
+      "check": "sys.version_info ≥ 3.10",
+      "remediation": "安装/修复 Python 后重试；不会自动装",
+      "degradeImpact": "",
+      "introducedIn": "M2",
+      "config": {
+        "minVersion": [
+          3,
+          10
+        ]
+      }
+    },
+    {
+      "id": "python_packages",
+      "label": "必要组件",
+      "description": "文档处理所需组件是否齐全",
+      "required": true,
+      "itemVersion": "1.0",
+      "check": "逐个 import 并比较版本（python-docx / Pillow / lxml 核心库）",
+      "remediation": "复制安装命令到终端执行后重试",
+      "degradeImpact": "",
+      "introducedIn": "M2",
+      "config": {
+        "modules": [
+          {
+            "name": "python-docx",
+            "import": "docx",
+            "version": "1.2.0"
+          },
+          {
+            "name": "Pillow",
+            "import": "PIL",
+            "version": "12.3.0"
+          },
+          {
+            "name": "lxml",
+            "import": "lxml",
+            "version": "6.1.3"
+          }
+        ],
+        "installTarget": "$DSH_HOME/data/bidgenie/pylibs/",
+        "installHint": "pip install --target <DSH_HOME>/data/bidgenie/pylibs -r libexec/requirements.txt"
+      }
+    },
+    {
+      "id": "pdf_libraries",
+      "label": "PDF 读取组件",
+      "description": "是否能读取 PDF 招标文件",
+      "required": false,
+      "itemVersion": "1.0",
+      "check": "逐个 import：PyMuPDF(fitz) / pymupdf4llm / pdfplumber",
+      "remediation": "复制安装命令后重试；否则只能用 Word 文件",
+      "degradeImpact": ".pdf 附件不可用（.docx 仍可用）",
+      "introducedIn": "M3",
+      "config": {
+        "modules": [
+          "fitz",
+          "pymupdf4llm",
+          "pdfplumber"
+        ],
+        "primary": "fitz",
+        "installHint": "pip install --target <DSH_HOME>/data/bidgenie/pylibs PyMuPDF==1.24.14 pdfplumber pymupdf4llm"
+      }
+    },
+    {
+      "id": "word_com",
+      "label": "旧格式转换",
+      "description": "是否能自动转换 .doc 旧格式",
+      "required": false,
+      "itemVersion": "1.0",
+      "check": "Windows：pywin32 可导入 + 本机存在 Word 可执行文件",
+      "remediation": "安装 Word 或把文件另存为 .docx",
+      "degradeImpact": ".doc 无法自动转换；TOC 域需用户 F9",
+      "introducedIn": "M3",
+      "config": {
+        "modules": [
+          "win32com.client"
+        ],
+        "wordExeNames": [
+          "WINWORD.EXE"
+        ]
+      }
+    },
+    {
+      "id": "scripts_integrity",
+      "label": "插件脚本完整性",
+      "description": "插件自带脚本是否完整可用（含 M3 转换/回填/校验/导出）",
+      "required": true,
+      "itemVersion": "1.3",
+      "check": "枚举 libexec/*.py + compileall + 逐脚本 --selftest",
+      "remediation": "重新安装/更新插件后重试",
+      "degradeImpact": "",
+      "introducedIn": "M2",
+      "config": {
+        "scripts": [
+          "bg_workspace.py",
+          "bg_bidder.py",
+          "bg_env_check.py",
+          "bg_state.py",
+          "bg_convert.py",
+          "bg_extract_validate.py",
+          "bg_export_docx.py",
+          "bg_project.py"
+        ],
+        "runSelftest": true,
+        "selftestTimeoutSec": 60
+      }
+    },
+    {
+      "id": "templates_integrity",
+      "label": "模板完整性",
+      "description": "写作模板是否完整",
+      "required": true,
+      "itemVersion": "1.0",
+      "check": "读取 templates/extraction/_template-manifest.json 与 9 个模板",
+      "remediation": "重新安装/更新插件后重试",
+      "degradeImpact": "",
+      "introducedIn": "M3",
+      "deferredUntil": "M3",
+      "config": {
+        "manifest": "templates/extraction/_template-manifest.json",
+        "templatesDir": "templates/extraction",
+        "expectedTemplates": 9,
+        "pendingMilestone": "M3"
+      }
+    },
+    {
+      "id": "fonts",
+      "label": "中文字体",
+      "description": "导出用的中文字体是否可用",
+      "required": false,
+      "itemVersion": "1.0",
+      "check": "枚举系统中文字体（宋体/黑体）、等宽字体",
+      "remediation": "安装宋体/黑体；否则导出字形会有差异",
+      "degradeImpact": "导出字形可能与官方样式不同",
+      "introducedIn": "M3",
+      "config": {
+        "chinese": [
+          "simsun.ttc",
+          "simhei.ttf",
+          "msyh.ttc"
+        ],
+        "monospace": [
+          "consola.ttf",
+          "consolas.ttf",
+          "cour.ttf"
+        ]
+      }
+    },
+    {
+      "id": "external_converters",
+      "label": "外部转换工具",
+      "description": "是否装了 Word/LibreOffice 等转换工具",
+      "required": false,
+      "itemVersion": "1.0",
+      "check": "检测 Word COM / soffice / pandoc，至少一种 .doc 转换路径可用",
+      "remediation": "可选：安装后 .doc 才能自动转换",
+      "degradeImpact": ".doc 无法自动转换，需用户另存 docx",
+      "introducedIn": "M3",
+      "config": {
+        "candidates": [
+          "winword",
+          "soffice",
+          "pandoc"
+        ]
+      }
+    },
+    {
+      "id": "browser_renderer",
+      "label": "图表渲染",
+      "description": "能否把流程图渲染成图片",
+      "required": false,
+      "itemVersion": "1.0",
+      "check": "检测 Chrome/Edge + 内置 assets/mermaid/mermaid.min.js",
+      "remediation": "安装 Chrome/Edge；否则图表降级为简化图",
+      "degradeImpact": "mermaid 图降级为源码+简化图",
+      "introducedIn": "M3",
+      "config": {
+        "browsers": [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+          "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+        ],
+        "mermaidAsset": "assets/mermaid/mermaid.min.js"
+      }
+    },
+    {
+      "id": "workspace_writable",
+      "label": "工作区可写",
+      "description": "能不能往这个文件夹写数据",
+      "required": true,
+      "itemVersion": "1.0",
+      "check": "在 dsh/ 写临时文件并删除（dsh/ 不存在时写工作区根）",
+      "remediation": "检查文件夹权限或换工作区",
+      "degradeImpact": "",
+      "introducedIn": "M2",
+      "config": {}
+    },
+    {
+      "id": "disk_space",
+      "label": "磁盘空间",
+      "description": "剩余空间是否 ≥ 500 MB",
+      "required": true,
+      "itemVersion": "1.0",
+      "check": "shutil.disk_usage 检查可用空间",
+      "remediation": "清理磁盘或换工作区",
+      "degradeImpact": "",
+      "introducedIn": "M2",
+      "config": {
+        "minFreeMB": 500
+      }
+    },
+    {
+      "id": "path_length",
+      "label": "路径长度",
+      "description": "工作区路径是否过深（Windows ≤240）",
+      "required": false,
+      "itemVersion": "1.0",
+      "check": "计算工作区路径 + 预期最深路径",
+      "remediation": "建议把工作区放到较浅的目录",
+      "degradeImpact": "命名截断策略生效，可读性下降",
+      "introducedIn": "M3",
+      "config": {
+        "maxLenWindows": 240,
+        "estimatedDeepestSuffix": "/packages/package-1-20261108120000/chapters/1-3-1-示例章节标题最多四十字符.md"
+      }
+    },
+    {
+      "id": "skill_service",
+      "label": "技能服务",
+      "description": "插件技能是否正常加载",
+      "required": true,
+      "itemVersion": "1.0",
+      "check": "plugin/skills/{bidgenie,bg-bidder,bg-init}/SKILL.md 存在且 frontmatter 可解析（Host 注册由 M2-P3 验收覆盖）",
+      "remediation": "重启 DSH / 重新启用插件",
+      "degradeImpact": "",
+      "introducedIn": "M2",
+      "config": {
+        "skills": [
+          "bidgenie",
+          "bg-bidder",
+          "bg-init"
+        ]
+      }
+    },
+    {
+      "id": "state_service",
+      "label": "状态服务",
+      "description": "进度记录服务是否可用",
+      "required": true,
+      "itemVersion": "1.0",
+      "check": "运行 bg_state.py --selftest --json",
+      "remediation": "重启 DSH 后重试",
+      "degradeImpact": "",
+      "introducedIn": "M2",
+      "config": {
+        "script": "bg_state.py",
+        "selftestTimeoutSec": 60
+      }
+    },
+    {
+      "id": "host_version",
+      "label": "宿主版本兼容",
+      "description": "当前 DSH 版本是否经过验证（Host 自动写入 BIDGENIE_HOST_VERSION）",
+      "required": false,
+      "itemVersion": "1.0",
+      "check": "读取 BIDGENIE_HOST_VERSION / DSH_HOST_VERSION，与基线 0.2.x 比较；未提供时 skipped 并提示配置方式",
+      "remediation": "无需处理：插件会自动从 DSH app.asar/package.json 读取版本；如未取到，可在启动 DSH 前设置 BIDGENIE_HOST_VERSION=<DSH 版本>",
+      "degradeImpact": "可能出现契约差异",
+      "introducedIn": "M2",
+      "config": {
+        "env": [
+          "BIDGENIE_HOST_VERSION",
+          "DSH_HOST_VERSION"
+        ]
+      }
+    }
+  ]
+}
