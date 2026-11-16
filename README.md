@@ -247,6 +247,23 @@ $env:BIDGENIE_PIP_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple" # 环境�
 **内测版遇到问题怎么反馈？**  
 到 [Issues](https://github.com/scifmat/dsh-bidgenie/issues) 提交，附上插件版本、DSH 宿主版本和复现步骤；不要粘贴证件号、账号等敏感信息。
 
+## 开发与发布同步
+
+开发以 `D:\ProJects\bidgenie-flow\plugin` 为唯一源；本仓库只保留运行时代码、技能、模板、资产、README/LICENSE/tools，不包含 `pylibs/`、`tests/`、开发文档或验收产物。
+
+同步运行时代码到本仓库：
+
+```powershell
+# 只检查差异
+powershell -ExecutionPolicy Bypass -File tools\sync-from-dev.ps1 -Check
+
+# 同步 + 提交 + 推送
+powershell -ExecutionPolicy Bypass -File tools\sync-from-dev.ps1 `
+  -Commit -Message "fix: ..." -Push
+```
+
+同步脚本会保留本仓库独有的 `README.md`、`LICENSE`、`package.json`、`tools/` 和封面图；不要在本仓库里直接改运行时代码，否则会与开发源产生双份维护。
+
 ## 许可
 
 - 许可：**PolyForm Noncommercial 1.0.0**，仅限非商业使用；商业授权需另行联系版权方。全文见 [LICENSE](LICENSE)。
