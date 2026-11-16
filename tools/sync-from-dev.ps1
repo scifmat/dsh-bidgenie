@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     BidGenie 开发源 → GitHub 发布仓库的同步工具。
