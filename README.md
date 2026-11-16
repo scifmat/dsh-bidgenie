@@ -8,7 +8,7 @@
 
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/dsh-bidgenie"><img src="https://img.shields.io/npm/v/dsh-bidgenie?include_prereleases&label=version&color=EC661A&style=flat-square" alt="version"></a>
+  <a href="https://github.com/scifmat/dsh-bidgenie/blob/main/package.json"><img src="https://img.shields.io/github/package-json/v/scifmat/dsh-bidgenie?label=version&color=EC661A&style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%2B-0B1220?style=flat-square" alt="Windows 10+">
   <img src="https://img.shields.io/badge/host-DSH%200.2.x-4D6BFE?style=flat-square" alt="DSH 0.2.x">
   <img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-8A9AB8?style=flat-square" alt="PolyForm Noncommercial">
