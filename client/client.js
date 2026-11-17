@@ -2394,6 +2394,19 @@ window.__ModuleLoader__.load({
               { className: 'bgp-muted', style: { flex: '1 1 240px', fontSize: 12, lineHeight: 1.5 } },
               '自动修复只装依赖到用户数据目录，不装系统软件/不提权。可自动修复的项默认勾选；需确认/手动项不会自动执行。',
             ),
+            h(
+              Button,
+              {
+                variant: 'text',
+                onClick: () =>
+                  props.onCopy(
+                    '[BidGenie] action=repair-env\n' +
+                      '请先运行 bg_env_repair.py --plan 查看环境问题，按 auto/assisted/manual/pluginDefect 分组说明；' +
+                      '只自动修复我确认的 auto 项，修复后用 bg_env_check --verify 复检，并汇报修复前后结果、剩余项和日志路径。',
+                  ),
+              },
+              '复制修复提示词',
+            ),
             h(Button, { variant: 'text', onClick: props.onCancel }, '取消'),
             props.error
               ? h(Button, { variant: 'secondary', onClick: props.onRetryPlan }, '重试生成计划')
