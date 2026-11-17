@@ -771,7 +771,12 @@ window.__ModuleLoader__.load({
       '.bgp-input:focus-visible,.bgp-textarea:focus-visible,.bgp-select:focus-visible{outline:2px solid var(--bgp-focus);outline-offset:0;border-color:var(--bgp-brand);}',
       '.bgp-input[disabled],.bgp-textarea[disabled],.bgp-select[disabled]{opacity:.6;cursor:not-allowed;}',
       '.bgp-input.is-error,.bgp-textarea.is-error,.bgp-select.is-error{border-color:var(--bgp-err);}',
-      '.bgp-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;}',
+      '.bgp-form-group{margin-top:18px;}',
+    '.bgp-form-group:first-child{margin-top:0;}',
+    '.bgp-form-group-head{display:flex;align-items:baseline;gap:8px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--bgp-line);}',
+    '.bgp-form-group-title{font-size:13px;font-weight:600;color:var(--bgp-fg);}',
+    '.bgp-form-group-desc{font-size:12px;color:var(--bgp-fg3);}',
+    '.bgp-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;}',
       '.bgp-form-grid .bgp-span2{grid-column:1 / -1;}',
       '@media (max-width:720px){.bgp-form-grid{grid-template-columns:minmax(0,1fr);}}',
 
@@ -1477,27 +1482,35 @@ window.__ModuleLoader__.load({
     // ── 基本信息表单模型（扁平化，便于受控输入） ──
 
     const BASIC_FIELDS = [
-      { key: 'displayName', path: ['displayName'], label: '名称', kind: 'text', required: true, placeholder: '公司名称或个人姓名', hint: '列表和方案里显示的名字' },
-      { key: 'bidderType', path: ['bidderType'], label: '类型', kind: 'select', required: true, options: BIDDER_TYPES, hint: '法人（公司）或自然人（个人）' },
-      { key: 'legalName', path: ['legalName'], label: '公司全称 / 真实姓名', kind: 'text', placeholder: '与营业执照或个人证件一致' },
-      { key: 'unifiedSocialCreditCode', path: ['unifiedSocialCreditCode'], label: '统一社会信用代码', kind: 'text', sensitive: true, placeholder: '18 位代码' },
-      { key: 'legalRepresentative', path: ['legalRepresentative'], label: '法定代表人', kind: 'text', sensitive: true },
-      { key: 'idType', path: ['idType'], label: '证件类型', kind: 'text', placeholder: '如：居民身份证', onlyFor: 'natural_person' },
-      { key: 'idNumber', path: ['idNumber'], label: '证件号码', kind: 'text', sensitive: true, onlyFor: 'natural_person' },
-      { key: 'contactName', path: ['contact', 'name'], label: '联系人', kind: 'text' },
-      { key: 'contactTitle', path: ['contact', 'title'], label: '职务', kind: 'text' },
-      { key: 'contactPhone', path: ['contact', 'phone'], label: '联系电话', kind: 'text', sensitive: true, inputMode: 'tel' },
-      { key: 'contactEmail', path: ['contact', 'email'], label: '电子邮箱', kind: 'text', inputMode: 'email' },
-      { key: 'registeredAddress', path: ['registeredAddress'], label: '注册地址', kind: 'text', span: true },
-      { key: 'officeAddress', path: ['officeAddress'], label: '办公地址', kind: 'text', span: true },
-      { key: 'bankAccountName', path: ['bank', 'accountName'], label: '开户名称', kind: 'text', onlyFor: 'legal_entity' },
-      { key: 'bankName', path: ['bank', 'bankName'], label: '开户行', kind: 'text', onlyFor: 'legal_entity' },
-      { key: 'bankAccountNo', path: ['bank', 'accountNo'], label: '银行账号', kind: 'text', sensitive: true, onlyFor: 'legal_entity' },
-      { key: 'capital', path: ['capital'], label: '注册资本', kind: 'text', placeholder: '如：5000万元' },
-      { key: 'establishedDate', path: ['establishedDate'], label: '成立日期', kind: 'date' },
-      { key: 'businessScope', path: ['businessScope'], label: '经营范围', kind: 'textarea', span: true },
-      { key: 'writable', path: ['writable'], label: '允许写进方案', kind: 'switch', hint: '关闭后，方案不会引用这家公司或个人的资料' },
-      { key: 'tagsText', path: ['tags'], label: '标签', kind: 'tags', span: true, hint: '用逗号分隔，例如：系统集成，运维服务' },
+      { key: 'displayName', path: ['displayName'], label: '名称', kind: 'text', required: true, placeholder: '公司名称或个人姓名', hint: '列表和方案里显示的名字', group: 'identity' },
+      { key: 'bidderType', path: ['bidderType'], label: '类型', kind: 'select', required: true, options: BIDDER_TYPES, hint: '法人（公司）或自然人（个人）', group: 'identity' },
+      { key: 'legalName', path: ['legalName'], label: '公司全称 / 真实姓名', kind: 'text', placeholder: '与营业执照或个人证件一致', group: 'identity' },
+      { key: 'unifiedSocialCreditCode', path: ['unifiedSocialCreditCode'], label: '统一社会信用代码', kind: 'text', sensitive: true, placeholder: '18 位代码', group: 'identity' },
+      { key: 'legalRepresentative', path: ['legalRepresentative'], label: '法定代表人', kind: 'text', sensitive: true, onlyFor: 'legal_entity', group: 'identity' },
+      { key: 'idType', path: ['idType'], label: '证件类型', kind: 'text', placeholder: '如：居民身份证', onlyFor: 'natural_person', group: 'identity' },
+      { key: 'idNumber', path: ['idNumber'], label: '证件号码', kind: 'text', sensitive: true, onlyFor: 'natural_person', group: 'identity' },
+      { key: 'businessScope', path: ['businessScope'], label: '经营范围', kind: 'textarea', span: true, group: 'identity' },
+      { key: 'contactName', path: ['contact', 'name'], label: '联系人', kind: 'text', group: 'contact' },
+      { key: 'contactTitle', path: ['contact', 'title'], label: '联系人职务', kind: 'text', hint: '联系人的职务，不是法定代表人', group: 'contact' },
+      { key: 'contactPhone', path: ['contact', 'phone'], label: '联系电话', kind: 'text', sensitive: true, inputMode: 'tel', group: 'contact' },
+      { key: 'contactEmail', path: ['contact', 'email'], label: '电子邮箱', kind: 'text', inputMode: 'email', group: 'contact' },
+      { key: 'registeredAddress', path: ['registeredAddress'], label: '注册地址', kind: 'text', span: true, group: 'address' },
+      { key: 'officeAddress', path: ['officeAddress'], label: '办公地址', kind: 'text', span: true, group: 'address' },
+      { key: 'capital', path: ['capital'], label: '注册资本', kind: 'text', placeholder: '如：5000万元', group: 'finance' },
+      { key: 'establishedDate', path: ['establishedDate'], label: '成立日期', kind: 'date', group: 'finance' },
+      { key: 'bankAccountName', path: ['bank', 'accountName'], label: '开户名称', kind: 'text', onlyFor: 'legal_entity', group: 'finance' },
+      { key: 'bankName', path: ['bank', 'bankName'], label: '开户行', kind: 'text', onlyFor: 'legal_entity', group: 'finance' },
+      { key: 'bankAccountNo', path: ['bank', 'accountNo'], label: '银行账号', kind: 'text', sensitive: true, onlyFor: 'legal_entity', group: 'finance' },
+      { key: 'writable', path: ['writable'], label: '允许写进方案', kind: 'switch', hint: '关闭后，方案不会引用这家公司或个人的资料', group: 'usage' },
+      { key: 'tagsText', path: ['tags'], label: '标签', kind: 'tags', span: true, hint: '用逗号分隔，例如：系统集成，运维服务', group: 'usage' },
+    ];
+
+    const BASIC_GROUPS = [
+      { key: 'identity', title: '主体信息', desc: '名称、类型、证照与经营范围' },
+      { key: 'contact', title: '联系人', desc: '日常对接与方案沟通' },
+      { key: 'address', title: '地址', desc: '注册地址与办公地址' },
+      { key: 'finance', title: '资本与银行', desc: '法人主体适用；自然人可留空' },
+      { key: 'usage', title: '方案引用', desc: '控制资料是否进入方案及标签' },
     ];
 
     function splitTags(value) {
@@ -3967,21 +3980,39 @@ window.__ModuleLoader__.load({
           tab === 'basic'
             ? h(
                 'div',
-                { className: 'bgp-form-grid', style: { marginTop: 12 } },
-                visibleBasicFields.map((field) =>
-                  h(
-                    Field,
-                    {
-                      key: field.key,
-                      label: field.label,
-                      required: field.required,
-                      span: field.span,
-                      hint: field.hint,
-                      error: errors[field.key],
-                    },
-                    renderBasicControl(field),
-                  ),
-                ),
+                { style: { marginTop: 12 } },
+                BASIC_GROUPS.map((group) => {
+                  const fields = visibleBasicFields.filter((field) => (field.group || 'identity') === group.key);
+                  if (!fields.length) return null;
+                  return h(
+                    'div',
+                    { key: group.key, className: 'bgp-form-group' },
+                    h(
+                      'div',
+                      { className: 'bgp-form-group-head' },
+                      h('div', { className: 'bgp-form-group-title' }, group.title),
+                      group.desc ? h('div', { className: 'bgp-form-group-desc' }, group.desc) : null,
+                    ),
+                    h(
+                      'div',
+                      { className: 'bgp-form-grid' },
+                      fields.map((field) =>
+                        h(
+                          Field,
+                          {
+                            key: field.key,
+                            label: field.label,
+                            required: field.required,
+                            span: field.span,
+                            hint: field.hint,
+                            error: errors[field.key],
+                          },
+                          renderBasicControl(field),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
               )
             : null,
           tab === 'certificates' && isEdit
@@ -4565,7 +4596,14 @@ window.__ModuleLoader__.load({
     // 应用外壳
     // ────────────────────────────────────────────────────────────
 
-    function Panel() {
+    function Panel(props) {
+      const activeWorkspace = props && typeof props.useSessions === 'function'
+        ? props.useSessions((state) => {
+            const byId = state && state.byId ? state.byId : {};
+            const current = Object.values(byId).find((session) => ((session && session.retainedBy && session.retainedBy.mainView) || 0) > 0);
+            return current && typeof current.cwd === 'string' ? current.cwd : '';
+          })
+        : '';
       const { toasts, notify } = useToasts();
       const { confirm, dialog } = useConfirmer();
       const copyWithToast = useClipboard(notify);
@@ -4614,6 +4652,11 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (workspace) storeWorkspace(workspace);
       }, [workspace]);
+
+      useEffect(() => {
+        if (!activeWorkspace) return;
+        setWorkspace((prev) => (prev === activeWorkspace ? prev : activeWorkspace));
+      }, [activeWorkspace, wsState.status]);
 
       const applyProbeResults = (results) => {
         if (!mounted.current) return;
