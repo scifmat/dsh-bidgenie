@@ -1491,7 +1491,7 @@ window.__ModuleLoader__.load({
       { key: 'idNumber', path: ['idNumber'], label: '证件号码', kind: 'text', sensitive: true, onlyFor: 'natural_person', group: 'identity' },
       { key: 'businessScope', path: ['businessScope'], label: '经营范围', kind: 'textarea', span: true, group: 'identity' },
       { key: 'contactName', path: ['contact', 'name'], label: '联系人', kind: 'text', group: 'contact' },
-      { key: 'contactTitle', path: ['contact', 'title'], label: '联系人职务', kind: 'text', hint: '联系人的职务，不是法定代表人', group: 'contact' },
+      { key: 'contactTitle', path: ['contact', 'title'], label: '联系人职务', kind: 'text', group: 'contact' },
       { key: 'contactPhone', path: ['contact', 'phone'], label: '联系电话', kind: 'text', sensitive: true, inputMode: 'tel', group: 'contact' },
       { key: 'contactEmail', path: ['contact', 'email'], label: '电子邮箱', kind: 'text', inputMode: 'email', group: 'contact' },
       { key: 'registeredAddress', path: ['registeredAddress'], label: '注册地址', kind: 'text', span: true, group: 'address' },
@@ -1862,48 +1862,57 @@ window.__ModuleLoader__.load({
           h('span', { className: 'bgp-small', style: { fontWeight: 600, color: 'var(--bgp-fg)' } }, '第 ' + (props.index + 1) + ' 项'),
           titleValue ? h('span', { className: 'bgp-muted' }, '· ' + titleValue) : null,
           props.statusChip ? h('span', { style: { marginLeft: 'auto' } }, props.statusChip) : h('span', { style: { marginLeft: 'auto' } }),
+          h(Button, { size: 'sm', variant: 'text', onClick: props.onToggle }, props.expanded ? '收起' : '展开'),
           h(Button, { size: 'sm', variant: 'text', onClick: props.onRemove }, '删除'),
         ),
-        fields.map((field) =>
-          h(
-            Field,
-            {
-              key: field.key,
-              label: field.label,
-              required: field.required,
-              span: field.span,
-              hint: field.hint,
-            },
-            field.kind === 'select'
-              ? h(Select, {
-                  value: props.row[field.key],
-                  options: field.options,
-                  onChange: (value) => props.onChange(field.key, value),
-                })
-              : field.kind === 'date'
-                ? h(TextInput, {
-                    type: 'date',
-                    value: props.row[field.key],
-                    onChange: (value) => props.onChange(field.key, value),
-                  })
-                : field.kind === 'textarea'
-                  ? h(TextArea, { value: props.row[field.key], onChange: (value) => props.onChange(field.key, value) })
-                  : h(TextInput, {
+        props.expanded
+          ? fields.map((field) =>
+              h(
+                Field,
+                {
+                  key: field.key,
+                  label: field.label,
+                  required: field.required,
+                  span: field.span,
+                  hint: field.hint,
+                },
+                field.kind === 'select'
+                  ? h(Select, {
                       value: props.row[field.key],
-                      placeholder: field.placeholder,
+                      options: field.options,
                       onChange: (value) => props.onChange(field.key, value),
-                    }),
-          ),
-        ),
+                    })
+                  : field.kind === 'date'
+                    ? h(TextInput, {
+                        type: 'date',
+                        value: props.row[field.key],
+                        onChange: (value) => props.onChange(field.key, value),
+                      })
+                    : field.kind === 'textarea'
+                      ? h(TextArea, { value: props.row[field.key], onChange: (value) => props.onChange(field.key, value) })
+                      : h(TextInput, {
+                          value: props.row[field.key],
+                          placeholder: field.placeholder,
+                          onChange: (value) => props.onChange(field.key, value),
+                        }),
+              ),
+            )
+          : null,
       );
     }
 
     function RowList(props) {
       const rows = asArray(props.rows);
       const fields = props.fields;
+      const [expandedKeys, setExpandedKeys] = useState([]);
+      const isExpanded = (key) => expandedKeys.indexOf(key) >= 0;
+      const toggleRow = (key) => {
+        setExpandedKeys((prev) => (prev.indexOf(key) >= 0 ? prev.filter((item) => item !== key) : prev.concat([key])));
+      };
       const addRow = () => {
         const row = makeRow(fields, props.prefix);
         if (props.createRow) props.createRow(row);
+        setExpandedKeys(row.__key ? [row.__key] : []);
         props.onChange(rows.concat([row]));
       };
       return h(
@@ -1930,6 +1939,8 @@ window.__ModuleLoader__.load({
                 row: row,
                 fields: fields,
                 statusChip: props.renderStatus ? props.renderStatus(row) : null,
+                expanded: isExpanded(row.__key),
+                onToggle: () => toggleRow(row.__key),
                 onChange: (fieldKey, value) => {
                   const next = rows.slice();
                   const updated = Object.assign({}, row);
@@ -1938,6 +1949,7 @@ window.__ModuleLoader__.load({
                   props.onChange(next);
                 },
                 onRemove: () => {
+                  setExpandedKeys((prev) => prev.filter((item) => item !== row.__key));
                   const next = rows.slice();
                   next.splice(index, 1);
                   props.onChange(next);
