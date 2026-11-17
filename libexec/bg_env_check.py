@@ -266,20 +266,28 @@ def check_python_packages(ctx: Mapping[str, Any]) -> dict[str, Any]:
     missing: list[str] = []
     mismatched: list[str] = []
     errors: dict[str, dict[str, str]] = {}
+    module_details: dict[str, dict[str, str]] = {}
     deep_imports = {"docx": "docx.api", "PIL": "PIL.Image", "lxml": "lxml.etree"}
     deep_checked: dict[str, str] = {}
+    active = deps.active_pylibs()
     for module in config.get("modules") or []:
         if not isinstance(module, Mapping):
             continue
         import_name = str(module.get("import") or "")
         display = str(module.get("name") or import_name)
         expected = str(module.get("version") or "")
+        policy = str(module.get("versionPolicy") or "min")
         try:
-            installed = _module_version(import_name)
+            imported = importlib.import_module(import_name)
+            installed = str(getattr(imported, "__version__", "") or "")
         except Exception as exc:  # noqa: BLE001 - 任意导入失败都视为缺失
             missing.append(f"{display}（import {import_name}）")
             errors[import_name] = {"type": type(exc).__name__, "message": str(exc), "module": str(getattr(exc, "name", "") or import_name)}
+            module_details[display] = {"import": import_name, "expected": expected, "policy": policy, "installed": "", "path": "", "source": "missing"}
             continue
+        module_file = str(getattr(imported, "__file__", "") or "")
+        module_source = "data-pylibs" if active["path"] and module_file.startswith(active["path"]) else "system"
+        module_details[display] = {"import": import_name, "expected": expected, "policy": policy, "installed": installed, "path": module_file, "source": module_source}
         deep_name = deep_imports.get(import_name)
         if deep_name:
             try:
@@ -292,20 +300,22 @@ def check_python_packages(ctx: Mapping[str, Any]) -> dict[str, Any]:
         if expected and installed:
             parsed_installed = _parse_version(installed)
             parsed_expected = _parse_version(expected)
-            if parsed_installed is not None and parsed_expected is not None and parsed_installed != parsed_expected:
-                mismatched.append(f"{display} 需要 {expected}，实际 {installed}")
+            if parsed_installed is not None and parsed_expected is not None:
+                if policy == "exact" and parsed_installed != parsed_expected:
+                    mismatched.append(f"{display} 需要 exact {expected}，实际 {installed}")
+                elif policy != "exact" and parsed_installed < parsed_expected:
+                    mismatched.append(f"{display} 需要 >= {expected}，实际 {installed}")
     problems = missing + mismatched + [f"{key} 深导入失败" for key, value in deep_checked.items() if value != "ok"]
-    active = deps.active_pylibs()
     if problems:
         hint = config.get("installHint")
-        detail: dict[str, Any] = {"found": found, "missing": missing, "mismatched": mismatched, "errors": errors, "deepImports": deep_checked, "pylibs": active["path"], "pylibsSource": active["source"]}
+        detail: dict[str, Any] = {"found": found, "missing": missing, "mismatched": mismatched, "errors": errors, "deepImports": deep_checked, "modules": module_details, "pylibs": active["path"], "pylibsSource": active["source"]}
         if hint:
             detail["installHint"] = hint
         return _result(STATUS_FAILED, "；".join(problems), detail)
     return _result(
         STATUS_PASSED,
         " / ".join(f"{name} {version}" for name, version in found.items()) + "（深导入 ok）",
-        {"found": found, "missing": [], "mismatched": [], "errors": errors, "deepImports": deep_checked, "pylibs": active["path"], "pylibsSource": active["source"]},
+        {"found": found, "missing": [], "mismatched": [], "errors": errors, "deepImports": deep_checked, "modules": module_details, "pylibs": active["path"], "pylibsSource": active["source"]},
     )
 
 
@@ -401,6 +411,22 @@ def _scan_bom(path: Path) -> bool:
         return False
 
 
+def _extract_last_json(text: str) -> Any:
+    """容错提取 stdout 中最后一个完整 JSON 对象（第三方 import 可能打印横幅）。"""
+    decoder = json.JSONDecoder()
+    last: Any = None
+    for index, char in enumerate(text or ""):
+        if char != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            last = value
+    return last
+
+
 def check_scripts_integrity(ctx: Mapping[str, Any]) -> dict[str, Any]:
     """scripts_integrity：动态发现 libexec/bg_*.py + 编译/自检 + BOM 扫描（新增脚本自动纳入）。"""
     config = ctx["item"].get("config") or {}
@@ -412,6 +438,7 @@ def check_scripts_integrity(ctx: Mapping[str, Any]) -> dict[str, Any]:
     selftest_timeout = float(config.get("selftestTimeoutSec") or SCRIPT_SELFTEST_TIMEOUT_SEC)
     checked: list[str] = []
     problems: list[str] = []
+    problem_details: list[dict[str, Any]] = []
     skipped_no_selftest: list[str] = []
     for name in scripts:
         script_path = _SCRIPT_DIR / name
@@ -444,15 +471,25 @@ def check_scripts_integrity(ctx: Mapping[str, Any]) -> dict[str, Any]:
             try:
                 payload = json.loads(completed.stdout)
             except json.JSONDecodeError:
-                payload = None
+                payload = _extract_last_json(completed.stdout)
             if completed.returncode != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
                 problems.append(f"{name} --selftest 未通过（exit={completed.returncode}）")
+                problem_details.append(
+                    {
+                        "script": name,
+                        "exitCode": completed.returncode,
+                        "payload": payload if isinstance(payload, dict) else None,
+                        "stdoutTail": (completed.stdout or "")[-800:],
+                        "stderrTail": (completed.stderr or "")[-800:],
+                        "cause": "selftest_json_broken" if payload is None and completed.stdout.strip() else "selftest_failed",
+                    }
+                )
                 continue
         elif run_selftest:
             skipped_no_selftest.append(name)
         checked.append(name)
     if problems:
-        return _result(STATUS_FAILED, "；".join(problems), {"checked": checked, "problems": problems, "discovered": scripts, "pluginHash": plugin_hash})
+        return _result(STATUS_FAILED, "；".join(problems), {"checked": checked, "problems": problems, "problemDetails": problem_details, "discovered": scripts, "pluginHash": plugin_hash, "cause": "selftest_json_broken" if problem_details and all(item.get("cause") == "selftest_json_broken" for item in problem_details) else "script_selftest_failed"})
     return _result(
         STATUS_PASSED,
         f"{len(checked)}/{len(scripts)} 脚本动态发现、无 BOM、可编译、自检通过",
@@ -1042,6 +1079,49 @@ def build_env_check_document(
 # ---------------------------------------------------------------------------
 # 报告
 # ---------------------------------------------------------------------------
+_REPAIR_ACTION_BY_ITEM = {
+    "python_packages": "install-core-packages",
+    "pdf_libraries": "install-pdf-libraries",
+    "word_com": "install-pywin32",
+}
+_MANUAL_ITEMS = {"workspace_writable", "disk_space", "path_length", "fonts"}
+_ASSISTED_ITEMS = {"browser_renderer"}
+_PLUGIN_DEFECT_ITEMS = {"scripts_integrity", "templates_integrity", "skill_service", "state_service"}
+
+
+def failure_diagnosis(item_id: str, detail: Mapping[str, Any] | None) -> dict[str, Any]:
+    """失败项 cause/causeDetail/remediable/repairAction 映射（env-check 与 repair plan 共用）。"""
+    detail = detail or {}
+    errors = detail.get("errors") if isinstance(detail.get("errors"), Mapping) else {}
+    binary = detail.get("binaryIntegrity") if isinstance(detail.get("binaryIntegrity"), Mapping) else {}
+    if item_id == "scripts_integrity":
+        cause = "selftest_json_broken" if detail.get("cause") == "selftest_json_broken" else "script_selftest_failed"
+        return {"cause": cause, "causeDetail": "脚本自检输出污染/JSON 不完整，不是依赖缺失", "remediable": "plugin_defect", "repairAction": ""}
+    if item_id in _PLUGIN_DEFECT_ITEMS:
+        return {"cause": "plugin_defect", "causeDetail": str(detail.get("problems") or detail.get("missing") or "")[:300], "remediable": "plugin_defect", "repairAction": ""}
+    if item_id in _MANUAL_ITEMS:
+        return {"cause": "environment_manual", "causeDetail": "需要用户/运维手动处理（目录权限/磁盘/字体/路径）", "remediable": "manual", "repairAction": ""}
+    if item_id in _ASSISTED_ITEMS:
+        return {"cause": "browser_missing_or_render_failed", "causeDetail": str(detail.get("problems") or "")[:300], "remediable": "assisted", "repairAction": ""}
+    if item_id in _REPAIR_ACTION_BY_ITEM:
+        if binary.get("ok") is False or (binary and not binary.get("binaryCount")):
+            cause = "pylibs_binary_missing"
+        elif errors:
+            cause = "import_error"
+        elif detail.get("mismatched"):
+            cause = "version_mismatch"
+        else:
+            cause = "dependency_missing"
+        return {
+            "cause": cause,
+            "causeDetail": "；".join(str(item) for item in (detail.get("mismatched") or detail.get("missing") or [])[:5])[:500],
+            "remediable": "auto",
+            "repairAction": _REPAIR_ACTION_BY_ITEM[item_id],
+            "installHint": detail.get("installHint") or "",
+        }
+    return {"cause": "unknown", "causeDetail": "", "remediable": "manual", "repairAction": ""}
+
+
 def build_report(
     workspace: Path,
     checklist: Mapping[str, Any],
@@ -1076,6 +1156,8 @@ def build_report(
         evidence = str(entry.get("evidence") or "") if isinstance(entry, Mapping) else ""
         checked_at = str(entry.get("checkedAt") or "") if isinstance(entry, Mapping) else ""
         detail = dict(entry.get("detail")) if isinstance(entry, Mapping) and isinstance(entry.get("detail"), Mapping) else {}
+        if status == STATUS_FAILED:
+            detail.update(failure_diagnosis(item_id, detail))
         is_degraded = (not required) and status in DEGRADED_STATUSES
         is_deferred = bool(required and status == STATUS_SKIPPED and item.get("deferredUntil"))
         if status == STATUS_PASSED:
@@ -1115,7 +1197,15 @@ def build_report(
     install_hint = ""
     if failed_items:
         error_text = " ".join(str(item.get("detail")) for item in failed_items)
-        if binary_integrity.get("ok") is False or "pyd" in error_text or "_extra" in error_text or not binary_integrity.get("binaryCount"):
+        diagnoses = [item["detail"] for item in failed_items]
+        if all(diagnosis.get("remediable") == "plugin_defect" for diagnosis in diagnoses):
+            root_cause = {
+                "code": "plugin_defect",
+                "message": "插件自检/脚本输出问题，不是依赖缺失；请修脚本或重装插件",
+                "items": [item["id"] for item in failed_items],
+                "diagnoses": [{"id": item["id"], **{key: item["detail"].get(key) for key in ("cause", "causeDetail", "remediable")}} for item in failed_items],
+            }
+        elif binary_integrity.get("ok") is False or "pyd" in error_text or "_extra" in error_text or not binary_integrity.get("binaryCount"):
             root_cause = {
                 "code": "pylibs_binary_incomplete",
                 "message": "pylibs 二进制不完整（常见根因：GitHub 仓库 .gitignore *.py[cod] 误伤 .pyd）",

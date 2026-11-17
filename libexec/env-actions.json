@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0",
+  "defaultIndexUrl": "https://pypi.tuna.tsinghua.edu.cn/simple",
+  "defaultTarget": "<DSH_HOME>/data/bidgenie/pylibs",
+  "actions": [
+    {
+      "id": "install-core-packages",
+      "mode": "auto",
+      "items": ["python_packages"],
+      "why": "安装/修复 python-docx、Pillow、lxml（优先安装到用户数据 pylibs）",
+      "downloadMB": 25,
+      "writes": ["<DSH_HOME>/data/bidgenie/pylibs"],
+      "packages": ["python-docx==1.2.0", "Pillow>=12.3.0", "lxml==6.1.3"],
+      "verifyImports": ["docx.api", "PIL.Image", "lxml.etree"]
+    },
+    {
+      "id": "install-pdf-libraries",
+      "mode": "auto",
+      "items": ["pdf_libraries"],
+      "why": "安装 PyMuPDF/pdfplumber/pymupdf4llm，启用 PDF 招标文件读取",
+      "downloadMB": 90,
+      "writes": ["<DSH_HOME>/data/bidgenie/pylibs"],
+      "packages": ["PyMuPDF==1.24.14", "pdfplumber==0.11.10", "pymupdf4llm==0.0.17"],
+      "verifyImports": ["fitz", "pdfplumber", "pymupdf4llm"]
+    },
+    {
+      "id": "install-pywin32",
+      "mode": "auto",
+      "items": ["word_com"],
+      "why": "安装 pywin32（Word COM 转换 .doc 文件）",
+      "downloadMB": 15,
+      "writes": ["<DSH_HOME>/data/bidgenie/pylibs"],
+      "packages": ["pywin32==312"],
+      "verifyImports": ["win32com.client"]
+    }
+  ],
+  "manual": {
+    "workspace_writable": { "why": "检查工作区/目录 ACL 与写权限（需用户或运维处理）" },
+    "disk_space": { "why": "清理磁盘后重试（需用户或运维处理）" },
+    "path_length": { "why": "缩短工作区路径（需用户处理）" },
+    "fonts": { "why": "安装中文字体（需用户处理）" },
+    "browser_renderer": { "why": "安装 Chrome/Edge 浏览器（辅助安装，需用户确认）" }
+  },
+  "pluginDefect": {
+    "scripts_integrity": { "why": "脚本自检输出污染或脚本缺陷，修脚本/重装插件，不应安装依赖" },
+    "templates_integrity": { "why": "模板清单/文件缺失，修插件包" },
+    "skill_service": { "why": "技能文件不可解析，修插件包" },
+    "state_service": { "why": "状态脚本自检失败，修插件包" }
+  }
+}

@@ -40,6 +40,10 @@ window.__ModuleLoader__.load({
     const ENV_RUN_TIMEOUT_MS = 10 * 60 * 1000 + 15000;
     // GET 会触发 Host 侧 --report（脚本超时 60s），客户端留 75s
     const ENV_GET_TIMEOUT_MS = 75000;
+    // 环境修复：plan/verify 30s（客户端留 45s）；apply Host 20 分钟（客户端留 21 分钟）
+    const ENV_REPAIR_PLAN_TIMEOUT_MS = 45000;
+    const ENV_REPAIR_LAST_TIMEOUT_MS = 45000;
+    const ENV_REPAIR_TIMEOUT_MS = 21 * 60 * 1000;
     const WS_STORAGE_KEY = 'dsh-bidgenie.workspace';
     const POLL_INTERVAL_MS = 5000;
 
@@ -634,6 +638,29 @@ window.__ModuleLoader__.load({
           workspace: workspace,
           body: { workspace: workspace },
           timeoutMs: ENV_RUN_TIMEOUT_MS,
+        });
+      },
+      envCheckRepairPlan: function (workspace) {
+        return requestJson('/env-check/repair/plan', {
+          method: 'POST',
+          workspace: workspace,
+          body: { workspace: workspace },
+          timeoutMs: ENV_REPAIR_PLAN_TIMEOUT_MS,
+        });
+      },
+      envCheckRepair: function (workspace, payload) {
+        const body = Object.assign({ workspace: workspace }, payload || {});
+        return requestJson('/env-check/repair', {
+          method: 'POST',
+          workspace: workspace,
+          body: body,
+          timeoutMs: ENV_REPAIR_TIMEOUT_MS,
+        });
+      },
+      envCheckRepairLast: function (workspace) {
+        return requestJson('/env-check/repair/last', {
+          workspace: workspace,
+          timeoutMs: ENV_REPAIR_LAST_TIMEOUT_MS,
         });
       },
       getStyles: function (workspace, kind) {
@@ -2143,12 +2170,272 @@ window.__ModuleLoader__.load({
       return '';
     }
 
+    function envRepairItemNames(items) {
+      return asArray(items).map((id) => envItemName({ id: textOf(id) })).filter(Boolean).join('、');
+    }
+
+    function envRepairActionName(action) {
+      const id = textOf(action && action.actionId);
+      return trimText(action && (action.label || action.name)) || ENV_ITEM_LABELS[id] || id || '修复动作';
+    }
+
+    function envRepairSize(action) {
+      const mb = envNumber(action && action.downloadMB, null);
+      if (mb === null) return '';
+      return mb >= 1000 ? mb / 1000 + ' GB' : mb + ' MB';
+    }
+
+    function envRepairWrites(action) {
+      const writes = action && action.writes;
+      if (Array.isArray(writes)) return writes.map(textOf).filter(Boolean).join('；');
+      return textOf(writes);
+    }
+
+    function EnvRepairDialog(props) {
+      if (!props.open) return null;
+      const plan = props.plan;
+      const groups = (plan && (plan.groups || (plan.plan && plan.plan.groups))) || {};
+      const auto = asArray(groups.auto);
+      const assisted = asArray(groups.assisted);
+      const manual = asArray(groups.manual);
+      const pluginDefect = asArray(groups.pluginDefect);
+      const autoSelected = auto.filter((action) => props.selected[textOf(action.actionId)] === true);
+      const sectionTitle = (text, extra) =>
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 6px' } },
+          h('div', { style: { fontSize: 13, fontWeight: 600, color: 'var(--bgp-fg)' } }, text),
+          extra ? h('span', { className: 'bgp-muted', style: { fontSize: 12 } }, extra) : null,
+        );
+      const row = (key, main, meta, side) =>
+        h(
+          'div',
+          {
+            key: key,
+            style: {
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 8,
+              padding: '8px 10px',
+              border: '1px solid var(--bgp-line)',
+              borderRadius: 'var(--bgp-radius-m)',
+              marginBottom: 6,
+              background: 'var(--bgp-card2)',
+            },
+          },
+          main,
+          side ? h('div', { style: { marginLeft: 'auto', flex: '0 0 auto', display: 'flex', gap: 6 } }, side) : null,
+          meta || null,
+        );
+      return h(
+        'div',
+        { className: 'bgp-backdrop', role: 'dialog', 'aria-modal': 'true', 'aria-label': '修复环境' },
+        h(
+          'div',
+          {
+            className: 'bgp-dialog',
+            style: { width: 'min(760px,100%)', maxHeight: '86vh', display: 'flex', flexDirection: 'column' },
+          },
+          h('h2', { className: 'bgp-dialog-title', style: { marginBottom: 2 } }, '修复环境'),
+          h(
+            'p',
+            { className: 'bgp-dialog-text', style: { margin: '0 0 6px' } },
+            plan
+              ? '可自动修复 ' + auto.length + ' 项，需确认 ' + assisted.length + ' 项，只能手动 ' + manual.length + ' 项，需升级插件 ' + pluginDefect.length + ' 项。'
+              : '正在生成修复计划…',
+          ),
+          props.error
+            ? h(Banner, { tone: 'warn', title: '修复计划没有生成', text: describeError(props.error).message })
+            : null,
+          h(
+            'div',
+            { style: { overflowY: 'auto', paddingRight: 4 } },
+            !plan && !props.error ? h(Skeleton, { rows: 3 }) : null,
+            plan
+              ? [
+                  sectionTitle('将自动修复（默认勾选）', auto.length ? '装到用户数据目录，不装系统软件/不提权' : '没有可自动修复项'),
+                  auto.length
+                    ? h(
+                        'div',
+                        { style: { display: 'flex', gap: 8, marginBottom: 6 } },
+                        h(
+                          Button,
+                          {
+                            size: 'sm',
+                            variant: 'text',
+                            onClick: () => props.onSelectAll(auto.map((action) => textOf(action.actionId))),
+                          },
+                          '全选',
+                        ),
+                        h(
+                          Button,
+                          { size: 'sm', variant: 'text', onClick: () => props.onSelectAll([]) },
+                          '全不选',
+                        ),
+                      )
+                    : null,
+                  auto.map((action, index) =>
+                    row(
+                      'auto-' + (textOf(action.actionId) || index),
+                      h(
+                        'label',
+                        { style: { display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', flex: '1 1 auto' } },
+                        h('input', {
+                          type: 'checkbox',
+                          checked: props.selected[textOf(action.actionId)] === true,
+                          onChange: () => props.onToggle(textOf(action.actionId)),
+                          style: { marginTop: 3, accentColor: 'var(--bgp-brand)' },
+                        }),
+                        h(
+                          'span',
+                          null,
+                          h('span', { style: { fontWeight: 500 } }, envRepairActionName(action)),
+                          envRepairItemNames(action && action.items) ? h('span', { className: 'bgp-muted' }, ' · ' + envRepairItemNames(action.items)) : null,
+                          h(
+                            'span',
+                            { className: 'bgp-row-sub', style: { display: 'block' } },
+                            [
+                              trimText(action && action.why),
+                              envRepairSize(action) ? '预计 ' + envRepairSize(action) : '',
+                              envRepairWrites(action) ? '写入 ' + envRepairWrites(action) : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' · '),
+                          ),
+                        ),
+                      ),
+                      null,
+                      action.actionId
+                        ? h(
+                            Button,
+                            {
+                              size: 'sm',
+                              variant: 'text',
+                              onClick: () => props.onRepairOne(textOf(action.actionId)),
+                            },
+                            '只修这项',
+                          )
+                        : null,
+                    ),
+                  ),
+                  assisted.length ? sectionTitle('需确认（复制命令后自行执行）') : null,
+                  assisted.map((entry, index) =>
+                    row(
+                      'assisted-' + index,
+                      h(
+                        'div',
+                        null,
+                        h('div', { style: { fontWeight: 500 } }, envRepairActionName(entry)),
+                        h(
+                          'div',
+                          { className: 'bgp-row-sub' },
+                          [trimText(entry && (entry.why || entry.causeDetail || entry.cause))].filter(Boolean).join(' · '),
+                        ),
+                        entry && entry.command
+                          ? h('pre', { style: { margin: '6px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 12, background: 'var(--bgp-fill)', padding: 6, borderRadius: 6 } }, textOf(entry.command))
+                          : null,
+                      ),
+                      null,
+                      entry && entry.command
+                        ? h(Button, { size: 'sm', variant: 'text', icon: 'copy', onClick: () => props.onCopy(textOf(entry.command)) }, '复制命令')
+                        : null,
+                    ),
+                  ),
+                  manual.length ? sectionTitle('只能手动处理') : null,
+                  manual.map((entry, index) =>
+                    row(
+                      'manual-' + index,
+                      h(
+                        'div',
+                        null,
+                        h('div', { style: { fontWeight: 500 } }, envRepairActionName(entry)),
+                        h(
+                          'div',
+                          { className: 'bgp-row-sub' },
+                          [trimText(entry && (entry.causeDetail || entry.why || entry.cause))].filter(Boolean).join(' · '),
+                        ),
+                      ),
+                    ),
+                  ),
+                  pluginDefect.length ? sectionTitle('需升级插件（不是本机环境问题）') : null,
+                  pluginDefect.map((entry, index) =>
+                    row(
+                      'plugin-' + index,
+                      h(
+                        'div',
+                        null,
+                        h('div', { style: { fontWeight: 500 } }, envRepairActionName(entry)),
+                        h(
+                          'div',
+                          { className: 'bgp-row-sub' },
+                          '这类问题来自插件版本/脚本损坏，更新或重新安装插件后再检查；本机修复不会改动插件代码。',
+                        ),
+                      ),
+                    ),
+                  ),
+                ]
+              : null,
+          ),
+          h(
+            'div',
+            {
+              style: {
+                borderTop: '1px solid var(--bgp-line)',
+                marginTop: 10,
+                paddingTop: 10,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                flexWrap: 'wrap',
+              },
+            },
+            h(
+              'span',
+              { className: 'bgp-muted', style: { flex: '1 1 240px', fontSize: 12, lineHeight: 1.5 } },
+              '自动修复只装依赖到用户数据目录，不装系统软件/不提权。可自动修复的项默认勾选；需确认/手动项不会自动执行。',
+            ),
+            h(Button, { variant: 'text', onClick: props.onCancel }, '取消'),
+            props.error
+              ? h(Button, { variant: 'secondary', onClick: props.onRetryPlan }, '重试生成计划')
+              : null,
+            h(
+              Button,
+              {
+                variant: 'primary',
+                disabled: !plan || autoSelected.length === 0,
+                onClick: () => props.onConfirm(autoSelected.map((action) => textOf(action.actionId))),
+              },
+              autoSelected.length ? '开始修复（' + autoSelected.length + ' 项）' : '开始修复',
+            ),
+          ),
+        ),
+      );
+    }
+
     function EnvCheckPage(props) {
       const workspace = props.workspace;
       const notify = props.notify;
       const showCopy = props.showCopy;
       const [state, setState] = useState({ status: 'loading', data: null, error: null });
       const [runState, setRunState] = useState({ status: 'idle', error: null, startedAt: 0, elapsed: 0 });
+      const [repair, setRepair] = useState({
+        phase: 'idle',
+        plan: null,
+        planError: null,
+        selected: {},
+        startedAt: 0,
+        elapsed: 0,
+        error: null,
+        result: null,
+        before: null,
+        after: null,
+        remaining: [],
+        logPath: '',
+        logTail: [],
+        lastIds: [],
+      });
+      const [repairOpen, setRepairOpen] = useState(false);
+      const repairPlanKeyRef = useRef('');
       const mounted = useMountedRef();
 
       const load = useCallback(() => {
@@ -2183,8 +2470,25 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer);
       }, [runState.status, mounted]);
 
+      // 环境修复执行中计时
+      useEffect(() => {
+        if (repair.phase !== 'running') return undefined;
+        const timer = setInterval(() => {
+          if (!mounted.current) return;
+          setRepair((prev) =>
+            prev.phase === 'running'
+              ? Object.assign({}, prev, { elapsed: Math.max(0, Math.floor((Date.now() - prev.startedAt) / 1000)) })
+              : prev,
+          );
+        }, 1000);
+        return () => clearInterval(timer);
+      }, [repair.phase, mounted]);
+
       const runCheck = () => {
-        if (runState.status === 'running') return;
+        if (runState.status === 'running' || repair.phase === 'running') return;
+        // 手动重检后旧修复计划可能过期，重新生成
+        repairPlanKeyRef.current = '';
+        setRepair((prev) => Object.assign({}, prev, { plan: null, planError: null, phase: 'idle' }));
         setRunState({ status: 'running', error: null, startedAt: Date.now(), elapsed: 0 });
         api
           .runEnvCheck(workspace)
@@ -2253,6 +2557,181 @@ window.__ModuleLoader__.load({
         ' 通过' +
         (downgradedOptional.length ? '（' + downgradedOptional.length + ' 项降级）' : '');
       const optionalTroubleCount = downgradedOptional.length + skippedOptional.length;
+      const repairRunning = repair.phase === 'running';
+      const repairUnhealthy = hasResult && (failedRequired.length > 0 || downgradedOptional.length > 0);
+      const repairGroups = (repair.plan && (repair.plan.groups || (repair.plan.plan && repair.plan.plan.groups))) || {};
+      const autoRepairActions = asArray(repairGroups.auto);
+      const autoRepairCount = autoRepairActions.length;
+
+      const repairSelectedFromPlan = (planData) => {
+        const groups = (planData && (planData.groups || (planData.plan && planData.plan.groups))) || {};
+        const selected = {};
+        asArray(groups.auto).forEach((action) => {
+          const actionId = textOf(action && action.actionId);
+          if (actionId) selected[actionId] = true;
+        });
+        return selected;
+      };
+
+      // 环境不健康时预取修复计划，用于顶部「N 项可自动修复」计数；不自动打开弹窗。
+      useEffect(() => {
+        if (!repairUnhealthy || repair.phase === 'running') return undefined;
+        const key = workspace + '|' + checkedAt + '|' + failedRequired.length + '|' + downgradedOptional.length;
+        if (repairPlanKeyRef.current === key) return undefined;
+        repairPlanKeyRef.current = key;
+        let alive = true;
+        api
+          .envCheckRepairPlan(workspace)
+          .then((data) => {
+            if (!alive || !mounted.current) return;
+            setRepair((prev) => Object.assign({}, prev, { plan: data, planError: null, selected: repairSelectedFromPlan(data) }));
+          })
+          .catch((error) => {
+            if (!alive || !mounted.current) return;
+            setRepair((prev) => Object.assign({}, prev, { planError: error }));
+          });
+        return () => {
+          alive = false;
+        };
+      }, [repairUnhealthy, repair.phase, workspace, checkedAt, failedRequired.length, downgradedOptional.length, mounted]);
+
+      const fetchRepairPlan = () => {
+        if (repair.phase === 'planning' || repairRunning) return;
+        setRepairOpen(true);
+        setRepair((prev) => Object.assign({}, prev, { phase: 'planning', planError: null, error: null }));
+        api
+          .envCheckRepairPlan(workspace)
+          .then((data) => {
+            if (!mounted.current) return;
+            setRepair((prev) =>
+              Object.assign({}, prev, { phase: 'confirm', plan: data, selected: repairSelectedFromPlan(data), planError: null }),
+            );
+          })
+          .catch((error) => {
+            if (!mounted.current) return;
+            setRepair((prev) => Object.assign({}, prev, { phase: 'idle', planError: error }));
+          });
+      };
+
+      const openRepair = () => {
+        if (repair.plan) {
+          setRepair((prev) => Object.assign({}, prev, { selected: prev.selected, planError: null }));
+          setRepairOpen(true);
+          return;
+        }
+        fetchRepairPlan();
+      };
+
+      const toggleRepair = (actionId) => {
+        setRepair((prev) => {
+          const selected = Object.assign({}, prev.selected);
+          selected[actionId] = selected[actionId] !== true;
+          return Object.assign({}, prev, { selected: selected });
+        });
+      };
+
+      const selectAllRepair = (actionIds) => {
+        const selected = {};
+        asArray(actionIds).forEach((actionId) => {
+          const id = textOf(actionId);
+          if (id) selected[id] = true;
+        });
+        setRepair((prev) => Object.assign({}, prev, { selected: selected }));
+      };
+
+      const finishRepair = (result, before, checked) => {
+        if (!mounted.current) return;
+        const afterPassed = envNumber(checked && checked.requiredPassed, 0);
+        const afterTotal = envNumber(checked && checked.requiredTotal, envNumber(before && before.total, 8));
+        const remaining = asArray(checked && checked.items)
+          .filter((item) => envItemUnhealthy(item) || envItemDegraded(item))
+          .map((item) => envItemName(item));
+        const finish = (logPath, logTail) => {
+          if (!mounted.current) return;
+          setRepair((prev) =>
+            Object.assign({}, prev, {
+              phase: 'done',
+              plan: null,
+              planError: null,
+              startedAt: 0,
+              elapsed: 0,
+              error: null,
+              result: result,
+              before: before,
+              after: { passed: afterPassed, total: afterTotal },
+              remaining: remaining,
+              logPath: trimText(logPath) || trimText(result && result.logPath),
+              logTail: asArray(logTail),
+            }),
+          );
+          notify(
+            afterPassed >= afterTotal ? 'success' : 'warn',
+            '修复完成：必需项 ' + before.passed + '/' + before.total + ' → ' + afterPassed + '/' + afterTotal,
+          );
+        };
+        const resultTail = asArray(result && result.logTail);
+        if (trimText(result && result.logPath) && resultTail.length) {
+          finish(result && result.logPath, resultTail);
+          return;
+        }
+        api
+          .envCheckRepairLast(workspace)
+          .then((last) => finish(textOf(last && last.logPath) || textOf(result && result.logPath), asArray(last && last.logTail)))
+          .catch(() => finish(textOf(result && result.logPath), resultTail));
+      };
+
+      const executeRepair = (actionIds) => {
+        const ids = asArray(actionIds).map(textOf).filter(Boolean);
+        if (!ids.length || repairRunning) return;
+        const before = { passed: requiredPassed, total: requiredTotal };
+        setRepairOpen(false);
+        setRepair((prev) =>
+          Object.assign({}, prev, {
+            phase: 'running',
+            startedAt: Date.now(),
+            elapsed: 0,
+            error: null,
+            result: null,
+            before: before,
+            after: null,
+            remaining: [],
+            logPath: '',
+            logTail: [],
+            lastIds: ids,
+          }),
+        );
+        api
+          .envCheckRepair(workspace, { actionIds: ids, yes: true })
+          .then((result) => api.runEnvCheck(workspace).then((checked) => finishRepair(result, before, checked)))
+          .catch((error) => {
+            if (!mounted.current) return;
+            api
+              .envCheckRepairLast(workspace)
+              .then((last) => {
+                if (!mounted.current) return;
+                setRepair((prev) =>
+                  Object.assign({}, prev, {
+                    phase: 'error',
+                    startedAt: 0,
+                    elapsed: 0,
+                    error: error,
+                    logPath: textOf(last && last.logPath),
+                    logTail: asArray(last && last.logTail),
+                  }),
+                );
+              })
+              .catch(() => {
+                if (!mounted.current) return;
+                setRepair((prev) => Object.assign({}, prev, { phase: 'error', startedAt: 0, elapsed: 0, error: error }));
+              });
+            notify('error', describeError(error).message || '环境修复没有完成');
+          });
+      };
+
+      const retryPlan = () => {
+        repairPlanKeyRef.current = '';
+        fetchRepairPlan();
+      };
 
       // 必需项全过时只用警告/信息色，不用红色报错
       const statusBanner = !hasResult
@@ -2330,9 +2809,23 @@ window.__ModuleLoader__.load({
             h('h1', { className: 'bgp-h1', style: { flex: '1 1 auto' } }, '环境检查'),
             h(
               Button,
-              { variant: 'primary', icon: 'refresh', onClick: runCheck, disabled: running },
+              { variant: 'primary', icon: 'refresh', onClick: runCheck, disabled: running || repairRunning },
               running ? '检查中…' : hasResult ? '重新检查' : '开始检查',
             ),
+            repairUnhealthy
+              ? h(
+                  Button,
+                  {
+                    variant: 'primary',
+                    icon: 'shield',
+                    onClick: openRepair,
+                    disabled: running || repairRunning,
+                  },
+                  repairRunning
+                    ? '修复中…'
+                    : '修复环境' + (autoRepairCount ? '（' + autoRepairCount + ' 项可自动修复）' : ''),
+                )
+              : null,
           ),
           h('p', { className: 'bgp-desc' }, '检查这台电脑能不能顺利撰写技术方案。必需项都通过后就可以开始；没通过的项会给出处理办法。'),
           h(
@@ -2349,11 +2842,13 @@ window.__ModuleLoader__.load({
             'div',
             { style: { marginTop: 10 } },
             h(NextStep, {
-              text: running
-                ? '正在逐项检查，单项最长 2 分钟、整体最长 10 分钟；面板不会自动安装任何软件。'
-                : hasResult
-                  ? '有未通过或降级的项时，按每项「修复指引」处理后点「重新检查」。'
-                  : '第一次检查会逐项核对环境；有问题的项会告诉你怎么处理。',
+              text: repairRunning
+                ? '正在自动修复环境，最长 20 分钟；修复期间不要重复点击。完成后会自动重新检查。'
+                : running
+                  ? '正在逐项检查，单项最长 2 分钟、整体最长 10 分钟；面板不会自动安装任何软件。'
+                  : hasResult
+                    ? '有未通过或降级的项时，可点「修复环境」自动处理依赖类问题；其他项按「修复指引」处理后点「重新检查」。'
+                    : '第一次检查会逐项核对环境；有问题的项会告诉你怎么处理。',
             }),
           ),
           h(
@@ -2405,6 +2900,24 @@ window.__ModuleLoader__.load({
               ),
             })
           : null,
+        repairRunning
+          ? h(
+              'div',
+              { className: 'bgp-card' },
+              h(
+                'div',
+                { className: 'bgp-env-progress' },
+                h(Spinner, { size: 16 }),
+                h('span', null, '正在修复环境…已用 ' + repair.elapsed + ' 秒'),
+                h('span', { className: 'bgp-muted', style: { marginLeft: 'auto' } }, '最长 20 分钟'),
+              ),
+              h(
+                'p',
+                { className: 'bgp-muted', style: { marginTop: 8 } },
+                '修复期间「重新检查」和「修复环境」已禁用；完成后会自动重新检查并显示修复前后结果与日志。',
+              ),
+            )
+          : null,
         state.status === 'loading' ? h(Skeleton, { rows: 3 }) : null,
         state.status === 'ready' && !hasResult
           ? h(
@@ -2413,8 +2926,96 @@ window.__ModuleLoader__.load({
               h(EmptyState, {
                 title: '还没有检查过',
                 text: '一共 15 项检查，其中 8 项是必需的。第一次检查大约需要 1–2 分钟；已经通过的项下次会跳过，更快。',
-                actions: h('div', { className: 'bgp-actions' }, h(Button, { variant: 'primary', icon: 'refresh', onClick: runCheck, disabled: running }, '开始检查')),
+                actions: h('div', { className: 'bgp-actions' }, h(Button, { variant: 'primary', icon: 'refresh', onClick: runCheck, disabled: running || repairRunning }, '开始检查')),
               }),
+            )
+          : null,
+        repair.phase === 'done'
+          ? h(Banner, {
+              tone: repair.after && repair.after.passed >= repair.after.total ? 'ok' : 'warn',
+              title:
+                '修复完成：必需项 ' +
+                (repair.before ? repair.before.passed + '/' + repair.before.total : '—') +
+                ' → ' +
+                (repair.after ? repair.after.passed + '/' + repair.after.total : '—'),
+              text:
+                (repair.after && repair.after.passed >= repair.after.total
+                  ? '所有必需项已通过。'
+                  : '还剩 ' + Math.max(0, (repair.after ? repair.after.total - repair.after.passed : 0)) + ' 项必需检查未通过。') +
+                (repair.remaining.length ? '剩余未通过/降级：' + repair.remaining.join('、') + '。' : '') +
+                (repair.logPath ? '日志：' + repair.logPath : ''),
+              actions: h(
+                'div',
+                { className: 'bgp-actions' },
+                h(Button, { variant: 'secondary', icon: 'refresh', onClick: runCheck, disabled: running || repairRunning }, '重新检查'),
+                repair.logPath
+                  ? h(Button, { size: 'sm', variant: 'text', icon: 'copy', onClick: () => copyHelp(repair.logPath) }, '复制日志路径')
+                  : null,
+              ),
+            })
+          : null,
+        repair.phase === 'error'
+          ? h(Banner, {
+              tone: 'error',
+              title: '环境修复没有完成',
+              text:
+                describeError(repair.error).message +
+                (describeError(repair.error).hint ? '（' + describeError(repair.error).hint + '）' : '') +
+                (repair.logPath ? '日志：' + repair.logPath : ''),
+              actions: h(
+                'div',
+                { className: 'bgp-actions' },
+                h(Button, { variant: 'secondary', onClick: () => executeRepair(repair.lastIds), disabled: repairRunning }, '重试修复'),
+                h(Button, { variant: 'text', onClick: openRepair, disabled: repairRunning }, '查看修复计划'),
+              ),
+            })
+          : null,
+        repair.phase === 'done' && repair.logTail.length
+          ? h(
+              'div',
+              { className: 'bgp-card' },
+              h('div', { className: 'bgp-env-group-title' }, '修复日志（末尾）'),
+              h(
+                'pre',
+                {
+                  style: {
+                    margin: '8px 0 0',
+                    maxHeight: 220,
+                    overflow: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all',
+                    fontSize: 12,
+                    background: 'var(--bgp-fill)',
+                    padding: 10,
+                    borderRadius: 'var(--bgp-radius-m)',
+                  },
+                },
+                repair.logTail.join('\n'),
+              ),
+            )
+          : null,
+        repair.phase === 'error' && repair.logTail.length
+          ? h(
+              'div',
+              { className: 'bgp-card' },
+              h('div', { className: 'bgp-env-group-title' }, '最近一次修复日志（末尾）'),
+              h(
+                'pre',
+                {
+                  style: {
+                    margin: '8px 0 0',
+                    maxHeight: 220,
+                    overflow: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all',
+                    fontSize: 12,
+                    background: 'var(--bgp-fill)',
+                    padding: 10,
+                    borderRadius: 'var(--bgp-radius-m)',
+                  },
+                },
+                repair.logTail.join('\n'),
+              ),
             )
           : null,
         hasResult && statusBanner ? h(Banner, { tone: statusBanner.tone, title: statusBanner.title, text: statusBanner.text }) : null,
@@ -2435,8 +3036,25 @@ window.__ModuleLoader__.load({
             )
           : null,
         hasResult
-          ? h('p', { className: 'bgp-muted', style: { textAlign: 'center' } }, '检查结果按版本记录：清单版本不变时，已通过的项会跳过，不会重复检查。')
+          ? h(
+              'p',
+              { className: 'bgp-muted', style: { textAlign: 'center' } },
+              '自动修复只装依赖到用户数据目录，不装系统软件/不提权。检查结果按版本记录：清单版本不变时，已通过的项会跳过，不会重复检查。',
+            )
           : null,
+        h(EnvRepairDialog, {
+          open: repairOpen,
+          plan: repair.plan,
+          selected: repair.selected,
+          error: repair.planError,
+          onCancel: () => setRepairOpen(false),
+          onSelectAll: selectAllRepair,
+          onToggle: toggleRepair,
+          onConfirm: executeRepair,
+          onRepairOne: (actionId) => executeRepair([actionId]),
+          onCopy: copyHelp,
+          onRetryPlan: retryPlan,
+        }),
       );
     }
 

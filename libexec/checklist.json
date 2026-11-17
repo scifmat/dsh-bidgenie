@@ -36,17 +36,20 @@
           {
             "name": "python-docx",
             "import": "docx",
-            "version": "1.2.0"
+            "version": "1.2.0",
+            "versionPolicy": "min"
           },
           {
             "name": "Pillow",
             "import": "PIL",
-            "version": "12.3.0"
+            "version": "12.3.0",
+            "versionPolicy": "min"
           },
           {
             "name": "lxml",
             "import": "lxml",
-            "version": "6.1.3"
+            "version": "6.1.3",
+            "versionPolicy": "min"
           }
         ],
         "installTarget": "$DSH_HOME/data/bidgenie/pylibs/",
@@ -70,7 +73,12 @@
           "pdfplumber"
         ],
         "primary": "fitz",
-        "installHint": "pip install --target <DSH_HOME>/data/bidgenie/pylibs PyMuPDF==1.24.14 pdfplumber pymupdf4llm（或设置 BIDGENIE_PYLIBS）"
+        "installHint": "pip install --target <DSH_HOME>/data/bidgenie/pylibs PyMuPDF==1.24.14 pdfplumber pymupdf4llm（或设置 BIDGENIE_PYLIBS）",
+        "versionPolicies": {
+          "fitz": "exact",
+          "pymupdf4llm": "min",
+          "pdfplumber": "min"
+        }
       }
     },
     {

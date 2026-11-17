@@ -1660,9 +1660,12 @@ def run_selftest() -> dict[str, Any]:
         txt_path = tmp / "说明.txt"
         txt_path.write_text("第一段文本。\n\n第二段文本。\n", encoding="utf-8", newline="\n")
         pdf_path = tmp / "示例文件.pdf"
-        _build_test_pdf(pdf_path)
+        import contextlib
 
-        first = convert_files(project_dir, [docx_path, md_path, txt_path, pdf_path], per_file_timeout=60)
+        # 第三方 import 可能向 stdout 打印横幅；自检 --json 必须保持单对象，横幅重定向到 stderr
+        with contextlib.redirect_stdout(sys.stderr):
+            _build_test_pdf(pdf_path)
+            first = convert_files(project_dir, [docx_path, md_path, txt_path, pdf_path], per_file_timeout=60)
         checks.append("convert")
         if len(first["converted"]) != 4 or first["failed"]:
             raise AssertionError(f"首次转换结果不正确：converted={first['converted']} failed={first['failed']}")
