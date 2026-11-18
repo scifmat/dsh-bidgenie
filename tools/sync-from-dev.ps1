@@ -51,7 +51,7 @@ if (-not (Test-Path (Join-Path $Repo 'package.json'))) { throw "发布仓库目�
 if ($Commit -and -not $Message) { throw "-Commit 需要同时提供 -Message" }
 
 $runtimeFiles = @('index.js', 'cordis.patch.yml')
-$runtimeDirs = @('client', 'lib', 'libexec', 'skills', 'templates', 'assets')
+$runtimeDirs = @('client', 'lib', 'libexec', 'config', 'skills', 'templates', 'assets')
 
 Write-Step '源与目标'
 Write-Host "  开发源：$DevPlugin"

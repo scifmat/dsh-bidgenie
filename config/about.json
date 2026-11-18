@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "name": "BidGenie",
+  "nameZh": "标代精灵",
+  "tagline": "把复杂的技术标留给我：解析、大纲、正文到定稿，步步为营。",
+  "sections": [
+    {
+      "id": "intro",
+      "icon": "book",
+      "title": "插件简介",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "BidGenie 是专为 DSH 打造的技术标全流程撰写智能体。从招标文件的深度解析、大纲规划，到正文撰写与排版，我们致力于把复杂的技术标书拆解为标准化流程，化繁为简，步步为营。"
+        },
+        {
+          "type": "chips",
+          "label": "特点",
+          "items": [
+            "精准提取 9 类关键信息",
+            "智能生成图表",
+            "严苛的三级审查",
+            "随时中断随时继续"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "privacy",
+      "icon": "shield",
+      "title": "隐私承诺",
+      "lead": "数据绝对安全，杜绝外泄",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            {
+              "label": "本地闭环",
+              "text": "所有资料、提取稿和方案内容都保存在当前工作区，插件不会把它们上传到任何第三方服务器。"
+            },
+            {
+              "label": "自动脱敏",
+              "text": "证件号、银行账号等敏感信息默认打码，不会写入方案正文或对话摘要。"
+            },
+            {
+              "label": "纯净沙箱",
+              "text": "插件只访问目标工作区和自己的数据目录，不会扫描其他文件夹，严格保护企业机密。"
+            }
+          ]
+        },
+        {
+          "type": "note",
+          "text": "对话内容由 DSH 按你配置的模型服务处理；插件本身不转发、不额外保存。"
+        }
+      ]
+    },
+    {
+      "id": "license",
+      "icon": "doc",
+      "title": "用户协议",
+      "lead": "开源与授权",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            {
+              "label": "开源协议",
+              "text": "采用 PolyForm Noncommercial 1.0.0 协议。"
+            },
+            {
+              "label": "适用范围",
+              "text": "仅限个人学习、研究及非商业组织免费使用。"
+            },
+            {
+              "label": "商业授权",
+              "text": "企业用于商业投标撰写，需联系开发团队获取商业授权。"
+            },
+            {
+              "label": "免责声明",
+              "text": "当前版本为 Alpha 内测版，AI 生成内容需经过人工严格复核后方可正式提交。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "team",
+      "icon": "users",
+      "title": "开发团队",
+      "lead": "BidGenie 开发运维团队",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "我们致力于最前沿的招投标效率工具开发，为竞标保驾护航。"
+        },
+        {
+          "type": "contacts",
+          "items": [
+            {
+              "label": "邮箱",
+              "value": "bidgenie@163.com",
+              "kind": "email"
+            },
+            {
+              "label": "微信",
+              "value": "BidGenie01",
+              "kind": "wechat"
+            },
+            {
+              "label": "QQ 群/号",
+              "value": "3161754839",
+              "kind": "qq"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "footer": {
+    "license": "PolyForm Noncommercial 1.0.0",
+    "copyright": "© BidGenie 开发运维团队"
+  }
+}

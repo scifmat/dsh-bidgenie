@@ -14,6 +14,7 @@
     "client/",
     "lib/",
     "libexec/",
+    "config/",
     "skills/",
     "templates/",
     "cordis.patch.yml",

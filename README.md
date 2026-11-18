@@ -199,6 +199,7 @@ $env:BIDGENIE_PIP_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple" # 环境�
 │   └── client.js         # 左栏面板（Web）
 ├── lib/                  # Host 侧：路由、模型工具、Python 桥、业务服务
 ├── libexec/              # 确定性 Python 脚本（转换、校验、渲染、导出）
+├── config/               # 关于页等内容配置（about.json，改完刷新面板生效）
 ├── skills/               # 11 个运行时技能
 ├── templates/            # 9 类提取模板 + 3 套官方导出样式
 ├── assets/               # 品牌素材、README 封面、Mermaid 渲染器
@@ -212,6 +213,7 @@ $env:BIDGENIE_PIP_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple" # 环境�
 **开发与调试入口**
 
 - 无需构建步骤：DSH 直接加载 `index.js`（Host）与 `client/client.js`（面板）。
+- 关于页文案（简介、隐私、协议、团队联系方式）在 `config/about.json` 中维护，保存后刷新面板即可生效；联系方式会自动生成「复制」按钮。
 - 所有 `libexec/bg_*.py` 支持 `--json`，可用 DSH 自带 Python 单独执行排障。例如单独跑一遍环境检查：
 
   ```powershell

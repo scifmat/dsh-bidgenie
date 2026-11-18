@@ -596,6 +596,9 @@ window.__ModuleLoader__.load({
       health: function (workspace) {
         return requestJson('/health', { workspace: workspace });
       },
+      about: function () {
+        return requestJson('/about');
+      },
       initWorkspace: function (workspace) {
         return requestJson('/workspace/init', { method: 'POST', workspace: workspace, body: { workspace: workspace } });
       },
@@ -864,6 +867,35 @@ window.__ModuleLoader__.load({
       '.bgp-toast{pointer-events:auto;display:flex;align-items:center;gap:8px;background:var(--bgp-toast-bg);color:var(--bgp-toast-fg);',
       'padding:8px 14px;border-radius:var(--bgp-radius-m);box-shadow:var(--bgp-shadow);font-size:13px;}',
 
+      '.bgp-about-hero-card{padding:14px 16px 16px;}',
+      '.bgp-about-topbar{display:flex;align-items:center;gap:8px;margin-bottom:10px;}',
+      '.bgp-about-hero{display:flex;align-items:center;gap:14px;min-width:0;}',
+      '.bgp-about-mark{display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;flex:0 0 auto;border-radius:14px;border:1px solid var(--bgp-line);background:var(--bgp-fill);}',
+      '.bgp-about-identity{display:flex;flex-direction:column;gap:6px;min-width:0;}',
+      '.bgp-about-name{font-size:19px;font-weight:600;line-height:1.3;margin:0;color:var(--bgp-fg);}',
+      '.bgp-about-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}',
+      '.bgp-about-tagline{margin:12px 0 0;font-size:13px;color:var(--bgp-fg2);line-height:1.6;}',
+      '.bgp-about-section{display:flex;flex-direction:column;gap:10px;}',
+      '.bgp-about-section-head{display:flex;align-items:center;gap:8px;}',
+      '.bgp-about-icon{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;flex:0 0 auto;border-radius:6px;background:var(--bgp-biz-bg);color:var(--bgp-biz);}',
+      '.bgp-about-icon-emoji{background:transparent;font-size:17px;line-height:1;}',
+      '.bgp-about-section-title{font-size:15px;font-weight:600;margin:0;color:var(--bgp-fg);}',
+      '.bgp-about-lead{margin:0;padding:8px 12px;border-left:3px solid var(--bgp-brand);border-radius:0 var(--bgp-radius-s) var(--bgp-radius-s) 0;background:var(--bgp-fill);font-size:13px;font-weight:600;color:var(--bgp-fg);}',
+      '.bgp-about-p{margin:0;font-size:13px;color:var(--bgp-fg2);line-height:1.75;}',
+      '.bgp-about-note{display:flex;align-items:flex-start;gap:6px;margin:0;font-size:12px;color:var(--bgp-fg3);line-height:1.6;}',
+      '.bgp-about-note svg{flex:0 0 auto;margin-top:2px;}',
+      '.bgp-about-chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;}',
+      '.bgp-about-chip-label{font-size:12px;color:var(--bgp-fg3);}',
+      '.bgp-about-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--bgp-fg2);line-height:1.7;}',
+      '.bgp-about-list li::marker{color:var(--bgp-fg3);}',
+      '.bgp-about-list strong{color:var(--bgp-fg);font-weight:600;}',
+      '.bgp-about-contacts{display:flex;flex-direction:column;border:1px solid var(--bgp-line);border-radius:var(--bgp-radius-m);overflow:hidden;}',
+      '.bgp-about-contact{display:flex;align-items:center;gap:10px;padding:7px 10px 7px 12px;border-bottom:1px solid var(--bgp-line);}',
+      '.bgp-about-contact:last-child{border-bottom:none;}',
+      '.bgp-about-contact-label{flex:0 0 auto;width:66px;font-size:12px;color:var(--bgp-fg3);}',
+      '.bgp-about-contact-value{flex:1 1 auto;min-width:0;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:13px;color:var(--bgp-fg);word-break:break-all;}',
+      '.bgp-about-footer{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:2px 4px 0;font-size:12px;color:var(--bgp-fg3);}',
+      '@media (max-width:560px){.bgp-about-hero{gap:10px;}.bgp-about-mark{width:44px;height:44px;border-radius:12px;}.bgp-about-name{font-size:17px;}}',
       '.bgp-tag-list{display:flex;flex-wrap:wrap;gap:6px;}',
       '.bgp-divider{height:1px;background:var(--bgp-sep);margin:12px 0;border:none;}',
 
@@ -959,6 +991,10 @@ window.__ModuleLoader__.load({
           return h(Svg, { size: props.size }, h('path', { d: 'M6 6l12 12M18 6L6 18' }));
         case 'open':
           return h(Svg, { size: props.size }, h('path', { d: 'M14 4h6v6' }), h('path', { d: 'M20 4l-9 9' }), h('path', { d: 'M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5' }));
+        case 'book':
+          return h(Svg, { size: props.size }, h('path', { d: 'M4 5.2A2.2 2.2 0 0 1 6.2 3H19v15.4H6.2A2.2 2.2 0 0 0 4 20.6z' }), h('path', { d: 'M4 5.2v15.4' }), h('path', { d: 'M8 7.5h7' }));
+        case 'doc':
+          return h(Svg, { size: props.size }, h('path', { d: 'M6.5 3H14l4 4v14H6.5z' }), h('path', { d: 'M14 3v4h4' }), h('path', { d: 'M9.5 12h6' }), h('path', { d: 'M9.5 16h4' }));
         default:
           return h(Svg, { size: props.size }, h('circle', { cx: 12, cy: 12, r: 8 }));
       }
@@ -3100,74 +3136,228 @@ window.__ModuleLoader__.load({
     // 页面：关于
     // ────────────────────────────────────────────────────────────
 
-    function AboutPage(props) {
-      const [health, setHealth] = useState({ status: 'loading', data: null });
-      const mounted = useMountedRef();
+    const ABOUT_ICON_NAMES = ['book', 'shield', 'doc', 'users', 'info', 'folder', 'gear', 'eye', 'open'];
 
-      useEffect(() => {
-        let alive = true;
-        api
-          .health(props.workspace)
-          .then((data) => {
-            if (alive && mounted.current) setHealth({ status: 'ready', data: data });
-          })
-          .catch(() => {
-            if (alive && mounted.current) setHealth({ status: 'error', data: null });
+    function AboutSectionIcon(props) {
+      const icon = trimText(props.icon);
+      if (icon === '') return null;
+      if (ABOUT_ICON_NAMES.indexOf(icon) >= 0) {
+        return h('span', { className: 'bgp-about-icon' }, h(Icon, { name: icon, size: 15 }));
+      }
+      // 配置里也可以直接写 emoji，保持「改 JSON 就能换」的灵活性
+      return h('span', { className: 'bgp-about-icon bgp-about-icon-emoji', 'aria-hidden': 'true' }, icon);
+    }
+
+    function AboutBlock(props) {
+      const block = props.block;
+      if (!block) return null;
+      if (block.type === 'paragraph') {
+        return h('p', { className: 'bgp-about-p' }, block.text);
+      }
+      if (block.type === 'note') {
+        return h('p', { className: 'bgp-about-note' }, h(Icon, { name: 'info', size: 14 }), h('span', null, block.text));
+      }
+      if (block.type === 'chips') {
+        return h(
+          'div',
+          { className: 'bgp-about-chips' },
+          block.label ? h('span', { className: 'bgp-about-chip-label' }, block.label + '：') : null,
+          h(
+            'div',
+            { className: 'bgp-tag-list' },
+            block.items.map((item, index) => h(Chip, { key: index, tone: 'brand' }, item)),
+          ),
+        );
+      }
+      if (block.type === 'bullets') {
+        return h(
+          'ul',
+          { className: 'bgp-about-list' },
+          block.items.map((item, index) =>
+            h(
+              'li',
+              { key: index },
+              item.label ? h('strong', null, item.label) : null,
+              item.label && item.text ? '：' : null,
+              item.text ? h('span', null, item.text) : null,
+            ),
+          ),
+        );
+      }
+      if (block.type === 'contacts') {
+        const copyAllText = block.items.map((item) => item.label + '：' + item.value).join('\n');
+        return h(
+          'div',
+          null,
+          h(
+            'div',
+            { className: 'bgp-about-contacts' },
+            block.items.map((item, index) =>
+              h(
+                'div',
+                { className: 'bgp-about-contact', key: item.label + '-' + index },
+                h('span', { className: 'bgp-about-contact-label' }, item.label),
+                h('span', { className: 'bgp-about-contact-value' }, item.value),
+                h(
+                  Button,
+                  {
+                    size: 'sm',
+                    variant: 'text',
+                    icon: 'copy',
+                    onClick: () => props.showCopy(item.value, '已复制' + item.label),
+                  },
+                  '复制',
+                ),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'bgp-actions', style: { marginTop: 8 } },
+            h(
+              Button,
+              { size: 'sm', variant: 'secondary', icon: 'copy', onClick: () => props.showCopy(copyAllText, '联系方式已复制') },
+              '复制全部联系方式',
+            ),
+          ),
+        );
+      }
+      return null;
+    }
+
+    function AboutPage(props) {
+      const [state, setState] = useState({
+        status: 'loading',
+        about: null,
+        version: '',
+        hostVersion: '',
+        warning: null,
+        error: null,
+      });
+      const mounted = useMountedRef();
+      const requestSeq = useRef(0);
+
+      const load = useCallback(() => {
+        requestSeq.current += 1;
+        const seq = requestSeq.current;
+        setState((prev) => Object.assign({}, prev, { status: prev.about ? 'ready' : 'loading', error: null }));
+        Promise.all([
+          api.about().then(
+            (data) => ({ ok: true, value: data }),
+            (error) => ({ ok: false, error: error }),
+          ),
+          api.health(props.workspace).then(
+            (data) => ({ ok: true, value: data }),
+            (error) => ({ ok: false, error: error }),
+          ),
+        ]).then((results) => {
+          if (!mounted.current || seq !== requestSeq.current) return;
+          const aboutResult = results[0];
+          const healthResult = results[1];
+          const payload = aboutResult.ok && isPlainObject(aboutResult.value) ? aboutResult.value : null;
+          const aboutData = payload && isPlainObject(payload.about) ? payload.about : null;
+          if (!aboutData) {
+            setState({
+              status: 'error',
+              about: null,
+              version: '',
+              hostVersion: '',
+              warning: null,
+              error: aboutResult.error || new Error('关于页内容读取失败'),
+            });
+            return;
+          }
+          const health = healthResult.ok && isPlainObject(healthResult.value) ? healthResult.value : null;
+          setState({
+            status: 'ready',
+            about: aboutData,
+            version: trimText(payload.version) || (health ? trimText(health.version) : ''),
+            hostVersion: health ? trimText(health.hostVersion) : '',
+            warning: isPlainObject(payload.warning) ? payload.warning : null,
+            error: null,
           });
-        return () => {
-          alive = false;
-        };
+        });
       }, [props.workspace, mounted]);
 
-      const rawVersion = health.data && health.data.version ? trimText(health.data.version) : '';
-      const version = displayVersion(rawVersion) || '—';
-      const hostVersion = health.data && health.data.hostVersion ? textOf(health.data.hostVersion) : '—';
+      useEffect(() => {
+        load();
+      }, [load]);
+
+      const about = state.about || {};
+      const sections = Array.isArray(about.sections) ? about.sections : [];
+      const footer = isPlainObject(about.footer) ? about.footer : {};
+      const name = trimText(about.name) || 'BidGenie';
+      const nameZh = trimText(about.nameZh);
+      const version = displayVersion(state.version);
+      const tagline = trimText(about.tagline);
 
       return h(
         'div',
         { className: 'bgp-page bgp-page-narrow' },
         h(
           'div',
-          { className: 'bgp-card' },
+          { className: 'bgp-card bgp-about-hero-card' },
           h(
             'div',
-            { className: 'bgp-card-head' },
+            { className: 'bgp-about-topbar' },
             h(Button, { variant: 'text', icon: 'back', onClick: props.onBack }, '返回'),
-            h('h1', { className: 'bgp-h1', style: { flex: '1 1 auto' } }, '关于标代精灵'),
+            h('div', { className: 'bgp-header-spacer' }),
+            h(Button, { size: 'sm', variant: 'text', icon: 'refresh', onClick: load, disabled: state.status === 'loading' }, '刷新'),
           ),
-          h('p', { className: 'bgp-desc' }, '这里能看版本、当前工作区和一些使用提醒。'),
           h(
             'div',
-            { style: { marginTop: 12, display: 'flex', flexDirection: 'column', gap: 12 } },
+            { className: 'bgp-about-hero' },
+            h('span', { className: 'bgp-about-mark' }, h(BidGenieIcon, { size: 44 })),
             h(
               'div',
-              { className: 'bgp-card', style: { background: 'var(--bgp-fill)', border: 'none' } },
-              h('div', { className: 'bgp-card-head' }, h('span', { className: 'bgp-card-title', style: { fontSize: 14 } }, '三步开始')),
-              h(
-                'ol',
-                { className: 'bgp-hint-list' },
-                h('li', null, '先在「投标人」里建一份公司或个人资料'),
-                h('li', null, '把它设为当前投标人'),
-                h('li', null, '在对话框里上传招标文件，并说「帮我写技术方案」'),
-              ),
+              { className: 'bgp-about-identity' },
+              h('h1', { className: 'bgp-about-name' }, '关于 ' + name + (nameZh ? '（' + nameZh + '）' : '')),
               h(
                 'div',
-                { className: 'bgp-actions', style: { marginTop: 10 } },
-                h(Button, { variant: 'primary', icon: 'copy', onClick: () => props.onCopyInstruction('[BidGenie] 帮我开始一个新的投标项目') }, '复制启动指令'),
+                { className: 'bgp-about-meta' },
+                version ? h(Chip, { tone: 'brand' }, version) : null,
+                state.hostVersion ? h(Chip, null, 'DSH ' + state.hostVersion) : null,
               ),
             ),
-            h(KeyValue, { label: '插件版本' }, version),
-            h(KeyValue, { label: '宿主版本' }, hostVersion),
-            h(KeyValue, { label: '当前工作区' }, h('span', { className: 'bgp-mono' }, textOf(props.workspace))),
-            h(
-              'div',
-              { className: 'bgp-help-list' },
-              h('p', { className: 'bgp-muted', style: { marginTop: 4 } }, '说明：面板只负责资料与设置；撰写、审查、导出都在对话框里由助手推进，面板不会替你启动任务。'),
-              h('p', { className: 'bgp-muted' }, '隐私：投标人资料只保存在当前工作区；证件号、账号等默认打码显示，也不会写进方案正文。'),
-              h('p', { className: 'bgp-muted' }, '导出：生成的 Word 不含封面和目录；如果招标文件要求，可在 Word 里手动添加。'),
-            ),
           ),
+          tagline ? h('p', { className: 'bgp-about-tagline' }, tagline) : null,
         ),
+        state.status === 'loading' ? h('div', { className: 'bgp-card' }, h(Loader, { text: '正在读取关于信息…' })) : null,
+        state.status === 'error' ? h(ErrorState, { title: '关于页读取失败', error: state.error, onRetry: load }) : null,
+        state.warning
+          ? h(Banner, {
+              tone: 'warn',
+              title: '内容配置读取失败',
+              text: '已回退默认内容，请检查插件目录下的 config/about.json。',
+            })
+          : null,
+        state.status === 'ready'
+          ? sections.map((section) =>
+              h(
+                'section',
+                { className: 'bgp-card bgp-about-section', key: section.id },
+                h(
+                  'div',
+                  { className: 'bgp-about-section-head' },
+                  h(AboutSectionIcon, { icon: section.icon }),
+                  h('h2', { className: 'bgp-about-section-title' }, section.title),
+                ),
+                trimText(section.lead) ? h('p', { className: 'bgp-about-lead' }, section.lead) : null,
+                ...(Array.isArray(section.blocks) ? section.blocks : []).map((block, index) =>
+                  h(AboutBlock, { key: section.id + '-' + index, block: block, showCopy: props.showCopy }),
+                ),
+              ),
+            )
+          : null,
+        state.status === 'ready'
+          ? h(
+              'div',
+              { className: 'bgp-about-footer' },
+              footer.license ? h('span', null, '许可证：' + footer.license) : null,
+              footer.copyright ? h('span', null, footer.copyright) : null,
+              footer.note ? h('span', null, footer.note) : null,
+            )
+          : null,
       );
     }
 
@@ -4824,8 +5014,8 @@ window.__ModuleLoader__.load({
       } else if (page === 'about') {
         body = h(AboutPage, {
           workspace: workspace,
+          showCopy: copyWithToast,
           onBack: () => goPage(returnTo),
-          onCopyInstruction: (text) => copyWithToast(text, '已复制，粘贴到对话框发送'),
         });
       } else if (page === 'bidders') {
         body = h(BiddersPage, {
