@@ -110,6 +110,11 @@
               "label": "QQ 群/号",
               "value": "3161754839",
               "kind": "qq"
+            },
+            {
+              "label": "官网",
+              "value": "www.bidgenie.cn",
+              "kind": "website"
             }
           ]
         }

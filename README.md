@@ -272,4 +272,6 @@ powershell -ExecutionPolicy Bypass -File tools\sync-from-dev.ps1 `
 
 - 许可：**PolyForm Noncommercial 1.0.0**，仅限非商业使用；商业授权需另行联系版权方。全文见 [LICENSE](LICENSE)。
 
+- 官网：[www.bidgenie.cn](https://www.bidgenie.cn)
+
 - 联系：如需**商业授权**，请联系：[bidgenie@163.com](mailto:bidgenie@163.com)。
