@@ -1096,13 +1096,22 @@ def failure_diagnosis(item_id: str, detail: Mapping[str, Any] | None) -> dict[st
     binary = detail.get("binaryIntegrity") if isinstance(detail.get("binaryIntegrity"), Mapping) else {}
     if item_id == "scripts_integrity":
         cause = "selftest_json_broken" if detail.get("cause") == "selftest_json_broken" else "script_selftest_failed"
-        return {"cause": cause, "causeDetail": "脚本自检输出污染/JSON 不完整，不是依赖缺失", "remediable": "plugin_defect", "repairAction": ""}
+        problems = "；".join(str(problem) for problem in (detail.get("problems") or []))[:300]
+        if cause == "selftest_json_broken":
+            cause_detail = problems or "脚本自检输出不是合法的单个 JSON 对象"
+        else:
+            cause_detail = problems or "脚本自检未通过（未返回 problems 详情）"
+        return {"cause": cause, "causeDetail": cause_detail, "remediable": "plugin_defect", "repairAction": ""}
     if item_id in _PLUGIN_DEFECT_ITEMS:
         return {"cause": "plugin_defect", "causeDetail": str(detail.get("problems") or detail.get("missing") or "")[:300], "remediable": "plugin_defect", "repairAction": ""}
     if item_id in _MANUAL_ITEMS:
         return {"cause": "environment_manual", "causeDetail": "需要用户/运维手动处理（目录权限/磁盘/字体/路径）", "remediable": "manual", "repairAction": ""}
     if item_id in _ASSISTED_ITEMS:
         return {"cause": "browser_missing_or_render_failed", "causeDetail": str(detail.get("problems") or "")[:300], "remediable": "assisted", "repairAction": ""}
+    # word_com 有两种失败：pywin32 缺失（可自动装）与本机没装 Word（只能人工处理）。
+    # 不区分的话，没装 Word 的机器会把“装 pywin32”当成可修复项，装完仍失败并回滚。
+    if item_id == "word_com" and not detail.get("missingModules") and not detail.get("wordExe"):
+        return {"cause": "word_missing", "causeDetail": "pywin32 可导入，但未检测到本机 Word（WINWORD.EXE）", "remediable": "manual", "repairAction": ""}
     if item_id in _REPAIR_ACTION_BY_ITEM:
         if binary.get("ok") is False or (binary and not binary.get("binaryCount")):
             cause = "pylibs_binary_missing"
@@ -1205,7 +1214,34 @@ def build_report(
                 "items": [item["id"] for item in failed_items],
                 "diagnoses": [{"id": item["id"], **{key: item["detail"].get(key) for key in ("cause", "causeDetail", "remediable")}} for item in failed_items],
             }
-        elif binary_integrity.get("ok") is False or "pyd" in error_text or "_extra" in error_text or not binary_integrity.get("binaryCount"):
+        elif not diagnostic.get("exists"):
+            root_cause = {
+                "code": "pylibs_not_installed",
+                "message": "插件自有依赖尚未安装（首次使用需下载约 100 MB）；在面板点「修复环境」即可自动安装",
+                "pylibs": diagnostic.get("pylibs") or "",
+                "source": diagnostic.get("source") or "",
+                "binaryIntegrity": binary_integrity,
+                "candidates": diagnostic.get("candidates") or [],
+            }
+        elif binary_integrity.get("missing"):
+            root_cause = {
+                "code": "pylibs_binary_incomplete",
+                "message": "pylibs 二进制不完整（常见根因：GitHub 仓库 .gitignore *.py[cod] 误伤 .pyd）",
+                "pylibs": diagnostic.get("pylibs") or "",
+                "source": diagnostic.get("source") or "",
+                "binaryIntegrity": binary_integrity,
+                "candidates": diagnostic.get("candidates") or [],
+            }
+        elif not binary_integrity.get("binaryCount"):
+            root_cause = {
+                "code": "pylibs_empty",
+                "message": "pylibs 目录为空或缺少编译扩展；请在面板点「修复环境」重新安装依赖",
+                "pylibs": diagnostic.get("pylibs") or "",
+                "source": diagnostic.get("source") or "",
+                "binaryIntegrity": binary_integrity,
+                "candidates": diagnostic.get("candidates") or [],
+            }
+        elif binary_integrity.get("ok") is False or "pyd" in error_text or "_extra" in error_text:
             root_cause = {
                 "code": "pylibs_binary_incomplete",
                 "message": "pylibs 二进制不完整（常见根因：GitHub 仓库 .gitignore *.py[cod] 误伤 .pyd）",

@@ -494,7 +494,15 @@ window.__ModuleLoader__.load({
     function describeError(error) {
       if (!error) return { message: '发生未知问题，请重试。', hint: '' };
       if (error.name === 'ApiError') {
-        const friendly = FRIENDLY_ERROR[error.code] || messageOrFallback(error);
+        const code = textOf(error.code);
+        // 运行时/修复类错误必须把真实原因和排查提示透传出来；否则面板只剩一句
+        // “运行环境缺少必要组件”，而环境检查本身也起不来，用户无从下手。
+        if (code === 'E_DEP_MISSING' || code === 'E_REPAIR_FAILED') {
+          const message = trimText(error.message) || FRIENDLY_ERROR[code];
+          const hint = trimText(error.hint);
+          return { message: hint ? message + (/[。！？]$/.test(message) ? '' : '。') + hint : message, hint: '' };
+        }
+        const friendly = FRIENDLY_ERROR[code] || messageOrFallback(error);
         return { message: friendly, hint: error.hint || '' };
       }
       if (error && (error.name === 'AbortError' || error.code === 'E_TIMEOUT')) {

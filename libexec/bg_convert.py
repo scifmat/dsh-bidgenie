@@ -1646,9 +1646,26 @@ def _build_test_pdf(target: Path) -> None:
     document.close()
 
 
+def _pdf_stack_available() -> bool:
+    """PDF 读取组件是否齐全。
+
+    PDF 依赖是可选组件（由 env-check 的 ``pdf_libraries`` 单独报告、可由
+    环境修复安装）。缺失时自检应跳过 PDF 环节，否则代表“插件脚本完整性”的
+    必过项会跟着失败，把可选依赖缺失误报成插件缺陷。
+    """
+    try:
+        import fitz  # noqa: F401
+        import pdfplumber  # noqa: F401
+        import pymupdf4llm  # noqa: F401
+    except Exception:  # noqa: BLE001 - 任何缺失都视为不可用
+        return False
+    return True
+
+
 def run_selftest() -> dict[str, Any]:
     """脚本自检：docx/pdf/md/txt 转换、manifest、幂等 skip、变更备份、负例。"""
     checks: list[str] = []
+    pdf_available = _pdf_stack_available()
     tmp = Path(tempfile.mkdtemp(prefix="bidgenie-convert-selftest-"))
     try:
         project_dir = tmp / "project"
@@ -1660,14 +1677,18 @@ def run_selftest() -> dict[str, Any]:
         txt_path = tmp / "说明.txt"
         txt_path.write_text("第一段文本。\n\n第二段文本。\n", encoding="utf-8", newline="\n")
         pdf_path = tmp / "示例文件.pdf"
+        requested = [docx_path, md_path, txt_path]
+        if pdf_available:
+            requested.append(pdf_path)
         import contextlib
 
         # 第三方 import 可能向 stdout 打印横幅；自检 --json 必须保持单对象，横幅重定向到 stderr
         with contextlib.redirect_stdout(sys.stderr):
-            _build_test_pdf(pdf_path)
-            first = convert_files(project_dir, [docx_path, md_path, txt_path, pdf_path], per_file_timeout=60)
+            if pdf_available:
+                _build_test_pdf(pdf_path)
+            first = convert_files(project_dir, requested, per_file_timeout=60)
         checks.append("convert")
-        if len(first["converted"]) != 4 or first["failed"]:
+        if len(first["converted"]) != len(requested) or first["failed"]:
             raise AssertionError(f"首次转换结果不正确：converted={first['converted']} failed={first['failed']}")
         docx_md = project_dir / "sources" / "converted" / "示例招标文件.md"
         if not docx_md.is_file():
@@ -1687,12 +1708,17 @@ def run_selftest() -> dict[str, Any]:
                 raise AssertionError(f"docx markdown 缺少：{expected!r}")
         checks.append("docx_markdown")
         checks.append("checkbox_symbol_fidelity")
-        pdf_md = project_dir / "sources" / "converted" / "示例文件.md"
-        if not pdf_md.is_file() or "Bid Conversion PDF Fixture" not in pdf_md.read_text(encoding="utf-8"):
-            raise AssertionError("PDF 转换产物不正确")
-        checks.append("pdf_markdown")
+        if pdf_available:
+            pdf_md = project_dir / "sources" / "converted" / "示例文件.md"
+            if not pdf_md.is_file() or "Bid Conversion PDF Fixture" not in pdf_md.read_text(encoding="utf-8"):
+                raise AssertionError("PDF 转换产物不正确")
+            checks.append("pdf_markdown")
+        else:
+            # PDF 组件是可选依赖，缺失时不能让必过项 scripts_integrity 失败；
+            # 缺失本身由 env-check 的 pdf_libraries 单独报告。
+            checks.append("pdf_skipped_missing_deps")
         manifest = json.loads((project_dir / MANIFEST_REL).read_text(encoding="utf-8"))
-        if len(manifest.get("files") or []) != 4 or not manifest.get("converter"):
+        if len(manifest.get("files") or []) != len(requested) or not manifest.get("converter"):
             raise AssertionError(f"manifest 不正确：{manifest}")
         if not any(str(entry.get("hash") or "").startswith("sha256:") for entry in manifest["files"]):
             raise AssertionError("manifest 缺少 hash")
@@ -1772,6 +1798,7 @@ def run_selftest() -> dict[str, Any]:
             "selftest": {
                 "script": "bg_convert.py",
                 "python": __import__("platform").python_version(),
+                "pdfAvailable": pdf_available,
                 "checks": checks,
             },
         }

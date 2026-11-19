@@ -4,7 +4,10 @@
 红线：
 - 只执行 env-actions.json 中 mode=auto 的白名单动作；
 - pip 以参数列表调用（不拼接 shell），先装到 ``<target>.new``，逐 import 验证，
-  原子替换并把旧目录备份 ``.broken-<ts>``；任一步失败回滚并返回 E_REPAIR_FAILED；
+  原子替换并把旧目录备份 ``.broken-<ts>``；
+- 多个动作一起安装时按动作分别验证：只要有一个动作导入通过就提交 staging，
+  失败动作写入 ``partial``/``failedActions``，避免某个可选组件（如 pywin32）
+  把已装好的 PDF 组件一起丢掉；
 - 写入仅 data pylibs、``dsh/logs``、``dsh/locks``、env-check.json（通过 bg_env_check）；
 - 不修改 DSH bundled python site-packages。
 """
@@ -146,10 +149,36 @@ def _append_log(log_path: Path, job_id: str, event: str, **detail: Any) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+#: 自检子进程必须按运行时同一套规则挂载 pylibs：只设 ``PYTHONPATH`` 时
+#: ``win32com`` 能找到包，但 ``pywintypes*.dll`` 不在 DLL 搜索路径，pywin32 会被
+#: 误判为导入失败（见 env-repair 日志 2026-11-19）。
+_PROBE_CODE = """\
+import sys
+sys.path.insert(0, sys.argv[1])
+from _lib import deps
+deps.ensure_dependency_path(base=sys.argv[2])
+import importlib
+for name in sys.argv[3:]:
+    try:
+        importlib.import_module(name)
+        print(name + "=ok")
+    except Exception as exc:
+        print(name + "=" + type(exc).__name__ + ": " + str(exc).replace(chr(10), chr(32)))
+"""
+
+
 def _import_probe(imports: Sequence[str], staging: Path) -> dict[str, dict[str, str]]:
-    code = "import importlib,sys\nfor name in sys.argv[1:]:\n    try:\n        importlib.import_module(name); print(name+'=ok')\n    except Exception as exc:\n        print(name+'='+type(exc).__name__+': '+str(exc))\n"
     env = {**os.environ, "BIDGENIE_PYLIBS": str(staging), "PYTHONPATH": str(staging)}
-    completed = subprocess.run([sys.executable, "-c", code, *imports], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, env=env, cwd=str(_PLUGIN_ROOT))
+    completed = subprocess.run(
+        [sys.executable, "-X", "utf8", "-c", _PROBE_CODE, str(_VENDOR), str(staging), *imports],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=env,
+        cwd=str(_PLUGIN_ROOT),
+    )
     result: dict[str, dict[str, str]] = {}
     for line in (completed.stdout or "").splitlines():
         if "=" not in line:
@@ -195,6 +224,7 @@ def apply_repair(
     pip = list(pip_command or [sys.executable, "-m", "pip"])
     _append_log(log_path, job_id, "start", items=sorted(set(item_ids)), actions=[action.get("id") for action in actions], target=str(target))
     backup: Path | None = None
+    replaced = False
     result: dict[str, Any] = {"ok": False, "command": "env_repair_apply", "jobId": job_id, "logPath": paths.rel_posix(ws, log_path), "target": str(target), "itemIds": sorted(set(item_ids))}
     try:
         with jsonio.FileLock(lock_path, timeout=jsonio.LOCK_TIMEOUT_SEC):
@@ -213,26 +243,97 @@ def apply_repair(
             if completed.returncode != 0:
                 raise errors.BgError("E_REPAIR_FAILED", "依赖安装失败", hint="查看 env-repair 日志；已回滚未改动旧目录", detail={"jobId": job_id, "exitCode": completed.returncode}, exit_code=errors.EXIT_PRECONDITION)
             probes = _import_probe(sorted(set(imports)), staging)
-            failed_probes = {name: info for name, info in probes.items() if info["status"] != "ok"}
             _append_log(log_path, job_id, "probe", probes=probes)
-            if failed_probes:
-                raise errors.BgError("E_REPAIR_FAILED", "新依赖导入验证失败", hint="保留旧目录；检查 pylibs 二进制", detail={"jobId": job_id, "failedImports": failed_probes}, exit_code=errors.EXIT_PRECONDITION)
+            # 按动作分别判定：一个可选动作导入失败（例如 pywin32 的 DLL 目录问题）
+            # 不应把同一批已经装好的其它组件一起回滚。
+            actions_report: list[dict[str, Any]] = []
+            for action in actions:
+                action_imports = [str(module) for module in action.get("verifyImports") or []]
+                failed_imports = {
+                    name: probes.get(name, {"status": "failed", "detail": "probe missing"})
+                    for name in action_imports
+                    if probes.get(name, {}).get("status") != "ok"
+                }
+                actions_report.append(
+                    {
+                        "id": action.get("id"),
+                        "items": [str(item) for item in action.get("items") or []],
+                        "packages": [str(package) for package in action.get("packages") or []],
+                        "status": "ok" if not failed_imports else "failed",
+                        "failedImports": failed_imports,
+                    }
+                )
+            ok_actions = [entry for entry in actions_report if entry["status"] == "ok"]
+            failed_actions = [entry for entry in actions_report if entry["status"] != "ok"]
+            _append_log(log_path, job_id, "probe-groups", actions=actions_report)
+            if not ok_actions:
+                raise errors.BgError(
+                    "E_REPAIR_FAILED",
+                    "新依赖导入验证失败",
+                    hint="保留旧目录；检查 pylibs 二进制",
+                    detail={
+                        "jobId": job_id,
+                        "actions": failed_actions,
+                        "failedImports": {name: info for name, info in probes.items() if info.get("status") != "ok"},
+                    },
+                    exit_code=errors.EXIT_PRECONDITION,
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
                 backup = target.with_name(target.name + f".broken-{paths.timestamp14()}")
                 target.rename(backup)
             staging.rename(target)
+            replaced = True
             _append_log(log_path, job_id, "replaced", backup=str(backup) if backup else "", target=str(target))
-            verification = _run_env_check(ws, sorted(set(item_ids)))
+            # 只复验“导入验证已通过”的动作；失败动作保留在 partial 里，等下次重试。
+            verified_items = sorted({str(item) for entry in ok_actions for item in entry.get("items") or []})
+            verification = _run_env_check(ws, verified_items)
             _append_log(log_path, job_id, "env-check", exitCode=verification.get("exitCode"), payload=verification.get("payload"))
-            failed_after = [item for item in (verification.get("payload") or {}).get("items") or [] if item.get("id") in set(item_ids) and item.get("status") == "failed"]
-            if verification.get("exitCode") != 0 or failed_after:
-                raise errors.BgError("E_REPAIR_FAILED", "修复后 env-check 复验仍失败", hint="已回滚到旧 pylibs", detail={"jobId": job_id, "items": [item.get("id") for item in failed_after]}, exit_code=errors.EXIT_PRECONDITION)
-            result.update({"ok": True, "backup": str(backup) if backup else "", "probes": probes, "verification": verification, "actions": [action.get("id") for action in actions]})
+            failed_after = [
+                item
+                for item in (verification.get("payload") or {}).get("items") or []
+                if item.get("id") in set(verified_items) and item.get("status") == "failed"
+            ]
+            # 导入已验证通过，但 env-check 仍失败时要区分责任：例如 pywin32 已装好、
+            # 只是本机没有 Word，属于人工处理项，不应把装好的 PDF 组件一起回滚。
+            blocking_after = [item for item in failed_after if str((item.get("detail") or {}).get("remediable") or "") != "manual"]
+            manual_after = [item for item in failed_after if item not in blocking_after]
+            if blocking_after or (verification.get("exitCode") != 0 and not failed_after):
+                raise errors.BgError(
+                    "E_REPAIR_FAILED",
+                    "修复后 env-check 复验仍失败",
+                    hint="已回滚到旧 pylibs",
+                    detail={"jobId": job_id, "items": [item.get("id") for item in blocking_after]},
+                    exit_code=errors.EXIT_PRECONDITION,
+                )
+            warnings: list[str] = []
+            if failed_actions:
+                warnings.append("部分依赖已安装，但个别组件导入验证失败；其余组件可正常使用，失败项见修复日志。")
+            if manual_after:
+                warnings.append("以下检查项仍需手动处理：" + "、".join(str(item.get("id")) for item in manual_after))
+            result.update(
+                {
+                    "ok": True,
+                    "backup": str(backup) if backup else "",
+                    "probes": probes,
+                    "verification": verification,
+                    "actions": [entry["id"] for entry in ok_actions],
+                    "actionsReport": actions_report,
+                }
+            )
+            if failed_actions:
+                result.update({"partial": True, "failedActions": failed_actions})
+            if manual_after:
+                result["manualRemaining"] = [str(item.get("id")) for item in manual_after]
+            if warnings:
+                result["warnings"] = warnings
+            if failed_actions:
+                _append_log(log_path, job_id, "partial", result=result)
+                return result
             _append_log(log_path, job_id, "done", result=result)
             return result
     except errors.BgError:
-        if target.exists() and backup is not None:
+        if replaced and target.exists():
             shutil.rmtree(target, ignore_errors=True)
         if backup is not None and backup.exists() and not target.exists():
             backup.rename(target)

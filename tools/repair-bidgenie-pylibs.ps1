@@ -114,11 +114,21 @@ function Resolve-Python {
     $runtimeRoot = Join-Path $dshHome 'dsh-runtimes\dsh-primary-runtime\dependencies\python'
     $candidates += (Join-Path $runtimeRoot 'python.exe')
     $candidates += (Join-Path $runtimeRoot 'Scripts\python.exe')
-    # 常见 DSH 安装目录里的 runtime（LocalAppData\Programs\DeepSeek Harness）
+    # DSH Desktop 安装目录里的只读运行时载荷：全新机器上 dsh-runtimes 尚未生成，
+    # 但 resources\runtime\primary-runtime\dependencies\python\python.exe 一直存在。
+    $desktopExe = $env:DSH_NODE_EXECUTABLE
+    if ($desktopExe -and (Test-Path -LiteralPath $desktopExe)) {
+        $installRoot = Split-Path -Parent $desktopExe
+        $payloadRoot = Join-Path $installRoot 'resources\runtime\primary-runtime\dependencies\python'
+        $candidates += (Join-Path $payloadRoot 'python.exe')
+        $candidates += (Join-Path $payloadRoot 'Scripts\python.exe')
+    }
+    # 兜底扫描安装目录（兼容旧版布局 dsh-runtimes 与新版 primary-runtime 载荷）
     $programs = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness'
     if (Test-Path $programs) {
+        $candidates += (Join-Path $programs 'resources\runtime\primary-runtime\dependencies\python\python.exe')
         Get-ChildItem $programs -Recurse -Filter 'python.exe' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match 'dsh-runtimes.*dependencies\\python' } |
+            Where-Object { $_.FullName -match '(dsh-runtimes|primary-runtime).*dependencies\\python' } |
             Select-Object -First 3 | ForEach-Object { $candidates += $_.FullName }
     }
 
@@ -131,6 +141,8 @@ function Resolve-Python {
     $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe')
 
     foreach ($c in $candidates) {
+        # Windows 商店别名只是指向 WindowsApps 的符号链接，执行它会拉起商店，不是真解释器。
+        if ($c -and $c -match '\\WindowsApps\\') { continue }
         if ($c -and (Test-Path $c)) {
             $v = & $c -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null
             if ($LASTEXITCODE -eq 0 -and $v) {
@@ -206,14 +218,18 @@ function Ensure-PylibsLink {
 
 # ---------------------------------------------------------------- 健康检查
 function Test-PylibsHealthy {
-    param([string]$Dir, [string]$Py)
+    param([string]$Dir, [string]$Py, [string]$Libexec)
     if (-not (Test-Path $Dir)) { return @{ Ok = $false; Reason = '目录不存在' } }
     $pyd = @(Get-ChildItem $Dir -Recurse -Filter *.pyd -File -ErrorAction SilentlyContinue)
     if ($pyd.Count -eq 0) { return @{ Ok = $false; Reason = '目录里没有任何 .pyd（编译扩展全部缺失）' } }
 
+    # 必须按插件运行时的同一套规则挂载：sys.path 子目录 + pywin32 的 DLL 搜索目录。
+    # 只 sys.path.insert 会让 win32com 找不到 pywintypes312.dll，被误判为导入失败。
     $probe = @'
 import sys
-sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from _lib import deps
+deps.ensure_dependency_path(base=sys.argv[1])
 mods = ["fitz", "pymupdf", "pymupdf4llm", "pdfplumber", "PIL.Image", "cryptography", "win32com.client", "docx", "lxml.etree"]
 bad = []
 for m in mods:
@@ -223,7 +239,7 @@ for m in mods:
         bad.append(f"{m}: {type(exc).__name__}: {exc}")
 print("\n".join(bad))
 '@
-    $result = Invoke-Native -Exe $Py -Arguments @('-', $Dir) -StdinText $probe
+    $result = Invoke-Native -Exe $Py -Arguments @('-', $Dir, $Libexec) -StdinText $probe
     $out = @($result.Output | ForEach-Object { "$_" } | Where-Object { $_ -and $_.Trim() })
     if ($result.ExitCode -ne 0) { return @{ Ok = $false; Reason = "导入探测进程失败（exit=$($result.ExitCode)）：$($out -join '; ')" } }
     if ($out.Count -gt 0) { return @{ Ok = $false; Reason = ($out -join '; ') } }
@@ -244,6 +260,7 @@ function Assert-UnderPlugin {
 # ---------------------------------------------------------------- 主流程
 try {
     $plugin = Resolve-PluginRoot -Explicit $PluginRoot
+    $libexec = Join-Path $plugin 'libexec'
     $py = Resolve-Python -Explicit $Python
     $req = Join-Path $plugin 'libexec\requirements.txt'
     $dataHome = Resolve-DataHome -Explicit $DataHome
@@ -308,7 +325,7 @@ try {
 
     # ---- 现状
     Write-Step "现状检查"
-    $health = Test-PylibsHealthy -Dir $live -Py $py
+    $health = Test-PylibsHealthy -Dir $live -Py $py -Libexec $libexec
     $linked = (Get-LinkTarget (Join-Path $plugin 'pylibs')) -eq ([System.IO.Path]::GetFullPath($live))
     if ($health.Ok -and $linked -and -not $Force) {
         Write-Ok "pylibs 健康：$($health.Reason)"
@@ -377,7 +394,7 @@ try {
 
     # ---- 2. 验证
     Write-Step "验证临时目录"
-    $newHealth = Test-PylibsHealthy -Dir $new -Py $py
+    $newHealth = Test-PylibsHealthy -Dir $new -Py $py -Libexec $libexec
     if (-not $newHealth.Ok) { throw "临时目录验证失败：$($newHealth.Reason)" }
     Write-Ok "验证通过：$($newHealth.Reason)"
 
@@ -389,7 +406,7 @@ try {
     Move-Item -LiteralPath $new -Destination $live
     Write-Ok "新目录已就位：$live"
 
-    $finalHealth = Test-PylibsHealthy -Dir $live -Py $py
+    $finalHealth = Test-PylibsHealthy -Dir $live -Py $py -Libexec $libexec
     if (-not $finalHealth.Ok) { throw "替换后验证失败：$($finalHealth.Reason)（可用 -Rollback 回滚）" }
     Write-Ok "替换后验证通过：$($finalHealth.Reason)"
     Ensure-PylibsLink -Plugin $plugin -Target $live
