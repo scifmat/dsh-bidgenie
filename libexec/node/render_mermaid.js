@@ -79,6 +79,10 @@ const mermaidLib = fs.readFileSync(libPath, 'utf8');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bidgenie-mermaid-'));
 const htmlPath = path.join(tmpDir, 'render.html');
 const screenshotPath = path.join(tmpDir, 'render.png');
+// 每次渲染用独立的 user-data-dir：默认配置目录可能正被后台 Edge/Chrome 占用，
+// 此时无头进程会把命令转发给已有实例后直接退出（exit=0）但不产生截图。
+const profileDir = path.join(tmpDir, 'profile');
+fs.mkdirSync(profileDir, { recursive: true });
 const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
@@ -111,6 +115,11 @@ const args = [
   '--no-sandbox',
   '--disable-dev-shm-usage',
   '--hide-scrollbars',
+  `--user-data-dir=${profileDir}`,
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--disable-extensions',
+  '--disable-sync',
   `--force-device-scale-factor=${Number.isFinite(scale) && scale > 0 ? scale : 2}`,
   '--window-size=1600,2000',
   `--screenshot=${screenshotPath}`,
@@ -122,7 +131,13 @@ const completed = spawnSync(browserPath, args, { timeout: 90000, encoding: 'utf8
 const stderrTail = (completed.stderr || '').split('\n').slice(-6).join('\n');
 try {
   if (!fs.existsSync(screenshotPath) || fs.statSync(screenshotPath).size === 0) {
-    fail(`浏览器截图失败（exit=${completed.status}）`, 5, { browser: browserPath, stderrTail });
+    fail(`浏览器截图失败（exit=${completed.status}）`, 5, {
+      browser: browserPath,
+      status: completed.status,
+      signal: completed.signal || '',
+      error: completed.error ? String(completed.error.message || completed.error) : '',
+      stderrTail,
+    });
   }
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.copyFileSync(screenshotPath, outputPath);

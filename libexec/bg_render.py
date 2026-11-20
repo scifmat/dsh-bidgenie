@@ -849,19 +849,29 @@ def run_selftest() -> dict[str, Any]:
         if "fig-1-1-02" not in rendered or not (project_dir / rendered["fig-1-1-02"]["resourcePath"]).is_file():
             raise AssertionError("terminal 未生成")
         mermaid_info = rendered["fig-1-1-01"]
-        if not mermaid_info.get("cropped") or mermaid_info.get("originalWidth", 0) <= mermaid_info.get("width", 0):
-            raise AssertionError(f"mermaid 未按内容裁切：{mermaid_info}")
-        if mermaid_info.get("width", 0) > CROP_MAX_WIDTH or mermaid_info.get("height", 0) > CROP_MAX_HEIGHT:
-            raise AssertionError(f"mermaid 裁切后超出最大宽高：{mermaid_info}")
-        with Image.open(mermaid_png) as final_image:
-            content_bbox = image_content_bbox(mermaid_png)
-            if content_bbox is None:
-                raise AssertionError("裁切后无内容 bbox")
-            left_margin, top_margin = content_bbox[0], content_bbox[1]
-            right_margin = final_image.size[0] - content_bbox[2]
-            bottom_margin = final_image.size[1] - content_bbox[3]
-            if min(left_margin, top_margin, right_margin, bottom_margin) > CROP_PADDING + 2:
-                raise AssertionError(f"裁切 padding 过大：{left_margin}/{top_margin}/{right_margin}/{bottom_margin}")
+        mermaid_fallback = mermaid_info.get("status") == "fallback"
+        if mermaid_fallback:
+            # 浏览器属于可选组件：没有 Chrome/Edge，或 headless 截图不可用时，
+            # mermaid 会降级为 Pillow 占位图（由 env-check 的 browser_renderer 单独报告）。
+            # 必过项 scripts_integrity 不应因此失败。
+            if mermaid_info.get("cropped") is not False:
+                raise AssertionError(f"fallback 不应标记 cropped：{mermaid_info}")
+            if not any(item.get("code") == "mermaid_fallback" for item in first["warnings"]):
+                raise AssertionError(f"fallback 未产生 warning：{first['warnings']}")
+        else:
+            if not mermaid_info.get("cropped") or mermaid_info.get("originalWidth", 0) <= mermaid_info.get("width", 0):
+                raise AssertionError(f"mermaid 未按内容裁切：{mermaid_info}")
+            if mermaid_info.get("width", 0) > CROP_MAX_WIDTH or mermaid_info.get("height", 0) > CROP_MAX_HEIGHT:
+                raise AssertionError(f"mermaid 裁切后超出最大宽高：{mermaid_info}")
+            with Image.open(mermaid_png) as final_image:
+                content_bbox = image_content_bbox(mermaid_png)
+                if content_bbox is None:
+                    raise AssertionError("裁切后无内容 bbox")
+                left_margin, top_margin = content_bbox[0], content_bbox[1]
+                right_margin = final_image.size[0] - content_bbox[2]
+                bottom_margin = final_image.size[1] - content_bbox[3]
+                if min(left_margin, top_margin, right_margin, bottom_margin) > CROP_PADDING + 2:
+                    raise AssertionError(f"裁切 padding 过大：{left_margin}/{top_margin}/{right_margin}/{bottom_margin}")
         manifest = jsonio.read_json(package_dir / MANIFEST_FILE)
         anchor_meta = (manifest.get("anchors") or {}).get("fig-1-1-01") or {}
         if anchor_meta.get("originalWidth") != mermaid_info.get("originalWidth") or anchor_meta.get("width") != mermaid_info.get("width"):
@@ -870,7 +880,7 @@ def run_selftest() -> dict[str, Any]:
             raise AssertionError(f"manifest DPI/物理尺寸不正确：{anchor_meta}")
         if anchor_meta.get("renderProfile", {}).get("version") != RENDER_PROFILE_VERSION:
             raise AssertionError(f"manifest 缺少 renderProfile 缓存版本：{anchor_meta.get('renderProfile')}")
-        checks.append("crop")
+        checks.append("mermaid_fallback" if mermaid_fallback else "crop")
         # R1：超高图按 A4 物理高度限高（120dpi 下 1166px），并写 DPI 120
         tall_path = tmp / "tall-mermaid.png"
         from PIL import ImageDraw as _ImageDraw
@@ -905,7 +915,12 @@ def run_selftest() -> dict[str, Any]:
         checks.append("markers_preserved")
         second = render_resources(workspace=workspace, project_dir=project_dir, browser="auto")
         second_skipped = {item["anchorId"] for item in second["skipped"]}
-        if not {"fig-1-1-01", "fig-1-1-02"} <= second_skipped:
+        second_rendered = {item["anchorId"] for item in second["rendered"]}
+        if mermaid_fallback:
+            # fallback 图不做缓存命中（每次都重新降级），terminal 图仍按 hash 跳过
+            if "fig-1-1-02" not in second_skipped or "fig-1-1-01" not in second_rendered:
+                raise AssertionError(f"fallback 二次渲染不正确：{second['skipped']} {second['rendered']}")
+        elif not {"fig-1-1-01", "fig-1-1-02"} <= second_skipped:
             raise AssertionError(f"二次渲染未按 hash 跳过：{second['skipped']} {second['rendered']}")
         checks.append("idempotent")
         fallback = render_resources(
