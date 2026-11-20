@@ -2517,6 +2517,8 @@ window.__ModuleLoader__.load({
         lastIds: [],
       });
       const [repairOpen, setRepairOpen] = useState(false);
+      // 修复成功后默认不再把原始日志铺在页面上，需要时再展开
+      const [repairLogOpen, setRepairLogOpen] = useState(false);
       const repairPlanKeyRef = useRef('');
       const mounted = useMountedRef();
 
@@ -2640,6 +2642,11 @@ window.__ModuleLoader__.load({
         (downgradedOptional.length ? '（' + downgradedOptional.length + ' 项降级）' : '');
       const optionalTroubleCount = downgradedOptional.length + skippedOptional.length;
       const repairRunning = repair.phase === 'running';
+      const repairAllGreen =
+        repair.phase === 'done' &&
+        !!repair.after &&
+        repair.after.passed >= repair.after.total &&
+        repair.remaining.length === 0;
       const repairUnhealthy = hasResult && (failedRequired.length > 0 || downgradedOptional.length > 0);
       const repairGroups = (repair.plan && (repair.plan.groups || (repair.plan.plan && repair.plan.plan.groups))) || {};
       const autoRepairActions = asArray(repairGroups.auto);
@@ -2767,6 +2774,7 @@ window.__ModuleLoader__.load({
         if (!ids.length || repairRunning) return;
         const before = { passed: requiredPassed, total: requiredTotal };
         setRepairOpen(false);
+        setRepairLogOpen(false);
         setRepair((prev) =>
           Object.assign({}, prev, {
             phase: 'running',
@@ -3033,11 +3041,18 @@ window.__ModuleLoader__.load({
                   ? '所有必需项已通过。'
                   : '还剩 ' + Math.max(0, (repair.after ? repair.after.total - repair.after.passed : 0)) + ' 项必需检查未通过。') +
                 (repair.remaining.length ? '剩余未通过/降级：' + repair.remaining.join('、') + '。' : '') +
-                (repair.logPath ? '日志：' + repair.logPath : ''),
+                (!repairAllGreen && repair.logPath ? '日志：' + repair.logPath : ''),
               actions: h(
                 'div',
                 { className: 'bgp-actions' },
                 h(Button, { variant: 'secondary', icon: 'refresh', onClick: runCheck, disabled: running || repairRunning }, '重新检查'),
+                repairAllGreen && repair.logTail.length
+                  ? h(
+                      Button,
+                      { size: 'sm', variant: 'text', onClick: () => setRepairLogOpen((prev) => !prev) },
+                      repairLogOpen ? '收起日志' : '查看日志',
+                    )
+                  : null,
                 repair.logPath
                   ? h(Button, { size: 'sm', variant: 'text', icon: 'copy', onClick: () => copyHelp(repair.logPath) }, '复制日志路径')
                   : null,
@@ -3060,7 +3075,7 @@ window.__ModuleLoader__.load({
               ),
             })
           : null,
-        repair.phase === 'done' && repair.logTail.length
+        repair.phase === 'done' && repair.logTail.length && (!repairAllGreen || repairLogOpen)
           ? h(
               'div',
               { className: 'bgp-card' },
