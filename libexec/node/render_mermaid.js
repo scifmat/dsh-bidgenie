@@ -18,8 +18,22 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+let tempDir = null;
+
+/** 删除本次渲染的临时目录（HTML/截图/Edge profile）。`process.exit` 不会执行 finally，失败路径要显式调用。 */
+function cleanupTempDir() {
+  if (!tempDir) return;
+  try {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+  tempDir = null;
+}
+
 function fail(message, code = 2, detail = {}) {
   process.stdout.write(JSON.stringify({ ok: false, error: message, detail }, null, 2) + '\n');
+  cleanupTempDir();
   process.exit(code);
 }
 
@@ -77,6 +91,7 @@ if (!browserPath) fail('未找到可用 Chrome/Edge（或 --browser none）', 4,
 const code = fs.readFileSync(inputPath, 'utf8');
 const mermaidLib = fs.readFileSync(libPath, 'utf8');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bidgenie-mermaid-'));
+tempDir = tmpDir;
 const htmlPath = path.join(tmpDir, 'render.html');
 const screenshotPath = path.join(tmpDir, 'render.png');
 // 每次渲染用独立的 user-data-dir：默认配置目录可能正被后台 Edge/Chrome 占用，
@@ -158,11 +173,8 @@ try {
       2,
     ) + '\n',
   );
+  cleanupTempDir();
   process.exit(0);
 } finally {
-  try {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  } catch (_) {
-    /* ignore */
-  }
+  cleanupTempDir();
 }
