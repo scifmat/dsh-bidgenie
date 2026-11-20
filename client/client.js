@@ -2784,7 +2784,15 @@ window.__ModuleLoader__.load({
         );
         api
           .envCheckRepair(workspace, { actionIds: ids, yes: true })
-          .then((result) => api.runEnvCheck(workspace).then((checked) => finishRepair(result, before, checked)))
+          .then((result) =>
+            api.runEnvCheck(workspace).then((checked) => {
+              // 修复后的自动重检结果要回填页面顶部统计，否则上面仍显示修复前的“可选 5/7（2 项降级）”
+              if (mounted.current && checked && asArray(checked.items).length) {
+                setState({ status: 'ready', data: checked, error: null });
+              }
+              finishRepair(result, before, checked);
+            }),
+          )
           .catch((error) => {
             if (!mounted.current) return;
             api
