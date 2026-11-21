@@ -37,6 +37,11 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
 - 主技能路由而来：项目 `state.currentStage == info_extract`。
 - 源文件就绪：`<projectDir>/sources/conversion-manifest.json` 存在，主招标文件已转换。
   按 CONTRACT §10.1：**由 Agent 语义分类并复制**为固定命名 `sources/01-bidding-documents.md` … `sources/07-<描述>.md`（原件保留在 `sources/raw/`，不修改原文件；分类不确定时询问用户）。
+- 转换回退提示（大 PDF 必看）：manifest 的 `files[]`/`sources[]` 条目带
+  `fallbackPageCount/fallbackPages/keyDataFromFallbackOnly/fallbackNote`，warnings 含
+  `key_data_from_fallback_only:<n>`、`pdf_pages_fallback:<n>` 时表示**该页结构化内容（表格/版式）由纯文本回退补齐**；
+  另有 `tableRecheck.mode=sampled`（>60 页大文件抽样复核）与 `pdf_table_recheck_large_pdf:` warning。
+  涉及这些页的数字/条款，提取时须在备注标「关键数据仅来自回退文本（第 N 页）」，并在 F3 汇报中显式提示用户核对 PDF 原件（见 §5.1）。
 - 模板就绪：`{{TEMPLATES}}/extraction/_template-manifest.json`（v2，`templateVersion 2.x`）+ 9 个模板正文；缺失 → 停止并如实告知「提取模板尚未随包提供」，不伪造。
 - 模板读法：每个模板读「提取指引」「提取清单」「**输出示例**」三部分；**输出格式只以「输出示例」为准**，清单只用于字段覆盖自检。
 
@@ -65,6 +70,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
    ```
 
    白名单：`projectNo / projectName / isSubcontracted / packageCount / packagesToWrite / sourceFiles`（`sourceFiles` 条目需 `originalName/rawPath/convertedPath`，路径为工作区相对 POSIX 路径）。脚本报错按 `hint` 修数据后重跑；成功后删除临时 JSON。**禁止手写 project.json/state.json**。
+   - `packagesToWrite` 两种合法写法：①**不传** → 按 `packageCount` 自动生成 `package-1..N`；②显式传 `[]` 或 `packageCount` 内子集 → 表示「撰写包待 F4 确认」，脚本接受并返回 warning/`packagesToWriteNote`；**最终撰写包由 F4 选包（`bg_project.py select-packages`）覆盖**，F3 不必强行定死。
 5. **结构校验（必须）**：
 
    ```text
@@ -72,6 +78,8 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
    ```
 
    校验维度（M3.2 v2）：9 文件存在、首 `#` 标题与 manifest title 一致、`##` expectedSections 齐全、**无机器表头/无 frontmatter**、07 评分表三列（评审因素/分值/评分标准）+ 合计、表格/正文非空。
+   - `coverage.criteriaCount` 口径：`criteriaCountScope=all_packages_total` 时为**全包合计**（`criteriaCountNote` 已写明、`criteriaByPackage` 给分包明细）；单包 outline/审查不要按全包合计核对，按单包个数取。
+   - `extractionCaveats`（写回 `project.extensions`）：按包合并展示、纯标题行（`**需用户确认：**` 之类）已丢弃、同包内相似重复项已合并（`duplicateCount/sources` 可见合并来源），汇报时用 `caveatsByPackage` 分片说明。
    有 blocker → 按报告修复（保持人读格式）后重跑，**≤3 轮**；仍失败 → 输出缺口清单 + 需用户补充项，停在 `info_extract`。
 6. **关键信息导出（用户要求时）**：
 
@@ -133,6 +141,14 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
 ```
 
 （不写"不允许"，也不写"允许"。）
+
+**回退文本页（`keyDataFromFallbackOnly`）的额外处理：**
+
+1. 识别：manifest 条目 `keyDataFromFallbackOnly=true` / `fallbackPages=[…]`，正文里对应「## 第 N 页（转换回退文本）」章节；
+2. 该页内容**只作线索**：表格结构、合并单元格、跨页对应关系可能已丢失，数字/单位/数量极易错位；
+3. 提取稿备注必须写「关键数据仅来自回退文本（第 N 页），需核对 PDF 原件」，并列入需用户确认；
+4. **F3 汇报必须显式提示**：列出回退页号与受影响的字段/数值（如各包设施数量、服务范围），提示用户核对原件后再进入写作；
+5. 同名关键数值（如不同包的设施数量）跨页合并前，先确认是否来自同一页/同一表；无法确认时按「见冲突/需核对」记录，不自行合并。
 
 ### 5.2 内部矛盾：照实分别摘录，不裁决
 
@@ -197,6 +213,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
 | 主文件未转换 / 转换质量差 | 先转换或请用户换文件；质量差在汇报中标注「可能不完整」 |
 | 分包矛盾/无法判定 | 必须问用户，不猜不默认 |
 | 转换不可辨/疑似丢失（复选框/合并单元格/文本框/删除线/上下标等） | 照录可见内容 + 标注「转换不可辨/疑似丢失」+ 列需用户确认；关键字段阻塞提问；不猜选、不静默丢（§5.1） |
+| 大 PDF 回退页（`keyDataFromFallbackOnly` / `pdf_pages_fallback:`） | 该页数字/条款标「关键数据仅来自回退文本（第 N 页）」，F3 汇报显式提示核对 PDF 原件；不自行合并/裁决（§5.1） |
 | 章节/前附表/附件内部矛盾 | 分别摘录 + 标「见冲突（位置A vs 位置B）」+ 交用户确认；不裁决（§5.2） |
 | 校验 blocker | 保持人读格式修复，≤3 轮；仍失败 → 缺口清单 + 用户补充，停 `info_extract` |
 | 校验脚本仍要求旧机器格式 | 不退回机器表；记录「校验脚本版本待同步」上报（M3.2 并行交付 v2） |

@@ -22,8 +22,10 @@
 ```
 
 - `status`：done / partial / blocked；blocked 带 `blockReason` 与 `questions[]`（回传主 Agent，不直接问用户）。
-- 补充表：figurePlan 之外的 Markdown 表格在 `tables[]` 登记，与 `outline.supplementTables` 对账；不建 resources/tables。
-- 图/终端只写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`；table 不写标记。
+- `wordCount`：**审查口径字数**（汉字逐个 + ASCII 连续词，标点/空白不计，去掉标题行与 HTML 注释）；合并脚本会按章节 md 复核并回写 `outline.stats.writtenWordTotal`。目标区间为 `wordTarget` 的 90%–120%。
+- `summary`：200–400 **字符长度（`len(str)`，含标点）**，不是字数口径；两者不要混用。
+- 补充表：`tables[]` 登记本章所有 Markdown 表。属于 figurePlan 的“计划表”须带 `anchorId`（或 `caption` 与 figurePlan 完全一致，可加 `"plannedFigure": true`）；合并脚本只把**真正补充表**写入 `outline.supplementTables`（按 `anchorId`/题注去重），计划表不会重复登记成 `sup-*`。
+- 图/终端只写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`；**table 不写 `BG:FIGURE` 标记**（按 `▼表<表名>` 题注定位）。
 
 ## 批次派发示例
 

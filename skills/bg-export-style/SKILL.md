@@ -38,6 +38,14 @@ description: BidGenie 导出样式配置辅助。指导用户在 dsh/styles/{tec
 6. **文件位置正确**：`dsh/styles/<类型>/xxx.json`；放在 `dsh/styles/` 根目录会被当作旧版扁平样式并给迁移 warning。
 7. **JSON 合法**：无注释、无尾逗号、UTF-8；`schemaVersion`/`id`/`name`/`docType` 必填。
 
+## 导出自检口径（字数 / 表格）
+
+样式不改变口径；导出后 `bg_export_verify.py` 按下面规则对账，遇到不符先查内容/登记再调样式：
+
+- **字数**：`wordCount` 用审查口径（汉字逐个 + ASCII 连续词，去标题行/HTML 注释，按章节 md 复算），与 `bg_review_script` 一致；docx 原始文本字数（含标题/题注/表格单元格）另记 `docxTextWords` 仅作导出完整性参考。**summary 的 200–400 是字符长度 `len(str)`，不是字数**。
+- **表格**：`tableRegistration.expected = figurePlan.table 计划表数 + 去重后的 outline.supplementTables 补充表数`；`supplementTables` 里若残留“计划表重复登记”会按计划表去重并给 warning，不误报失败。
+- **table 不写 `BG:FIGURE`**：导出会跳过误加的标记（`tableMarkers` warning），计划表按 `▼表` 题注识别；只有 mermaid/terminal 需要 `BG:FIGURE`。
+
 ## 验证与刷新
 
 - 样式 JSON 是否可用：`GET /bidgenie/styles?kind=<类型>&workspace=<工作区>` 看 `custom` 列表与 `warnings`（非法 JSON、缺字段、docType 与目录不一致都会进 warnings，接口本身不报错）。

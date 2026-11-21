@@ -20,15 +20,23 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 
 ## 子智能体交付（逐章）
 
-1. **正文**：写 `filePath`；首行标题 `#`×level；正文标题只允许 level+1 及以内；表格用真实 Markdown，题注在表上方 `▼表<题名>`，**table 不写 `BG:FIGURE` 标记**；图/终端写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`，不嵌图片。
+1. **正文**：写 `filePath`；首行标题 `#`×level；正文标题只允许 level+1 及以内；表格用真实 Markdown，题注在表上方 `▼表<表名>`，**table 不写 `BG:FIGURE` 标记**；图/终端写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`，不嵌图片。
 2. **章节结果**：每章写 `chapters/_results/<chapterId>.chapter-result.json`（status/wordCount/summary/criterionRefs/figures/tables/issues）。
 3. **图表**：mermaid `.mmd`、terminal `.txt` → `bg_render.py` 渲染 png；配额是最低值、上不封顶，多出允许不返工；失败保留源文件并记 issues。
 4. **沙箱**：渲染/写入因 workspace-write 权限失败（EPERM）→ 停止并提示用户切换 DSH 文件策略为 **danger-full-access** 或授权工作区后重试；不静默降级、不伪造 png。
 5. 只写本批各章文件；不改 outline.json、不写其他批次、不删资源。
 
+## 口径（字数 / 表格 / summary）
+
+- **字数 = 审查口径**：汉字逐个计数 + ASCII 连续词（如 `2026-11-21`、`PLC_01` 各记 1 个词），标点与空白不计；统计时去掉 Markdown 标题行与 `<!-- ... -->` 注释。`chapter-result.wordCount` 必须用这个口径；合并脚本 `bg_chapter_merge.py` 会再按章节 md 复核，并以该口径写 `outline.stats.writtenWordTotal`（导出/概览同口径）。
+- **字数目标区间是 90%–120%**（低于 90% 需扩写，高于 120% 需精简，审查 A 层会拦）。
+- **summary 的 200–400 是字符长度 `len(str)`（含标点），不是字数**；两者不要混用。
+- **表格注册**：`chapter-result.tables[]` 登记本章所有 Markdown 表；属于 figurePlan 的“计划表”必须带 `anchorId`（或与 figurePlan 的 `caption` 完全一致），合并脚本只在 `outline.supplementTables` 登记真正的补充表，不会把计划表重复登记成 `sup-*`。计划表不写 `BG:FIGURE`，误加会被 A 层审查拦截、导出也会跳过该标记并给 warning。
+
 ## 合并与 T5
 
 - 每批结束调 `bg_chapter_merge.py`；检查各章 completion：done 继续，blocked 重试该章 ≤2 次，仍 blocked 交主 Agent。
+- 合并脚本会重算 `outline.stats`：`writtenWordTotal` 按章节 md 的审查口径复算（同时记 `reportedWordTotal` 供对照）、清理 `supplementTables` 里的计划表重复登记；`wordCountWarnings` 提示“上报字数与实测偏差 >20%”的章节。
 - 全部 leaf 为 done/skipped、无 blocked → `bg_chapter_merge.py --verify-all` → `bg_state.py check --to review` → `transition --to review`（T5）。
 - post-check 断言 `currentStage=="review"`；不成立报 `E_STATE_CORRUPT`。
 

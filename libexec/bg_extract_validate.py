@@ -23,6 +23,14 @@ M3.2 起提取文件改为**人类可读结构**（Traecode 9 模板输出示例
 7. 包目录与 `project.json.packageCount` 一致。
 
 输出 `_extraction-report.json`（`extraction/common/` 全局报告 + 每包报告）；blocker → exit 4。
+
+`project.extensions.extractionCaveats`（P2-12）：按「需用户确认/转换说明/疑似缺失/…」标记行抽取后
+归一化去重——跳过纯标题行（`**需用户确认：**` 空条目）、同包内按文本相似度合并重复项（履约担保/
+备件表/付款方式等），每条保留 `source/sources/packages/duplicateCount` 并按包合并展示。
+
+`report.coverage`（P3-14）：`criteriaCount` 为**当前校验范围**的评分项数；`all` 范围且多包时
+`criteriaCountScope=all_packages_total` 并在 `criteriaCountNote/criteriaByPackage` 注明「全包合计」
+口径，单包 outline/审查不要按全包合计核对。
 """
 
 from __future__ import annotations
@@ -735,9 +743,25 @@ def validate_project_extraction(
         blockers.extend(result.get("blockers") or [])
         warnings.extend(result.get("warnings") or [])
     criteria_count = sum((table.get("rows") or 0) for table in scoring_tables)
+    criteria_by_package: dict[str, int] = {}
+    for table in scoring_tables:
+        package_key = str(table.get("package") or table.get("packageId") or "")
+        if not package_key:
+            package_id_match = re.search(r"extraction/packages/(package-\d+)/", str(table.get("path") or table.get("file") or ""))
+            package_key = package_id_match.group(1) if package_id_match else "unknown"
+        criteria_by_package[package_key] = criteria_by_package.get(package_key, 0) + int(table.get("rows") or 0)
     report_scope = scope if scope in ("common", "packages") else "all"
     if only_package:
         report_scope = only_package
+    if report_scope == "all" and len(expected_packages) > 1:
+        criteria_scope = "all_packages_total"
+        criteria_note = (
+            f"全包合计口径：{len(expected_packages)} 个包的评分项合计；单包大纲/审查只取本包评分项"
+            "（见 criteriaByPackage），不要按全包合计核对单包覆盖"
+        )
+    else:
+        criteria_scope = str(report_scope)
+        criteria_note = "当前校验范围口径（criteriaCount 只统计本次校验文件的评分项）"
     summary = {
         "filesTotal": len(files),
         "filesOk": sum(1 for result in files if result.get("ok")),
@@ -756,7 +780,13 @@ def validate_project_extraction(
         "files": files,
         "scoringTable": scoring_tables[0] if scoring_tables else None,
         "scoringTables": scoring_tables,
-        "coverage": {"criteriaCount": criteria_count, "criteriaWithSource": criteria_count},
+        "coverage": {
+            "criteriaCount": criteria_count,
+            "criteriaCountScope": criteria_scope,
+            "criteriaCountNote": criteria_note,
+            "criteriaByPackage": criteria_by_package,
+            "criteriaWithSource": criteria_count,
+        },
         "blockers": blockers,
         "warnings": warnings,
         "summary": summary,
@@ -1022,6 +1052,90 @@ def run_selftest() -> dict[str, Any]:
             raise AssertionError(f"评分表解析不正确：{report.get('scoringTable')}")
         checks.append("golden_pass")
 
+        # P3-14：coverage.criteriaCount 口径（单包 / 全包合计）+ criteriaByPackage
+        coverage = report.get("coverage") or {}
+        if (
+            coverage.get("criteriaCountScope") != "all"
+            or not str(coverage.get("criteriaCountNote") or "")
+            or set(coverage.get("criteriaByPackage") or {}) != {"package-1"}
+        ):
+            raise AssertionError(f"单包 coverage 口径缺失：{coverage}")
+        multi_dir = tmp / "project-multi"
+        build_selftest_project(multi_dir, package_count=2)
+        multi_report = validate_project_extraction(multi_dir)["report"]
+        multi_coverage = multi_report.get("coverage") or {}
+        if (
+            multi_report.get("passed") is not True
+            or multi_coverage.get("criteriaCountScope") != "all_packages_total"
+            or "全包合计" not in str(multi_coverage.get("criteriaCountNote") or "")
+            or multi_coverage.get("criteriaCount") != 6
+            or set(multi_coverage.get("criteriaByPackage") or {}) != {"package-1", "package-2"}
+            or any(value != 3 for value in (multi_coverage.get("criteriaByPackage") or {}).values())
+        ):
+            raise AssertionError(f"多包 coverage 全包合计口径不正确：{multi_coverage}")
+        single_coverage = (validate_project_extraction(multi_dir, only_package="package-2")["report"].get("coverage") or {})
+        if single_coverage.get("criteriaCountScope") != "package-2" or single_coverage.get("criteriaCount") != 3:
+            raise AssertionError(f"单包校验 coverage 口径不正确：{single_coverage}")
+        checks.append("coverage_criteria_scope")
+
+        # P2-12：caveats 去空条目/去重/按包合并，且不丢真实不同项
+        caveat_lines = [
+            ("extraction/common/02-Eligibility-Review.md", "需用户确认：本国产品成本承诺声明函格式与原文件第六章不一致，需确认格式来源。"),
+            ("extraction/common/05-Substantive-Response.md", "8. 本国产品成本承诺声明函格式：第四章称格式详见第六章，但第六章未列该声明函，需确认格式来源。"),
+            (
+                "extraction/packages/package-1/08-Business-Requirements.md",
+                "2. **履约担保复选框不可辨**：第二章前附表第 32 项「履约担保」转换后仅存「□有 无」，复选框符号丢失；第五章明确不要求履约担保。已按「无」记录，需用户确认。",
+            ),
+            (
+                "extraction/packages/package-1/09-Technical-Requirements.md",
+                "6. **履约担保复选框不可辨**：第二章投标人须知前附表第 32 项「履约担保」转换后仅存「□有 无」，与第五章合同编制说明对应，已按「无」记录，需确认。",
+            ),
+            (
+                "extraction/packages/package-1/08-Business-Requirements.md",
+                "1. **中小微企业政策口径存在冲突**：第一章允许联合体参与，第二章前附表要求必须为中小微企业，需确认。",
+            ),
+            ("extraction/packages/package-1/06-Procurement-Content.md", "**需用户确认：**"),
+            ("extraction/packages/package-4/09-Technical-Requirements.md", "**需用户确认：** 服务期条款冲突（第三章 vs 第五章），需核对原件确认。"),
+            ("extraction/packages/package-5/09-Technical-Requirements.md", "**需用户确认：** 付款方式存在表述差异（第二章前附表 vs 第五章合同 30%/40%/30%），需核对原件确认。"),
+        ]
+        entries = build_caveat_entries(caveat_lines)
+        duplicate_items = [item for item in entries if int(item.get("duplicateCount") or 1) > 1]
+        if (
+            len(entries) != 5
+            or [str(item.get("scope")) for item in entries] != ["common", "package-1", "package-1", "package-4", "package-5"]
+            or any(not str(item.get("text") or "").strip() for item in entries)
+            or len(duplicate_items) != 2
+            or not all(len(item.get("sources") or []) == int(item.get("duplicateCount") or 0) for item in entries)
+            or "付款方式" not in " ".join(str(item.get("text") or "") for item in entries if item.get("scope") == "package-5")
+            or "服务期条款冲突" not in " ".join(str(item.get("text") or "") for item in entries if item.get("scope") == "package-4")
+        ):
+            raise AssertionError(f"caveats 去重/按包合并结果不正确：{entries}")
+        if caveats_by_package(entries) != {"common": 1, "package-1": 2, "package-4": 1, "package-5": 1}:
+            raise AssertionError(f"caveats 按包统计不正确：{caveats_by_package(entries)}")
+        # 端到端：写提取稿 → collect（跳过纯标题、去空条目）→ 写 project.extensions
+        demo_dir = tmp / "project-caveats"
+        build_selftest_project(demo_dir)
+        demo_09 = demo_dir / "extraction" / "packages" / "package-1" / "09-Technical-Requirements.md"
+        demo_09.write_text(
+            demo_09.read_text(encoding="utf-8")
+            + "\n**需用户确认：**\n\n需用户确认：设备数量仅存在于回退文本第 2 页，需与 PDF 原件核对。\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        collected = collect_extraction_caveats(demo_dir)
+        if (
+            not collected
+            or any(not str(item.get("text") or "").strip() for item in collected)
+            or any("需用户确认" == _caveat_meaningful_text(str(item.get("text") or "")) for item in collected)
+            or not all(item.get("packages") and item.get("sources") and "source" in item for item in collected)
+        ):
+            raise AssertionError(f"collect_extraction_caveats 结果不正确：{collected}")
+        written_caveats = write_extraction_caveats(demo_dir, collected)
+        saved_caveats = (jsonio.read_json(demo_dir / "project.json").get("extensions") or {}).get("extractionCaveats") or []
+        if not written_caveats or len(saved_caveats) != len(collected):
+            raise AssertionError(f"extractionCaveats 落盘不正确：{saved_caveats}")
+        checks.append("caveats_dedupe")
+
         target01 = project_dir / "extraction" / "common" / "01-Basic-Information.md"
         original01 = target01.read_text(encoding="utf-8")
 
@@ -1142,35 +1256,151 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def collect_extraction_caveats(project_dir: Path) -> list[dict[str, str]]:
-    """从提取稿收集 caveats（转换说明/需用户确认/疑似缺失/原文缺失），机读写 project.extensions。"""
-    markers = ("转换说明", "需用户确认", "疑似缺失", "无法辨识", "原文缺失", "需确认")
-    caveats: list[dict[str, str]] = []
-    seen: set[str] = set()
+#: caveat 识别标记（行内出现任一即视为待确认/转换不确定项）
+CAVEAT_MARKERS: tuple[str, ...] = ("转换说明", "需用户确认", "疑似缺失", "无法辨识", "原文缺失", "需确认")
+#: 归一化后去掉标记/标点仍不足该字数 → 视为「纯标题行」丢弃（P2-12：`**需用户确认：**` 空条目）
+CAVEAT_MIN_MEANINGFUL_CHARS = 3
+#: 同包内文本相似度阈值（字符二元组重叠率）：≥ 阈值视为重复（履约担保/备件表/付款方式等）
+CAVEAT_SIMILARITY_THRESHOLD = 0.42
+#: 去重后 caveat 上限（防止噪声淹没 project.extensions）
+CAVEAT_MAX_ITEMS = 30
+_CAVEAT_EMPHASIS_RE = re.compile(r"[*_]{1,3}")
+_CAVEAT_NUMBER_PREFIX_RE = re.compile(r"^\s*(?:\d+[.、．]|[（(]\d+[)）])\s*")
+_CAVEAT_PUNCT_RE = re.compile(r"[：:；;，,。.、（）()\[\]【】「」『』《》\s\-—…]+")
+_CAVEAT_PACKAGE_RE = re.compile(r"extraction/packages/(package-\d+)/")
+
+
+def _caveat_scope(source: str) -> str:
+    """caveat 所属包：`extraction/packages/package-N/**` → package-N，其余（common）→ common。"""
+    match = _CAVEAT_PACKAGE_RE.search(source.replace("\\", "/"))
+    return match.group(1) if match else "common"
+
+
+def _caveat_meaningful_text(text: str) -> str:
+    """去掉粗体标记/序号前缀/识别标记/标点后的“有效文字”，用于空条目判定与相似度比较。"""
+    stripped = _CAVEAT_EMPHASIS_RE.sub("", text)
+    stripped = _CAVEAT_NUMBER_PREFIX_RE.sub("", stripped)
+    for marker in CAVEAT_MARKERS:
+        stripped = stripped.replace(marker, "")
+    return _CAVEAT_PUNCT_RE.sub("", stripped)
+
+
+def _caveat_bigrams(text: str) -> set[str]:
+    normalized = _caveat_meaningful_text(text)
+    return {normalized[index:index + 2] for index in range(len(normalized) - 1)}
+
+
+def _caveat_similarity(left: str, right: str) -> float:
+    a, b = _caveat_bigrams(left), _caveat_bigrams(right)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def build_caveat_entries(lines: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """caveats 归一化/去重/按包合并（P2-12）。
+
+    - 跳过纯标题行（归一化后有效文字 < ``CAVEAT_MIN_MEANINGFUL_CHARS``，如 ``**需用户确认：**``）；
+    - 完全相同的文本跨包/跨文件合并为一条，保留全部来源（`sources`）与所属包（`packages`）；
+    - 同 scope（common / 同一 package）内按文本相似度聚类去重（履约担保、备件表、付款方式等跨文件重复）；
+    - 每簇取最长文本为展示文本，保留全部来源（`sources`）与所属包（`packages`），`duplicateCount` 记录合并条数；
+    - 不同 scope 的近重复不合并（各包含包内独有条款，避免丢真实不同项），按包顺序合并展示。
+    """
+    candidates: list[dict[str, Any]] = []
+    seen: dict[str, dict[str, Any]] = {}
+    for source, raw_text in lines:
+        stripped = str(raw_text or "").strip().lstrip("->").strip()
+        if not stripped or not any(marker in stripped for marker in CAVEAT_MARKERS):
+            continue
+        if stripped.startswith("#") or stripped.startswith("|"):
+            continue
+        if len(_caveat_meaningful_text(stripped)) < CAVEAT_MIN_MEANINGFUL_CHARS:
+            continue
+        normalized = _caveat_meaningful_text(stripped)
+        existing = seen.get(normalized)
+        if existing is not None:
+            # 完全相同文本（跨包/跨文件）：合并来源与包，而不是丢弃
+            if source not in existing["sources"]:
+                existing["sources"].append(source)
+            existing["scopes"].add(_caveat_scope(source))
+            continue
+        candidate = {
+            "text": stripped[:500],
+            "source": source,
+            "scope": _caveat_scope(source),
+            "scopes": {_caveat_scope(source)},
+            "sources": [source],
+            "order": len(candidates),
+        }
+        seen[normalized] = candidate
+        candidates.append(candidate)
+    clusters: list[dict[str, Any]] = []
+    for candidate in candidates:
+        target = None
+        for cluster in clusters:
+            if cluster["scope"] != candidate["scope"]:
+                continue
+            if any(_caveat_similarity(candidate["text"], member["text"]) >= CAVEAT_SIMILARITY_THRESHOLD for member in cluster["members"]):
+                target = cluster
+                break
+        if target is None:
+            clusters.append({"scope": candidate["scope"], "members": [candidate]})
+        else:
+            target["members"].append(candidate)
+    entries: list[dict[str, Any]] = []
+    for cluster in clusters:
+        members = list(cluster["members"])
+        representative = max(members, key=lambda item: (len(item["text"]), -item["order"]))
+        packages: list[str] = []
+        sources: list[str] = []
+        for member in members:
+            for scope in sorted(member.get("scopes") or {member.get("scope") or "common"}):
+                if scope not in packages:
+                    packages.append(scope)
+            for source in member.get("sources") or [member.get("source")]:
+                if source and source not in sources:
+                    sources.append(str(source))
+        packages.sort(key=lambda item: (0 if item == "common" else 1, item))
+        entries.append(
+            {
+                "text": representative["text"],
+                "source": representative["source"],
+                "packages": packages,
+                "sources": sources,
+                "duplicateCount": len(sources),
+                "scope": packages[0] if packages else str(cluster["scope"]),
+                "order": min(int(item["order"]) for item in members),
+            }
+        )
+    entries.sort(key=lambda item: (0 if "common" in (item.get("packages") or []) else 1, item.get("packages") or [""], item["order"]))
+    return entries[:CAVEAT_MAX_ITEMS]
+
+
+def caveats_by_package(caveats: list[dict[str, Any]]) -> dict[str, int]:
+    """按包统计 caveat 数量（合并展示口径：common 在前，其后 package-N）。"""
+    stats: dict[str, int] = {}
+    for item in caveats:
+        for package in item.get("packages") or ["common"]:
+            stats[str(package)] = stats.get(str(package), 0) + 1
+    return stats
+
+
+def collect_extraction_caveats(project_dir: Path) -> list[dict[str, Any]]:
+    """从提取稿收集 caveats（转换说明/需用户确认/疑似缺失/原文缺失），去重合并后机读写 project.extensions。"""
     extraction_dir = project_dir / "extraction"
     paths_to_scan = sorted(extraction_dir.rglob("*.md")) if extraction_dir.is_dir() else []
+    lines: list[tuple[str, str]] = []
     for path in paths_to_scan:
         try:
             text = path.read_text(encoding="utf-8-sig")
         except OSError:
             continue
         source = paths.rel_posix(project_dir, path)
-        for line in text.splitlines():
-            stripped = line.strip().lstrip("->").strip()
-            if not stripped or not any(marker in stripped for marker in markers):
-                continue
-            if stripped.startswith("#") or stripped.startswith("|"):
-                continue
-            if stripped in seen:
-                continue
-            seen.add(stripped)
-            caveats.append({"text": stripped[:500], "source": source})
-            if len(caveats) >= 30:
-                return caveats
-    return caveats
+        lines.extend((source, line) for line in text.splitlines())
+    return build_caveat_entries(lines)
 
 
-def write_extraction_caveats(project_dir: Path, caveats: list[dict[str, str]]) -> str:
+def write_extraction_caveats(project_dir: Path, caveats: list[dict[str, Any]]) -> str:
     project_file = project_dir / "project.json"
     if not project_file.is_file():
         return ""
@@ -1243,6 +1473,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             },
         )
     caveats = collect_extraction_caveats(project_dir)
+    caveat_stats = caveats_by_package(caveats)
     caveats_written = ""
     if not getattr(args, "check", False):
         caveats_written = write_extraction_caveats(project_dir, caveats)
@@ -1250,7 +1481,13 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         workspace,
         "extract.validated",
         actor="script",
-        detail={"files": summary.get("filesTotal"), "packages": summary.get("packages"), "warningCount": len(warnings), "caveatCount": len(caveats)},
+        detail={
+            "files": summary.get("filesTotal"),
+            "packages": summary.get("packages"),
+            "warningCount": len(warnings),
+            "caveatCount": len(caveats),
+            "caveatsByPackage": caveat_stats,
+        },
     )
     return {
         "ok": True,
@@ -1263,6 +1500,8 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         "coverage": report.get("coverage"),
         "warnings": warnings,
         "extractionCaveats": caveats,
+        "caveatCount": len(caveats),
+        "caveatsByPackage": caveat_stats,
         "caveatsWritten": caveats_written,
         "blockers": [],
         "summary": summary,

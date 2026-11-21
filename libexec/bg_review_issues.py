@@ -6,7 +6,17 @@
     close   --issue <RV-...> --status fixing|fixed|verified|wontfix [--note] [--user-confirmed] [--review]
     verify  [--round <k>]                                          计算 4.6 通过判据（只读）
     status                                                         台账摘要（只读）
+    carry-forward --round <k> [--dry-run]                          把上轮未 verified 问题补进当前轮台账（修复路径）
 所有写操作只改 reviews/**；state.json 仅由 bg_state.py 写。
+
+P1-3 carry-forward 约定（与 bg_review_script.py 共用同一实现）：
+- 新一轮 `bg_review_script.py --round k` 会自动把上一轮台账里未 verified 的条目带入
+  `reviews/issues.json`（详情见 `carry_forward_issues`）；
+- 台账始终是单一审计链：带入条目保留原 `issueId(RV-<上轮>-<seq>)`，新增
+  `carriedFrom/lastRound/recheck{round,previousStatus,result,note}`；
+- 每轮快照 `reviews/rounds/round-<k>.issues.json` 保留当轮时点状态；
+- `carry-forward` 子命令用于修复：ledger 被旧版本脚本整体重写后，从
+  `rounds/round-<k-1>.issues.json` 把丢失条目补回当前轮（幂等）。
 """
 
 from __future__ import annotations
@@ -131,6 +141,395 @@ def write_issues(package_dir: Path, document: dict[str, Any]) -> None:
     snapshot = package_dir / "reviews" / "rounds" / f"round-{round_no}.issues.json"
     snapshot.parent.mkdir(parents=True, exist_ok=True)
     jsonio.write_json_atomic(snapshot, document)
+
+
+# ---------------------------------------------------------------------------
+# P1-3 跨轮 carry-forward：上一轮未 verified 条目带入新一轮并复检
+# ---------------------------------------------------------------------------
+#: recheck.result 取值（写入 issue.recheck.result，报告与台账共同口径）。
+RECHECK_VERIFIED = "verified"                 # 脚本复检未复现 → 自动 verified
+RECHECK_PREVIOUS = "verified-previously"      # 上轮已 verified，继续保留
+RECHECK_RECURRED = "recurred"                 # 已修复项再次检出 → 复开 open
+RECHECK_STILL_OPEN = "still-open"             # 上轮未关闭且仍检出 → 保持 open
+RECHECK_REGRESSED = "regressed"               # 已验证项再次检出（回归）→ 复开 open
+RECHECK_PENDING_SEMANTIC = "pending-semantic"  # B/C 语义项待复审 close --review
+RECHECK_CARRIED_OPEN = "carried-open"         # B/C 语义项上轮未关闭，保持原状态
+RECHECK_WONTFIX = "wontfix-carried"           # 用户已确认不修，跨轮保留
+
+
+def _issue_condition_key(issue: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    """问题“条件键”：层 + 类型 + 章节 + 锚点（不含证据文本，用于跨轮同一问题匹配）。"""
+    return (
+        str(issue.get("layer") or ""),
+        str(issue.get("type") or ""),
+        str(issue.get("chapterId") or ""),
+        str(issue.get("anchorId") or ""),
+    )
+
+
+def _issue_dedupe_key(issue: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    """去重键（与 merge 一致）：条件键 + 证据前 120 字。"""
+    return (*_issue_condition_key(issue), str(issue.get("evidence") or "")[:120])
+
+
+def _issue_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _issue_sort_key(issue: Mapping[str, Any]) -> tuple[int, int, int]:
+    rank = {"blocker": 0, "major": 1, "minor": 2}.get(str(issue.get("severity") or ""), 3)
+    match = ISSUE_ID_RE.match(str(issue.get("issueId") or ""))
+    if match:
+        return (rank, int(match.group(1)), int(match.group(2)))
+    return (rank, 10 ** 6, 0)
+
+
+def _issue_round(issue: Mapping[str, Any]) -> int | None:
+    match = ISSUE_ID_RE.match(str(issue.get("issueId") or ""))
+    return int(match.group(1)) if match else None
+
+
+def sort_issues(issues: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """按 级别 → 轮次 → 序号 稳定排序（跨轮台账展示顺序）。"""
+    rows = [dict(item) for item in issues if isinstance(item, Mapping)]
+    rows.sort(key=_issue_sort_key)
+    return rows
+
+
+def assign_issue_ids(
+    issues: Sequence[Mapping[str, Any]],
+    round_no: int,
+    reserved: Sequence[Mapping[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    """给本轮新检出问题分配 `RV-<round>-<seq4>`。
+
+    ``reserved`` 是本轮已带入台账的条目（carry-forward），它们的旧 issueId 不重排；
+    新问题从 ``reserved`` 中同轮号的最大序号继续编号，避免“同轮重跑 + 新检出”撞号。
+    """
+    rows = [dict(item) for item in issues if isinstance(item, Mapping)]
+    max_seq = 0
+    for item in list(reserved) + rows:
+        match = ISSUE_ID_RE.match(str(item.get("issueId") or ""))
+        if match and int(match.group(1)) == round_no:
+            max_seq = max(max_seq, int(match.group(2)))
+    for index, item in enumerate(rows, start=max_seq + 1):
+        item["issueId"] = f"RV-{round_no}-{index:04d}"
+    return rows
+
+
+def load_previous_ledger(package_dir: Path, round_no: int) -> dict[str, Any] | None:
+    """读取可带入第 `round_no` 轮的历史台账（carry-forward 数据源）。
+
+    优先级：
+
+    1. ``reviews/issues.json`` 且台账轮次 < round_no → 整表（正常多轮路径）；
+    2. ``reviews/issues.json`` 轮次 == round_no → 整表作为“同轮复检”数据源（同一轮重跑不
+       整体重写台账：已关闭状态与 B/C 语义问题都不会被冲掉，A 层新检出按条件去重）；
+    3. ``reviews/rounds/round-<round_no-1>.issues.json`` 快照（ledger 缺失/损坏/
+       被旧版本脚本整体重写后的修复路径）。
+
+    无可用历史（例如第 1 轮首次运行）时返回 None。
+    """
+    ledger_path = issues_path(package_dir)
+    if ledger_path.is_file():
+        try:
+            document = jsonio.read_json(ledger_path)
+        except errors.BgError:
+            document = None
+        if isinstance(document, Mapping):
+            ledger_round = document.get("round")
+            if isinstance(ledger_round, int) and not isinstance(ledger_round, bool):
+                if ledger_round < round_no:
+                    return {
+                        "round": ledger_round,
+                        "source": f"{ISSUES_REL}@{ledger_round}",
+                        "issues": _issue_list(document.get("issues")),
+                        "sameRound": False,
+                    }
+                if ledger_round == round_no:
+                    issues = _issue_list(document.get("issues"))
+                    if issues:
+                        return {
+                            "round": round_no,
+                            "source": f"{ISSUES_REL}@{round_no}（同轮复检）",
+                            "issues": issues,
+                            "sameRound": True,
+                        }
+    if round_no > 1:
+        snapshot_rel = f"reviews/rounds/round-{round_no - 1}.issues.json"
+        snapshot_path = package_dir / snapshot_rel
+        if snapshot_path.is_file():
+            try:
+                document = jsonio.read_json(snapshot_path)
+            except errors.BgError:
+                document = None
+            if isinstance(document, Mapping):
+                snapshot_round = document.get("round")
+                return {
+                    "round": (
+                        int(snapshot_round)
+                        if isinstance(snapshot_round, int) and not isinstance(snapshot_round, bool)
+                        else round_no - 1
+                    ),
+                    "source": snapshot_rel,
+                    "issues": _issue_list(document.get("issues")),
+                    "sameRound": False,
+                }
+    return None
+
+
+def carry_forward_issues(
+    previous_issues: Sequence[Mapping[str, Any]],
+    detected_issues: Sequence[Mapping[str, Any]],
+    round_no: int,
+    *,
+    previous_round: int | None = None,
+    same_round: bool = False,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """把上一轮未 verified 的问题带入第 `round_no` 轮，并按本轮 A 层复检结果更新状态。
+
+    复检规则（确定性、可审计）：
+
+    - ``wontfix``：用户已确认不修，跨轮保留；本轮再次检出也不复开；
+    - ``script`` 层（A 层确定性检查）``fixed/fixing/open``：本轮未再检出同一条件 →
+      ``verified``（脚本即审查方，逐轮复检等价于“下一轮审查写 verified”）；
+      再次检出 → ``open``（复开等待优化再修）；
+    - ``script`` 层 ``verified``：再次检出 → ``open``（回归）；否则继续 ``verified``；
+    - ``coverage/graphic`` 语义层：脚本无法复检。``fixed`` 保持 ``fixed`` 并标
+      ``pending-semantic``，由 B/C 复审 ``close --status verified --review`` 写 verified；
+      ``open/fixing`` 保持原状态并标 ``carried-open``；
+    - 本轮新检出若与带入条目同条件（层/类型/章节/锚点相同），不再新增副本：保留上轮
+      ``issueId`` 作为审计主键，计入 ``suppressed``。
+
+    返回 ``{"carried", "detected", "suppressed", "stats", "summary"}``；``detected``
+    为剔除重复后的本轮新问题（调用方随后用 `assign_issue_ids` 分配 issueId）。
+    """
+    now = now or paths.iso_now()
+    detected = [dict(item) for item in detected_issues if isinstance(item, Mapping)]
+    detected_exact = {_issue_dedupe_key(item) for item in detected}
+    detected_conditions = {_issue_condition_key(item) for item in detected}
+    fallback_round = (
+        int(previous_round)
+        if isinstance(previous_round, int) and not isinstance(previous_round, bool) and previous_round >= 1
+        else max(round_no - 1, 1)
+    )
+    carried: list[dict[str, Any]] = []
+    suppressed_conditions: set[tuple[str, str, str, str]] = set()
+    matched_issue_id: dict[tuple[str, str, str, str], str] = {}
+    stats: dict[str, list[str]] = {
+        "verified": [],
+        "reopened": [],
+        "pendingSemantic": [],
+        "carriedOpen": [],
+        "wontfixKept": [],
+        "keptVerified": [],
+    }
+    for raw in previous_issues:
+        if not isinstance(raw, Mapping):
+            continue
+        entry = dict(raw)
+        issue_id = str(entry.get("issueId") or "")
+        status = str(entry.get("status") or "open")
+        layer = str(entry.get("layer") or "")
+        condition = _issue_condition_key(entry)
+        rediscovered = _issue_dedupe_key(entry) in detected_exact or condition in detected_conditions
+        if rediscovered:
+            suppressed_conditions.add(condition)
+        carried_from = entry.get("carriedFrom")
+        if isinstance(carried_from, int) and not isinstance(carried_from, bool):
+            entry["carriedFrom"] = carried_from
+        else:
+            # 首次带入：carriedFrom 取该 issue 的检出轮次（RV-<round>-<seq4>），
+            # 保证“同轮保留”的条目 carriedFrom == 本轮，不误标成更早轮次。
+            entry["carriedFrom"] = _issue_round(entry) or fallback_round
+        entry["lastRound"] = round_no
+        entry["updatedAt"] = now
+        recheck: dict[str, Any] = {"round": round_no, "at": now, "previousStatus": status, "result": "", "note": ""}
+        if status == "wontfix":
+            recheck["result"] = RECHECK_WONTFIX
+            recheck["note"] = "用户已确认不修，跨轮保留；本轮再次检出也不复开"
+            stats["wontfixKept"].append(issue_id)
+        elif status == "verified":
+            if rediscovered:
+                entry["status"] = "open"
+                entry["resolvedAt"] = None
+                recheck["result"] = RECHECK_REGRESSED
+                recheck["note"] = "上轮已验证的问题本轮再次检出（回归），重新打开"
+                stats["reopened"].append(issue_id)
+            else:
+                recheck["result"] = RECHECK_PREVIOUS
+                recheck["note"] = "上轮已 verified，继续保留"
+                stats["keptVerified"].append(issue_id)
+        elif layer == "script":
+            if rediscovered:
+                if status in ("fixing", "fixed"):
+                    entry["status"] = "open"
+                    entry["resolvedAt"] = None
+                    recheck["result"] = RECHECK_RECURRED
+                    recheck["note"] = f"本轮脚本复检再次检出同一问题，复开（原状态 {status}）"
+                    stats["reopened"].append(issue_id)
+                else:
+                    recheck["result"] = RECHECK_STILL_OPEN
+                    recheck["note"] = "上轮未关闭且本轮仍检出，保持 open 等待修复"
+                    stats["carriedOpen"].append(issue_id)
+            else:
+                entry["status"] = "verified"
+                entry["resolvedAt"] = now
+                recheck["result"] = RECHECK_VERIFIED
+                recheck["note"] = "本轮脚本复检未复现同类问题，脚本侧自动 verified"
+                stats["verified"].append(issue_id)
+        else:
+            # coverage / graphic 语义层：脚本不能复检，状态保留到 B/C 复审
+            if status in ("open", "fixing"):
+                recheck["result"] = RECHECK_CARRIED_OPEN
+                recheck["note"] = "上轮未关闭，保留原状态；需优化修复后 close fixed"
+                stats["carriedOpen"].append(issue_id)
+            else:
+                recheck["result"] = RECHECK_PENDING_SEMANTIC
+                recheck["note"] = "已修复待复审：B/C 复审通过后 close --status verified --review"
+                stats["pendingSemantic"].append(issue_id)
+        entry["recheck"] = recheck
+        matched_issue_id.setdefault(condition, issue_id)
+        carried.append(entry)
+    suppressed: list[dict[str, Any]] = []
+    kept_detected: list[dict[str, Any]] = []
+    for item in detected:
+        condition = _issue_condition_key(item)
+        if condition in suppressed_conditions:
+            suppressed.append(
+                {
+                    "condition": {
+                        "layer": condition[0],
+                        "type": condition[1],
+                        "chapterId": condition[2],
+                        "anchorId": condition[3],
+                    },
+                    "matchedIssueId": matched_issue_id.get(condition, ""),
+                }
+            )
+            continue
+        kept_detected.append(item)
+    by_recheck: dict[str, int] = {}
+    for entry in carried:
+        result_name = str((entry.get("recheck") or {}).get("result") or "unknown")
+        by_recheck[result_name] = by_recheck.get(result_name, 0) + 1
+    summary = {
+        "round": round_no,
+        "previousRound": fallback_round,
+        "sameRound": bool(same_round),
+        "carriedCount": len(carried),
+        "detectedCount": len(detected),
+        "suppressedCount": len(suppressed),
+        "verifiedCount": len(stats["verified"]),
+        "reopenedCount": len(stats["reopened"]),
+        "pendingSemanticCount": len(stats["pendingSemantic"]),
+        "carriedOpenCount": len(stats["carriedOpen"]),
+        "wontfixKeptCount": len(stats["wontfixKept"]),
+        "keptVerifiedCount": len(stats["keptVerified"]),
+        "byRecheck": by_recheck,
+    }
+    return {"carried": carried, "detected": kept_detected, "suppressed": suppressed, "stats": stats, "summary": summary}
+
+
+def carry_forward_command(
+    *,
+    workspace: Path,
+    project_dir: Path,
+    package_id: str | None,
+    round_no: int,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """`carry-forward --round <k>`：把上轮快照/台账中未 verified 条目补进当前轮台账。
+
+    幂等：已存在于台账的 issueId 不重复带入；`--dry-run` 只计算不写盘。
+    典型用途：修复旧版本脚本“第 k 轮整体重写 issues.json”造成的台账丢失。
+    """
+    workspace_path, project_dir_path, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
+        workspace, project_dir, package_id
+    )
+    document = load_issues(package_dir)
+    document_round = document.get("round")
+    if int(document_round or 0) != round_no:
+        raise errors.BgError(
+            errors.E_GUARD_FAILED,
+            f"issues.json 当前轮次 {document_round} != --round {round_no}",
+            hint="先对当前轮跑 bg_review_script.py --round <k>，或用相同 --round",
+            detail={"documentRound": document_round, "requestedRound": round_no},
+        )
+    # 修复子命令的数据源：优先上一轮快照（旧脚本整体重写台账后，快照仍是唯一完整上一轮台账），
+    # 避免同级台账非空时 load_previous_ledger 走“同轮复检”而看不到被冲掉的历史条目。
+    previous: dict[str, Any] | None = None
+    if round_no > 1:
+        snapshot_rel = f"reviews/rounds/round-{round_no - 1}.issues.json"
+        snapshot_path = package_dir / snapshot_rel
+        if snapshot_path.is_file():
+            try:
+                snapshot_document = jsonio.read_json(snapshot_path)
+            except errors.BgError:
+                snapshot_document = None
+            if isinstance(snapshot_document, Mapping):
+                previous = {
+                    "round": round_no - 1,
+                    "source": snapshot_rel,
+                    "issues": _issue_list(snapshot_document.get("issues")),
+                    "sameRound": False,
+                }
+    if previous is None:
+        previous = load_previous_ledger(package_dir, round_no)
+    if previous is None:
+        raise errors.BgError(
+            errors.E_NOT_FOUND,
+            "缺少可 carry-forward 的上轮台账",
+            hint="需要 reviews/rounds/round-<k-1>.issues.json 或轮次更早的 reviews/issues.json",
+            detail={"round": round_no},
+        )
+    existing = _issue_list(document.get("issues"))
+    existing_ids = {str(item.get("issueId") or "") for item in existing}
+    missing = [item for item in previous["issues"] if str(item.get("issueId") or "") not in existing_ids]
+    result = carry_forward_issues(
+        missing,
+        existing,
+        round_no,
+        previous_round=previous["round"],
+        same_round=bool(previous.get("sameRound")),
+    )
+    combined = sort_issues(result["carried"] + result["detected"])
+    carry_summary = dict(result["summary"])
+    carry_summary["source"] = previous["source"]
+    carry_summary["at"] = paths.iso_now()
+    changed = bool(missing) or bool(result["suppressed"]) or combined != sort_issues(existing)
+    if changed:
+        document["issues"] = combined
+        document["carryForward"] = carry_summary
+    else:
+        carry_summary["alreadyCarried"] = True
+    report_updated = False
+    if changed and not dry_run:
+        write_issues(package_dir, document)
+        report_updated = refresh_report_stats(package_dir, document)
+    return {
+        "ok": True,
+        "command": "review_issues_carry_forward",
+        "projectId": project_doc.get("projectId"),
+        "packageId": target,
+        "round": round_no,
+        "currentStage": state.get("currentStage"),
+        "dryRun": bool(dry_run),
+        "source": previous["source"],
+        "previousRound": previous["round"],
+        "carried": result["carried"],
+        "carriedIds": [str(item.get("issueId") or "") for item in result["carried"]],
+        "suppressed": result["suppressed"],
+        "carryForward": carry_summary,
+        "summary": document.get("summary") if changed else recalc_summary(existing),
+        "changed": changed,
+        "reportUpdated": report_updated,
+        "issuesPath": ISSUES_REL,
+        "snapshotPath": f"reviews/rounds/round-{round_no}.issues.json",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -506,13 +905,18 @@ def close_issue(
     if match is None:
         raise errors.BgError(errors.E_NOT_FOUND, f"问题不存在：{issue_id}", detail={"issueId": issue_id})
     previous = str(match.get("status") or "open")
-    if status not in ("fixing", "fixed", "verified", "wontfix"):
-        raise errors.BgError(errors.E_USAGE, f"--status 非法：{status}", detail={"allowed": ["fixing", "fixed", "verified", "wontfix"]})
+    if status not in ("open", "fixing", "fixed", "verified", "wontfix"):
+        raise errors.BgError(
+            errors.E_USAGE,
+            f"--status 非法：{status}",
+            detail={"allowed": ["open", "fixing", "fixed", "verified", "wontfix"]},
+        )
     allowed = {
         "open": ("fixing", "fixed", "wontfix"),
         "fixing": ("fixed", "wontfix"),
-        "fixed": ("verified",),
-        "verified": (),
+        # fixed/verified 允许复审不通过时复开（--review），避免语义层修复后无法回到 open 的死锁
+        "fixed": ("verified", "open"),
+        "verified": ("open",),
         "wontfix": (),
     }
     if status not in allowed.get(previous, ()):
@@ -536,17 +940,38 @@ def close_issue(
                 hint="在 review 阶段运行，或加 --review（复审）",
                 detail={"issueId": issue_id, "currentStage": state.get("currentStage")},
             )
+    if status == "open":
+        # 复审不通过：把已 fixed/verified 的语义问题复开，等待优化再修；只有复审方能操作
+        if not from_review:
+            raise errors.BgError(
+                errors.E_GUARD_FAILED,
+                "复开问题只能由复审方写入（加 --review）",
+                hint="复审确认修复不成立时使用：close --status open --review --note 理由",
+                detail={"issueId": issue_id, "from": previous, "currentStage": state.get("currentStage")},
+            )
+        if not note.strip():
+            raise errors.BgError(errors.E_USAGE, "复开问题必须填写 --note 理由（复审不成立的依据）", detail={"issueId": issue_id})
     now = paths.iso_now()
     match["status"] = status
     match["updatedAt"] = now
     match["resolutionNote"] = note.strip()
     if status in ("fixed", "verified", "wontfix"):
         match["resolvedAt"] = now
+    elif status == "open":
+        match["resolvedAt"] = None
     if status == "wontfix":
         match["userConfirmed"] = True
+    # 带入条目：保留 carry 时点的 recheck 结果，并记录后续复核结论（台账可审计）
+    if match.get("carriedFrom") is not None and isinstance(match.get("recheck"), Mapping):
+        recheck = dict(match["recheck"])
+        recheck["resolvedStatus"] = status
+        recheck["resolvedAt"] = now
+        match["recheck"] = recheck
     document["issues"] = issues
     write_issues(package_dir, document)
-    optimization_updated = record_optimization_round(package_dir, state, target, match, previous, status, note)
+    optimization_updated = (
+        False if status == "open" else record_optimization_round(package_dir, state, target, match, previous, status, note)
+    )
     report_updated = refresh_report_stats(package_dir, document)
     return {
         "ok": True,
@@ -664,7 +1089,7 @@ def status_issues(
 
 
 def run_selftest() -> dict[str, Any]:
-    """纯函数自检：summary/ID/pass criteria/issue 校验（不写文件）。"""
+    """纯函数自检：summary/ID/pass criteria/issue 校验/carry-forward（不写文件）。"""
     checks: list[str] = []
     issues = [
         {"issueId": "RV-2-0001", "layer": "coverage", "type": "coverage_gap", "severity": "major", "status": "open", "userConfirmed": False},
@@ -691,6 +1116,139 @@ def run_selftest() -> dict[str, Any]:
     if not bad:
         raise AssertionError("非法 type 未被发现")
     checks.append("validate")
+    # P1-3 carry-forward：script 层 fixed 未复现 → verified；复现 → 复开；语义层 → 待复审
+    previous = [
+        {
+            "issueId": "RV-1-0001",
+            "layer": "script",
+            "type": "word_count_low",
+            "severity": "major",
+            "chapterId": "1-1",
+            "anchorId": None,
+            "evidence": "实际 800 字 / 目标 1000（80.0%）低于 90%",
+            "status": "fixed",
+            "userConfirmed": False,
+        },
+        {
+            "issueId": "RV-1-0002",
+            "layer": "script",
+            "type": "word_count_low",
+            "severity": "major",
+            "chapterId": "2-1",
+            "anchorId": None,
+            "evidence": "实际 900 字 / 目标 1000（90.0%）",
+            "status": "fixed",
+            "userConfirmed": False,
+        },
+        {
+            "issueId": "RV-1-0003",
+            "layer": "graphic",
+            "type": "figure_mismatch",
+            "severity": "minor",
+            "chapterId": "2-3",
+            "anchorId": "fig-2-3-02",
+            "evidence": "图与正文脱节",
+            "status": "fixed",
+            "userConfirmed": False,
+        },
+        {
+            "issueId": "RV-1-0004",
+            "layer": "script",
+            "type": "table_missing",
+            "severity": "minor",
+            "chapterId": "3-1",
+            "anchorId": None,
+            "evidence": "缺 ▼表题注",
+            "status": "wontfix",
+            "userConfirmed": True,
+        },
+    ]
+    detected = [
+        {
+            "issueId": "",
+            "layer": "script",
+            "type": "word_count_low",
+            "severity": "major",
+            "chapterId": "2-1",
+            "anchorId": None,
+            "evidence": "实际 905 字 / 目标 1000（90.5%）",
+        }
+    ]
+    carried = carry_forward_issues(previous, detected, 2, previous_round=1)
+    by_id = {item["issueId"]: item for item in carried["carried"]}
+    if by_id["RV-1-0001"]["status"] != "verified" or by_id["RV-1-0001"]["recheck"]["result"] != RECHECK_VERIFIED:
+        raise AssertionError(f"未复现的 script fixed 应自动 verified：{by_id['RV-1-0001']}")
+    if by_id["RV-1-0002"]["status"] != "open" or by_id["RV-1-0002"]["recheck"]["result"] != RECHECK_RECURRED:
+        raise AssertionError(f"复现的 script fixed 应复开：{by_id['RV-1-0002']}")
+    if by_id["RV-1-0003"]["status"] != "fixed" or by_id["RV-1-0003"]["recheck"]["result"] != RECHECK_PENDING_SEMANTIC:
+        raise AssertionError(f"语义层 fixed 应保持 fixed 待复审：{by_id['RV-1-0003']}")
+    if by_id["RV-1-0004"]["status"] != "wontfix" or by_id["RV-1-0004"]["recheck"]["result"] != RECHECK_WONTFIX:
+        raise AssertionError(f"wontfix 应跨轮保留：{by_id['RV-1-0004']}")
+    if carried["detected"]:
+        raise AssertionError(f"复现问题应去重而不是新增副本：{carried['detected']}")
+    if carried["summary"]["suppressedCount"] != 1 or carried["summary"]["carriedCount"] != 4:
+        raise AssertionError(f"carry-forward 统计不正确：{carried['summary']}")
+    checks.append("carry_forward")
+    # 同一轮重跑：上一轮数据源只取已 carry 条目（load_previous_ledger 的 round==k 分支由集成测试覆盖）
+    rerun = carry_forward_issues(carried["carried"], [], 2, previous_round=1)
+    rerun_by_id = {item["issueId"]: item for item in rerun["carried"]}
+    if (
+        rerun_by_id["RV-1-0001"]["status"] != "verified"
+        or rerun_by_id["RV-1-0001"]["carriedFrom"] != 1
+        or rerun_by_id["RV-1-0001"]["recheck"]["result"] != RECHECK_PREVIOUS
+    ):
+        raise AssertionError(f"carry 重跑不稳定：{rerun_by_id['RV-1-0001']}")
+    if sort_issues(carried["carried"])[0]["severity"] != "major":
+        raise AssertionError("跨轮排序应按级别优先")
+    checks.append("carry_rerun")
+    # 分支：open+复现 → still-open；verified+复现 → regressed（回归复开）
+    branch = carry_forward_issues(
+        [
+            {"issueId": "RV-1-0005", "layer": "script", "type": "table_missing", "severity": "minor", "chapterId": "3-1", "anchorId": None, "evidence": "缺题注", "status": "open", "userConfirmed": False},
+            {"issueId": "RV-1-0006", "layer": "script", "type": "caption_format", "severity": "minor", "chapterId": "3-2", "anchorId": None, "evidence": "题注格式", "status": "verified", "userConfirmed": False},
+        ],
+        [
+            {"layer": "script", "type": "table_missing", "severity": "minor", "chapterId": "3-1", "anchorId": None, "evidence": "缺题注（本轮再次检出）"},
+            {"layer": "script", "type": "caption_format", "severity": "minor", "chapterId": "3-2", "anchorId": None, "evidence": "题注格式（本轮再次检出）"},
+        ],
+        2,
+        previous_round=1,
+    )
+    branch_by_id = {item["issueId"]: item for item in branch["carried"]}
+    if branch_by_id["RV-1-0005"]["status"] != "open" or branch_by_id["RV-1-0005"]["recheck"]["result"] != RECHECK_STILL_OPEN:
+        raise AssertionError(f"open+复现应保持 open：{branch_by_id['RV-1-0005']}")
+    if branch_by_id["RV-1-0006"]["status"] != "open" or branch_by_id["RV-1-0006"]["recheck"]["result"] != RECHECK_REGRESSED:
+        raise AssertionError(f"verified+复现应回归复开：{branch_by_id['RV-1-0006']}")
+    if branch["summary"]["suppressedCount"] != 2:
+        raise AssertionError(f"分支去重计数不正确：{branch['summary']}")
+    checks.append("carry_forward_branches")
+    # 同轮重跑 + 新检出：新问题 ID 必须从已带入条目的最大序号续号，不能撞 RV-2-0001
+    same_round_prev = [
+        {
+            "issueId": "RV-2-0001",
+            "layer": "script",
+            "type": "word_count_low",
+            "severity": "minor",
+            "chapterId": "1-1",
+            "anchorId": None,
+            "evidence": "同轮已带入的旧问题",
+            "status": "fixed",
+            "userConfirmed": False,
+        }
+    ]
+    same_round = carry_forward_issues(
+        same_round_prev,
+        [{"layer": "script", "type": "table_missing", "severity": "minor", "chapterId": "3-1", "anchorId": None, "evidence": "本轮新检出问题"}],
+        2,
+        previous_round=2,
+        same_round=True,
+    )
+    assigned = assign_issue_ids(same_round["detected"], 2, reserved=same_round["carried"])
+    if same_round["carried"][0]["issueId"] != "RV-2-0001" or assigned[0]["issueId"] != "RV-2-0002":
+        raise AssertionError(f"同轮重跑 ID 续号不正确：carried={same_round['carried'][0]['issueId']} new={assigned[0]['issueId']}")
+    if assigned[0]["issueId"] == same_round["carried"][0]["issueId"]:
+        raise AssertionError("同轮重跑出现重复 issueId")
+    checks.append("carry_same_round_ids")
     return {"ok": True, "selftest": {"script": "bg_review_issues.py", "checks": checks}}
 
 
@@ -700,7 +1258,7 @@ def run_selftest() -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = errors.CliParser(
         prog="bg_review_issues.py",
-        description="BidGenie F6 问题台账：merge/close/verify/status（issues.json + 轮次快照；只写 reviews/**）",
+        description="BidGenie F6 问题台账：merge/close/verify/status/carry-forward（issues.json + 轮次快照；只写 reviews/**）",
     )
     errors.add_common_args(parser)
     parser.add_argument("--workspace", help="工作区根绝对路径")
@@ -721,7 +1279,7 @@ def build_parser() -> argparse.ArgumentParser:
     close.add_argument("--project", default=argparse.SUPPRESS)
     close.add_argument("--package", default=argparse.SUPPRESS)
     close.add_argument("--issue", required=True)
-    close.add_argument("--status", required=True, choices=("fixing", "fixed", "verified", "wontfix"))
+    close.add_argument("--status", required=True, choices=("open", "fixing", "fixed", "verified", "wontfix"))
     close.add_argument("--note", default="")
     close.add_argument("--user-confirmed", action="store_true")
     close.add_argument("--review", action="store_true", help="复审方写入 verified（下一轮审查/复核）")
@@ -736,6 +1294,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--workspace", default=argparse.SUPPRESS)
     status.add_argument("--project", default=argparse.SUPPRESS)
     status.add_argument("--package", default=argparse.SUPPRESS)
+    carry = sub.add_parser("carry-forward", help="把上轮未 verified 问题补进当前轮台账（P1-3 修复路径，幂等）")
+    errors.add_common_args(carry, subparser=True)
+    carry.add_argument("--workspace", default=argparse.SUPPRESS)
+    carry.add_argument("--project", default=argparse.SUPPRESS)
+    carry.add_argument("--package", default=argparse.SUPPRESS)
+    carry.add_argument("--round", type=int, required=True)
+    carry.add_argument("--dry-run", action="store_true", help="只计算不写 issues.json")
     parser.add_argument("--check", action="store_true", help="等价 verify（供 bg_state/skill 调用）")
     parser.add_argument("--selftest", action="store_true", help="运行脚本自检")
     return parser
@@ -774,7 +1339,15 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         return verify_issues(workspace=workspace, project_dir=project_dir, package_id=getattr(args, "package", None), round_no=args.round)
     if command == "status":
         return status_issues(workspace=workspace, project_dir=project_dir, package_id=getattr(args, "package", None))
-    raise errors.BgError(errors.E_USAGE, "缺少子命令：merge / close / verify / status", hint="使用 --help 查看用法")
+    if command == "carry-forward":
+        return carry_forward_command(
+            workspace=workspace,
+            project_dir=project_dir,
+            package_id=getattr(args, "package", None),
+            round_no=int(args.round),
+            dry_run=bool(args.dry_run),
+        )
+    raise errors.BgError(errors.E_USAGE, "缺少子命令：merge / close / verify / status / carry-forward", hint="使用 --help 查看用法")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

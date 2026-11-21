@@ -183,25 +183,59 @@ def _derive_packages(package_count: int) -> list[str]:
     return [f"package-{index}" for index in range(1, package_count + 1)]
 
 
-def _validate_packages(candidate: Mapping[str, Any], package_count: Any) -> None:
+def _validate_packages(candidate: Mapping[str, Any], package_count: Any) -> list[str]:
+    """校验 `packagesToWrite`（P3-14）：允许显式空数组与 packageCount 内子集，交 F4 选包覆盖。
+
+    - 不传 `packagesToWrite` 时仍由 `packageCount` 自动生成（`apply_fields` 内处理）；
+    - 显式 `[]` 合法：表示「撰写包待 F4 确认」，返回 warning 提示由 F4 覆盖（不再报 schema 错）；
+    - 子集（升序、packageCount 内）合法：F4 `select-packages` 会写入所选子集；
+    - 越界/重复/非法标识/降序仍按 `E_SCHEMA_INVALID` 拒绝。
+    """
     packages = candidate.get("packagesToWrite")
     if packages is None:
-        return
+        return []
     if not isinstance(packages, list) or not all(isinstance(item, str) and PACKAGE_ID_RE.match(item) for item in packages):
         raise errors.BgError(
             errors.E_SCHEMA_INVALID,
             "packagesToWrite 必须是 package-<N> 字符串数组",
             detail={"field": "packagesToWrite"},
         )
-    if isinstance(package_count, int) and not isinstance(package_count, bool):
-        expected = _derive_packages(package_count)
-        if packages != expected:
-            raise errors.BgError(
-                errors.E_SCHEMA_INVALID,
-                "packagesToWrite 与 packageCount 不一致",
-                hint=f"packageCount={package_count} 时应为 {expected}（不传 packagesToWrite 时自动生成）",
-                detail={"field": "packagesToWrite", "packageCount": package_count, "actual": packages},
-            )
+    if len(set(packages)) != len(packages):
+        raise errors.BgError(
+            errors.E_SCHEMA_INVALID,
+            f"packagesToWrite 不得重复：{packages}",
+            hint="每个包只出现一次；撰写包由 F4 选包确认",
+            detail={"field": "packagesToWrite", "actual": packages},
+        )
+    warnings: list[str] = []
+    if not isinstance(package_count, int) or isinstance(package_count, bool) or package_count < 1:
+        return warnings
+    expected = _derive_packages(package_count)
+    out_of_range = [item for item in packages if item not in expected]
+    if out_of_range:
+        raise errors.BgError(
+            errors.E_SCHEMA_INVALID,
+            f"packagesToWrite 超出 packageCount={package_count}：{out_of_range}",
+            hint=f"packageCount={package_count} 时只能填 {expected} 内的包",
+            detail={"field": "packagesToWrite", "packageCount": package_count, "actual": packages},
+        )
+    if not packages:
+        warnings.append("packagesToWrite=[] 已接受：撰写包待 F4 确认，将由 F4（bg_project.py select-packages）覆盖")
+        return warnings
+    ordered_subset = [item for item in expected if item in set(packages)]
+    if packages != ordered_subset:
+        raise errors.BgError(
+            errors.E_SCHEMA_INVALID,
+            f"packagesToWrite 需按 package-<N> 升序：{packages}",
+            hint=f"按 {ordered_subset} 顺序填写",
+            detail={"field": "packagesToWrite", "actual": packages, "expected": ordered_subset},
+        )
+    if packages != expected:
+        warnings.append(
+            f"packagesToWrite 为 packageCount={package_count} 的子集（{packages}）：未选包不会撰写；"
+            "最终撰写包以 F4 选包（bg_project.py select-packages）为准"
+        )
+    return warnings
 
 
 def _normalize_selected_packages(raw: Any, package_count: int) -> list[str]:
@@ -342,6 +376,7 @@ def apply_fields(workspace: Path, project_dir: Path, payload: Mapping[str, Any])
         changed.append(key)
 
     # 分包含义一致性
+    packages_note = ""
     if isinstance(candidate.get("packageCount"), int) and not isinstance(candidate.get("packageCount"), bool):
         package_count = candidate["packageCount"]
         if package_count < 1:
@@ -351,8 +386,13 @@ def apply_fields(workspace: Path, project_dir: Path, payload: Mapping[str, Any])
             if candidate.get("packagesToWrite") != derived:
                 candidate["packagesToWrite"] = derived
                 warnings.append(f"packagesToWrite 已按 packageCount 自动生成：{derived}")
-        elif "packagesToWrite" in changed:
-            pass
+            packages_note = f"packagesToWrite 未传入，已按 packageCount={package_count} 自动生成（F4 选包会覆盖）"
+    if "packagesToWrite" in fields:
+        explicit = candidate.get("packagesToWrite")
+        if not explicit:
+            packages_note = "packagesToWrite 显式为空：撰写包待 F4 确认，由 F4（bg_project.py select-packages）覆盖"
+        else:
+            packages_note = "packagesToWrite 为显式传入值；F4 选包后会被覆盖为所选子集"
     if candidate.get("isSubcontracted") is False:
         package_count = candidate.get("packageCount")
         if package_count not in (None, 1):
@@ -362,12 +402,15 @@ def apply_fields(workspace: Path, project_dir: Path, payload: Mapping[str, Any])
                 hint="不分包项目只能有 1 个包；请用户确认分包结论",
                 detail={"isSubcontracted": False, "packageCount": package_count},
             )
-    _validate_packages(candidate, candidate.get("packageCount"))
+    package_warnings = _validate_packages(candidate, candidate.get("packageCount"))
 
     now = paths.iso_now()
     candidate["updatedAt"] = now
     schema.raise_if_errors(schema.validate_project(candidate), filename="project.json")
     jsonio.write_json_atomic(project_file, candidate)
+    warnings.extend(package_warnings)
+    if packages_note:
+        warnings.append(packages_note)
 
     event_name = "project.fields_filled"
     try:
@@ -396,6 +439,7 @@ def apply_fields(workspace: Path, project_dir: Path, payload: Mapping[str, Any])
         "changed": changed,
         "fields": {key: candidate.get(key) for key in FIELD_WHITELIST},
         "warnings": warnings,
+        "packagesToWriteNote": packages_note,
         "updatedAt": now,
         "event": event_name,
     }
@@ -517,6 +561,36 @@ def run_selftest() -> dict[str, Any]:
         )
         expect_error(errors.E_SCHEMA_INVALID, {"sourceFiles": [{"rawPath": "sources/raw/a.docx", "convertedPath": "sources/a.md"}]})
         checks.append("negative")
+
+        # P3-14：显式 packagesToWrite=[] 允许（由 F4 覆盖）；子集允许；不传仍自动生成；越界/重复仍拒绝
+        empty_result = apply_fields(workspace, project_dir, {"fields": {"isSubcontracted": True, "packageCount": 5, "packagesToWrite": []}})
+        updated_empty = jsonio.read_json(project_file)
+        if (
+            updated_empty.get("packageCount") != 5
+            or updated_empty.get("packagesToWrite") != []
+            or not any("F4" in str(item) and "覆盖" in str(item) for item in empty_result.get("warnings") or [])
+            or "F4" not in str(empty_result.get("packagesToWriteNote") or "")
+        ):
+            raise AssertionError(f"packagesToWrite=[] 未被接受：{empty_result.get('warnings')} / {updated_empty.get('packagesToWrite')}")
+        checks.append("packages_empty_allowed")
+        subset_result = apply_fields(workspace, project_dir, {"fields": {"packagesToWrite": ["package-2", "package-4"]}})
+        updated_subset = jsonio.read_json(project_file)
+        if updated_subset.get("packagesToWrite") != ["package-2", "package-4"] or not any(
+            "子集" in str(item) for item in subset_result.get("warnings") or []
+        ):
+            raise AssertionError(f"packagesToWrite 子集未被接受：{subset_result.get('warnings')}")
+        checks.append("packages_subset_allowed")
+        derived_result = apply_fields(workspace, project_dir, {"fields": {"packageCount": 2}})
+        updated_derived = jsonio.read_json(project_file)
+        if updated_derived.get("packagesToWrite") != ["package-1", "package-2"] or not any(
+            "自动生成" in str(item) for item in derived_result.get("warnings") or []
+        ):
+            raise AssertionError(f"不传 packagesToWrite 未自动生成：{updated_derived.get('packagesToWrite')}")
+        checks.append("packages_auto_derived")
+        expect_error(errors.E_SCHEMA_INVALID, {"packagesToWrite": ["package-9"]})
+        expect_error(errors.E_SCHEMA_INVALID, {"packagesToWrite": ["package-1", "package-1"]})
+        expect_error(errors.E_SCHEMA_INVALID, {"packagesToWrite": ["package-2", "package-1"]})
+        checks.append("packages_negative")
         if state_file.read_bytes() != state_snapshot:
             raise AssertionError("state.json 在失败路径被改写")
         return {

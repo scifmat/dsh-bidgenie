@@ -25,8 +25,9 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib
+from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, text as text_lib
 import bg_outline_validate as outline_validate
+import bg_review_issues as review_issues
 
 SCHEMA_VERSION = "1.0"
 ISSUES_FILE = "reviews/issues.json"
@@ -52,13 +53,9 @@ FORBIDDEN_PATTERNS = (
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
-def count_words(text: str) -> int:
-    """字数口径：CJK 字符 + ASCII 连续词（排除注释/标题行/纯符号）。"""
-    clean = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    clean = re.sub(r"^#{1,6}\s+.*$", "", clean, flags=re.MULTILINE)
-    cjk = len(re.findall(r"[\u4e00-\u9fff]", clean))
-    words = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", clean))
-    return cjk + words
+#: P2-10：字数口径唯一实现在 `_lib/text.py`（CJK 字符 + ASCII 词，剥离注释与标题行）。
+#: 这里直接引用其正文口径函数，禁止再写本地正则副本；run_selftest 依赖本名字。
+count_words = text_lib.count_body_words
 
 
 def markdown_tables(text: str) -> list[dict[str, Any]]:
@@ -181,7 +178,8 @@ class IssueCollector:
             "resolutionNote": "",
         }
 
-    def items(self, round_no: int) -> list[dict[str, Any]]:
+    def raw_items(self) -> list[dict[str, Any]]:
+        """本轮新检出问题（未分配 issueId，供 carry-forward 去重后再编号）。"""
         issues = list(self._issues.values())
         issues.sort(
             key=lambda item: (
@@ -192,6 +190,10 @@ class IssueCollector:
                 str(item.get("filePath") or ""),
             )
         )
+        return issues
+
+    def items(self, round_no: int) -> list[dict[str, Any]]:
+        issues = self.raw_items()
         for index, item in enumerate(issues, start=1):
             item["issueId"] = f"RV-{round_no}-{index:04d}"
         return issues
@@ -379,6 +381,19 @@ def review_a_layer(
             marker_found = bool(re.search(r"<!--\s*BG:FIGURE:" + re.escape(anchor_id) + r"\s*-->", text))
             figure_row = {"chapterId": chapter_id, "anchorId": anchor_id, "type": figure_type, "marker": marker_found, "status": "planned", "detail": ""}
             if figure_type == "table":
+                # bg-write 硬规则：table 只写 `▼表` 题注，不得写 BG:FIGURE 标记（P1-4 配套：A 层拦截）
+                if marker_found:
+                    figure_row["detail"] = "误加 BG:FIGURE 标记"
+                    collector.add(
+                        "script",
+                        "marker_format",
+                        "major",
+                        chapter_id=chapter_id,
+                        file_path=file_path,
+                        anchor_id=anchor_id,
+                        evidence=f"table 计划图表不得写 BG:FIGURE 标记（bg-write 硬规则），却检出 `<!-- BG:FIGURE:{anchor_id} -->`",
+                        suggestion=f"删除 `<!-- BG:FIGURE:{anchor_id} -->`；表格只用独立 `▼表` 题注，锚点由 outline.figurePlan 定位",
+                    )
                 table_row = next((row for row in markdown_tables(text) if row["caption"]), None)
                 if table_row is None:
                     figure_row["status"] = "missing"
@@ -486,17 +501,10 @@ def write_outputs(
     pending_layers: Sequence[str],
     layer_status: Mapping[str, str],
     dry_run: bool,
+    carry_forward: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
-    summary = {
-        "blocker": sum(1 for issue in issues if issue.get("severity") == "blocker"),
-        "major": sum(1 for issue in issues if issue.get("severity") == "major"),
-        "minor": sum(1 for issue in issues if issue.get("severity") == "minor"),
-        "total": len(issues),
-        "openCount": sum(1 for issue in issues if issue.get("status") == "open"),
-        "fixedCount": sum(1 for issue in issues if issue.get("status") == "fixed"),
-        "wontfixCount": sum(1 for issue in issues if issue.get("status") == "wontfix"),
-    }
-    payload = {
+    summary = review_issues.recalc_summary(issues)
+    payload: dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "packageId": target,
         "round": round_no,
@@ -507,6 +515,8 @@ def write_outputs(
         "summary": summary,
         "issues": list(issues),
     }
+    if carry_forward:
+        payload["carryForward"] = dict(carry_forward)
     paths_out = {
         "issues": ISSUES_FILE,
         "snapshot": f"reviews/rounds/round-{round_no}.issues.json",
@@ -521,7 +531,11 @@ def write_outputs(
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     jsonio.write_json_atomic(issues_path, payload)
     jsonio.write_json_atomic(snapshot_path, payload)
-    report_path.write_text(render_report(target, round_no, summary, issues, result, layers_run, pending_layers, layer_status), encoding="utf-8", newline="\n")
+    report_path.write_text(
+        render_report(target, round_no, summary, issues, result, layers_run, pending_layers, layer_status, carry_forward),
+        encoding="utf-8",
+        newline="\n",
+    )
     return paths_out
 
 
@@ -534,6 +548,7 @@ def render_report(
     layers_run: Sequence[str],
     pending_layers: Sequence[str],
     layer_status: Mapping[str, str],
+    carry_forward: Mapping[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append(f"# 审查报告（第 {round_no} 轮）")
@@ -544,6 +559,16 @@ def render_report(
     supplements = result.get("supplementTables") if isinstance(result.get("supplementTables"), list) else []
     lines.append(f"- 补充表登记（supplementTables）：{len(supplements)} 个" + (f"（{', '.join(str(item.get('caption') or item.get('anchorId')) for item in supplements[:5])}）" if supplements else ""))
     lines.append(f"- 问题统计：blocker **{summary.get('blocker', 0)}** / major **{summary.get('major', 0)}** / minor **{summary.get('minor', 0)}** / open **{summary.get('openCount', 0)}**")
+    if carry_forward:
+        if carry_forward.get("sameRound"):
+            scope_label = f"**同轮复检**（`{carry_forward.get('source', '')}`）"
+        else:
+            scope_label = f"上轮第 **{carry_forward.get('previousRound', '?')}** 轮带入"
+        lines.append(
+            f"- carry-forward：{scope_label} **{carry_forward.get('carriedCount', 0)}** 项"
+            f"（verified {carry_forward.get('verifiedCount', 0)} / 复开 {carry_forward.get('reopenedCount', 0)}"
+            f" / 待语义复审 {carry_forward.get('pendingSemanticCount', 0)} / wontfix {carry_forward.get('wontfixKeptCount', 0)}"
+            f" / 已 verified {carry_forward.get('keptVerifiedCount', 0)}），本轮新检出 {carry_forward.get('detectedCount', 0)} 项，合并去重 {carry_forward.get('suppressedCount', 0)} 项")
     lines.append("")
     if "script" in layer_status and layer_status["script"] == "blocked":
         lines.append("> A 层存在 blocker：按 F6.2 短路 B/C，先完成结构/字数/图表修复后再审查。")
@@ -562,6 +587,29 @@ def render_report(
     else:
         lines.append("（无）")
     lines.append("")
+    carried_rows = [item for item in issues if isinstance(item, Mapping) and item.get("carriedFrom") is not None]
+    if carried_rows and carry_forward:
+        lines.append("## 上一轮问题复检（carry-forward）")
+        lines.append("")
+        if carry_forward.get("sameRound"):
+            lines.append(f"- 数据来源：`{carry_forward.get('source', '')}`（第 {carry_forward.get('round', '?')} 轮重跑：同轮复检，不整体重写台账）")
+        else:
+            lines.append(f"- 数据来源：`{carry_forward.get('source', '')}`（上轮第 {carry_forward.get('previousRound', '?')} 轮）")
+        lines.append("- 复检口径：A 层（script）由本脚本逐轮确定性复检并自动写 verified；B/C 语义项保持 fixed 待复审，由 `bg_review_issues.py close --status verified --review` 写 verified。")
+        lines.append("- 表中「复检结果」为带入时点结论；后续复审结论见括号内「→ 状态」，当前状态以 `reviews/issues.json` 的 `status` 为准。")
+        lines.append("")
+        lines.append("| ID | 级别 | 层 | 类型 | 章节 | 原状态 | 复检结果 | 说明 |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for issue in carried_rows:
+            recheck = issue.get("recheck") if isinstance(issue.get("recheck"), Mapping) else {}
+            result_label = str(recheck.get("result") or "-")
+            if recheck.get("resolvedStatus"):
+                result_label += f"（→ {recheck.get('resolvedStatus')}）"
+            lines.append(
+                f"| {issue.get('issueId')} | {issue.get('severity')} | {issue.get('layer')} | {issue.get('type')} | {issue.get('chapterId') or '-'} |"
+                f" {recheck.get('previousStatus', '-')} | {result_label} | {str(recheck.get('note') or '').replace('|', '/')[:100]} |"
+            )
+        lines.append("")
     chapter_rows = result.get("chapterRows") or []
     lines.append("## 字数核对")
     lines.append("")
@@ -609,6 +657,108 @@ def render_report(
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+def run_selftest() -> dict[str, Any]:
+    """纯函数自检：字数口径（P2-10）/表格/正文/标题/去重/ID/carry-forward（不读写项目）。"""
+    checks: list[str] = []
+    # P2-10：审查字数口径必须来自 _lib.text，不得有本地副本
+    if count_words is not text_lib.count_body_words:
+        raise AssertionError("count_words 必须直接引用 _lib.text.count_body_words")
+    sample = "# 一级标题\n<!-- BG:CHAPTER id=1 -->\n正文 2026-11-21 PLC_01 运维服务。\n"
+    expected_words = 6 + 2  # 正文(2)+运维服务(4) 个汉字 + “2026-11-21”“PLC_01” 2 个词
+    if count_words(sample) != expected_words or count_words(sample) != text_lib.count_words(sample):
+        raise AssertionError(f"字数口径不一致：{count_words(sample)} != {expected_words}")
+    checks.append("word_count_lib_text")
+    # 表格解析
+    table_text = "▼表运维范围\n\n| 项目 | 内容 |\n|---|---|\n| 范围 | 全域 |\n"
+    tables = markdown_tables(table_text)
+    if len(tables) != 1 or tables[0]["caption"] != "▼表运维范围" or len(tables[0]["rows"]) != 1:
+        raise AssertionError(f"表格解析不正确：{tables}")
+    checks.append("markdown_tables")
+    # 正文剥离（首行标题 / BG:CHAPTER / HTML 注释）
+    body = body_text("## 标题\n<!-- BG:CHAPTER id=1-1 -->\n\n正文 <!-- BG:FIGURE:fig-1 -->内容\n")
+    if "标题" in body or "BG:CHAPTER" in body or "BG:FIGURE" in body or "正文" not in body:
+        raise AssertionError(f"body_text 剥离不正确：{body!r}")
+    headings = heading_info("# 标题\n```\n# 代码内不算\n```\n## 二级\n")
+    if [item["title"] for item in headings] != ["标题", "二级"]:
+        raise AssertionError(f"heading_info 不正确：{headings}")
+    checks.append("body_and_headings")
+    # 去重 + ID 分配
+    collector = IssueCollector()
+    collector.add("script", "word_count_low", "major", chapter_id="1-1", evidence="证据A")
+    collector.add("script", "word_count_low", "major", chapter_id="1-1", evidence="证据A")
+    collector.add("script", "table_missing", "minor", chapter_id="1-2", evidence="证据B")
+    collector.add("script", "word_count_low", "blocker", chapter_id="1-1", evidence="证据C")
+    raw = collector.raw_items()
+    if len(raw) != 3 or raw[0]["severity"] != "blocker" or raw[0]["issueId"] != "":
+        raise AssertionError(f"raw_items 去重/排序不正确：{raw}")
+    assigned = review_issues.assign_issue_ids(raw, 3)
+    if [item["issueId"] for item in assigned] != ["RV-3-0001", "RV-3-0002", "RV-3-0003"]:
+        raise AssertionError(f"issueId 分配不正确：{assigned}")
+    checks.append("collector")
+    # carry-forward：script fixed 未复现 → verified；复现 → 复开；语义层 → 待复审
+    previous = [
+        {
+            "issueId": "RV-1-0001",
+            "layer": "script",
+            "type": "word_count_low",
+            "severity": "major",
+            "chapterId": "1-1",
+            "anchorId": None,
+            "evidence": "实际 800 字 / 目标 1000（80.0%）",
+            "status": "fixed",
+            "userConfirmed": False,
+        },
+        {
+            "issueId": "RV-1-0002",
+            "layer": "script",
+            "type": "word_count_low",
+            "severity": "major",
+            "chapterId": "2-1",
+            "anchorId": None,
+            "evidence": "实际 900 字 / 目标 1000（90.0%）",
+            "status": "fixed",
+            "userConfirmed": False,
+        },
+        {
+            "issueId": "RV-1-0003",
+            "layer": "graphic",
+            "type": "figure_mismatch",
+            "severity": "minor",
+            "chapterId": "2-3",
+            "anchorId": "fig-2-3-02",
+            "evidence": "图与正文脱节",
+            "status": "fixed",
+            "userConfirmed": False,
+        },
+    ]
+    detected = [
+        {
+            "issueId": "",
+            "layer": "script",
+            "type": "word_count_low",
+            "severity": "major",
+            "chapterId": "2-1",
+            "anchorId": None,
+            "evidence": "实际 905 字 / 目标 1000（90.5%）",
+        }
+    ]
+    carried = review_issues.carry_forward_issues(previous, detected, 2, previous_round=1)
+    by_id = {item["issueId"]: item for item in carried["carried"]}
+    if by_id["RV-1-0001"]["status"] != "verified" or by_id["RV-1-0001"]["recheck"]["result"] != review_issues.RECHECK_VERIFIED:
+        raise AssertionError(f"未复现的 fixed 应自动 verified：{by_id['RV-1-0001']}")
+    if by_id["RV-1-0002"]["status"] != "open" or by_id["RV-1-0002"]["recheck"]["result"] != review_issues.RECHECK_RECURRED:
+        raise AssertionError(f"复现的 fixed 应复开：{by_id['RV-1-0002']}")
+    if by_id["RV-1-0003"]["recheck"]["result"] != review_issues.RECHECK_PENDING_SEMANTIC:
+        raise AssertionError(f"语义层应待复审：{by_id['RV-1-0003']}")
+    if carried["detected"] or carried["summary"]["suppressedCount"] != 1:
+        raise AssertionError(f"复现问题应去重：{carried['summary']}")
+    sorted_ids = [item["issueId"] for item in review_issues.sort_issues(carried["carried"])]
+    if sorted_ids[0] != "RV-1-0001" or sorted_ids[-1] != "RV-1-0003":
+        raise AssertionError(f"跨轮排序不正确：{sorted_ids}")
+    checks.append("carry_forward")
+    return {"ok": True, "selftest": {"script": "bg_review_script.py", "checks": checks}}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = errors.CliParser(
         prog="bg_review_script.py",
@@ -620,11 +770,53 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--package", help="目标包 package-<N>")
     parser.add_argument("--round", type=int, help="审查轮次（缺省 state.reviewLoop.round）")
     parser.add_argument("--layer", choices=("a", "all"), default="all", help="a=仅 A 层；all=按规则执行 A 并标记 B/C（M7 阶段 B/C 占位）")
+    parser.add_argument("--no-carry-forward", action="store_true", help="不读上一轮台账（纯本轮重生成；默认开启 carry-forward）")
     parser.add_argument("--dry-run", action="store_true", help="只计算不写 issues/report（真实项目试跑用）")
+    parser.add_argument("--selftest", action="store_true", help="运行脚本自检（纯函数，不读写项目）")
     return parser
 
 
+def apply_carry_forward(
+    package_dir: Path,
+    round_no: int,
+    detected: Sequence[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """P1-3：把上一轮未 verified 条目带入本轮并与本轮新检出合并。
+
+    返回 ``(issues, carry_forward_info)``；无历史或无可带入条目时退化为纯本轮结果
+    （``carry_forward_info is None``，不写 carryForward 块，保持第 1 轮输出兼容）。
+    """
+    previous = review_issues.load_previous_ledger(package_dir, round_no)
+    if previous is None:
+        return review_issues.assign_issue_ids(detected, round_no), None
+    carried = review_issues.carry_forward_issues(
+        previous["issues"],
+        detected,
+        round_no,
+        previous_round=previous["round"],
+        same_round=bool(previous.get("sameRound")),
+    )
+    new_issues = review_issues.assign_issue_ids(carried["detected"], round_no, reserved=carried["carried"])
+    issues = review_issues.sort_issues(list(carried["carried"]) + new_issues)
+    summary = carried["summary"]
+    if not summary["carriedCount"] and not summary["suppressedCount"]:
+        return issues, None
+    info: dict[str, Any] = dict(summary)
+    info["source"] = previous["source"]
+    info["at"] = paths.iso_now()
+    info["verifiedIds"] = list(carried["stats"]["verified"])
+    info["reopenedIds"] = list(carried["stats"]["reopened"])
+    info["pendingSemanticIds"] = list(carried["stats"]["pendingSemantic"])
+    info["carriedOpenIds"] = list(carried["stats"]["carriedOpen"])
+    info["wontfixKeptIds"] = list(carried["stats"]["wontfixKept"])
+    info["keptVerifiedIds"] = list(carried["stats"]["keptVerified"])
+    info["suppressed"] = list(carried["suppressed"])
+    return issues, info
+
+
 def handle(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "selftest", False):
+        return run_selftest()
     if not args.project:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
@@ -656,8 +848,18 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         collector.add("script", "script_error", "blocker", evidence=f"outline 校验失败：{blocker.get('code')} {blocker.get('message')}", suggestion="修复 outline 后重跑")
     result = review_a_layer(package_dir=package_dir, outline=outline, package_meta=package_meta, collector=collector)
     result["supplementTables"] = [item for item in outline.get("supplementTables") or [] if isinstance(item, Mapping)]
-    issues = collector.items(round_no)
-    blocker_count = sum(1 for issue in issues if issue["severity"] == "blocker")
+    detected = collector.raw_items()
+    if bool(getattr(args, "no_carry_forward", False)):
+        issues = review_issues.assign_issue_ids(detected, round_no)
+        carry_forward_info: dict[str, Any] | None = None
+    else:
+        issues, carry_forward_info = apply_carry_forward(package_dir, round_no, detected)
+    # 短路判定只看“仍未关闭”的 blocker：带入的 blocker 若已 verified 不再短路 B/C
+    blocker_count = sum(
+        1
+        for issue in issues
+        if issue["severity"] == "blocker" and str(issue.get("status") or "open") in ("open", "fixing")
+    )
     if blocker_count:
         layers_run = ["script"]
         pending_layers: list[str] = []
@@ -676,22 +878,20 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         pending_layers=pending_layers,
         layer_status=layer_status,
         dry_run=bool(args.dry_run),
+        carry_forward=carry_forward_info,
     )
-    summary = {
-        "blocker": sum(1 for issue in issues if issue["severity"] == "blocker"),
-        "major": sum(1 for issue in issues if issue["severity"] == "major"),
-        "minor": sum(1 for issue in issues if issue["severity"] == "minor"),
-        "total": len(issues),
-        "openCount": len(issues),
-    }
+    summary = review_issues.recalc_summary(issues)
     if not bool(args.dry_run):
+        detail: dict[str, Any] = {"round": round_no, "packageId": target, "summary": summary, "layerStatus": layer_status}
+        if carry_forward_info:
+            detail["carryForward"] = carry_forward_info
         event_log.log_event(
             workspace,
             "review.round_end",
             actor="script",
             project=str(project_doc.get("projectId") or ""),
             package=target,
-            detail={"round": round_no, "packageId": target, "summary": summary, "layerStatus": layer_status},
+            detail=detail,
         )
     return {
         "ok": True,
@@ -706,6 +906,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         "layerStatus": layer_status,
         "summary": summary,
         "blockerCount": blocker_count,
+        "carryForward": carry_forward_info,
         "issueIds": [issue["issueId"] for issue in issues],
         "issues": issues,
         "paths": paths_out,

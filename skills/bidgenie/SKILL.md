@@ -48,7 +48,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 2. 默认导出**固定顺序**：tech 导出 → tech verify → overview 导出（基于最新 tech 报告）→ overview verify → T10；任一 verify 失败停后续，不进 T10。
 3. keyinfo 只在用户明确要求时导出；未导出不设门禁，导出则须 `--mode keyinfo` 自检通过。
 4. 每模式只导出一次、不重复导出；历史版本交 `bg_finalize.py --cleanup --keep N`；F7 结束另跑 `bg_outline_apply.py --cleanup` 清 `.bak`/`.lock`。
-5. run-manifest：T1 后 `--start`、每包导出后记录、T10 后 `--finalize`；归档 `dsh/run-manifests/<runId>.json`，验收报告引用 runId/rootHash 与 `versionDrift`/`envRefreshedAfterStart`/`exitCode`；运行中刷新 env-check 不视为零漂移。
+5. run-manifest：T1 后 `--start`、每包导出后**记录到同一 runId**（复用 `<runId>.start.json`，产物 `<runId>.snapshot-<ts>.json/.md`）、T10 后 `--finalize` 写 `<runId>.json/.md`；`dsh/run-manifests/_latest.json` 指向最新一次 run；验收报告引用 runId/rootHash 与 `versionDrift`/`envRefreshedAfterStart`/`exitCode`；运行中刷新 env-check 不视为零漂移。
 6. 多包每包独立 F4–F7；本包完成后 T13 切下一包（下一包已 prepare，只 verify+T3）。
 
 > 具体命令见 `references/f7-export.md`（按需读）。
@@ -59,12 +59,12 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 |---|---|---|
 | F1→F2 | currentBidderId 有效、bidder.json 可解析 | 加载 bg-init |
 | F2→F3（T1） | 环境必需项通过/豁免；project/state 可解析；已登记；完整度已提示 | 迁移后 `bg_run_manifest.py --start`，加载 bg-extract |
-| F3→F4（T2） | extract_validate 通过；分包确定；project 字段回填；conversion-manifest 完整；完整度已提示 | check/transition package_prepare；加载 bg-prepare |
+| F3→F4（T2） | extract_validate 通过；分包确定；project 字段回填；conversion-manifest 完整；完整度已提示（T2 guard 会自动 `--apply` 刷新 env-check，返回 `refreshed=true` 属正常，不是环境漂移） | check/transition package_prepare；加载 bg-prepare |
 | F4→F5（T3） | 全部 selected 已 prepare/verify；逐包人员/设备/工期有答案或默认；package-meta 齐全 | 首包（显式 --package writingPackages[0]）check/transition outline；加载 bg-outline |
 | F5-1→F5-2（T4） | outline_validate --strict、--check-tree 通过；配额 ≥ | check/transition draft；加载 bg-write |
 | F5-2→F6（T5） | chapter_merge --verify-all；leaf 全 done/skipped | check/transition review；加载 bg-review |
 | F6→优化（T6） | openCount>0；issues 合法 | check/transition optimize；加载 bg-optimize |
-| 优化→审查（T8） | openCount==0；blocker/major 已 verified；optimization.json 已生成 | check/transition review；下一轮 bg-review |
+| 优化→审查（T8） | openCount==0；blocker/major 无 open/复开项（fixed 可，由下一轮审查 carry-forward 写 verified）；optimization.json 已生成 | check/transition review；下一轮 bg-review |
 | F6→定稿（T7） | blocker/major/minor 判据成立 | check/transition finalize；按 §3 执行 |
 | F7 定稿（T9） | `bg_finalize --lock` 成功（manifest/draftLocked/.locked） | check/transition export |
 | F7 导出（T10） | tech+overview 按序导出并自检通过；run-manifest/cleanup 完成；keyinfo 若导出须通过 | check/transition completed；`run-manifest --finalize` 记录结论 |

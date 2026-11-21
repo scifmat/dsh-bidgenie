@@ -18,7 +18,7 @@ answers（7 项提问 + exportStyleProfile 服务默认；缺省按 PRD F4.2 默
       PRD 7.3 瘦字段 + 7 项提问/exportStyleProfile（含 valueSource）；提取内容不复制（材料索引按需 CLI 生成）
       + assumptions（默认值推导说明）+ status（prepared）+ answers 镜像；
     project.json 更新 packagesToWrite/status/updatedAt（extensions.prepare 记录包目录）；
-    state.json set-package（不迁移阶段）；事件 `package.prepared`；T3 前置 check 结果随输出返回。
+    state.json set-package（不迁移阶段；history 记 kind=event/action=set_package 审计事件）；事件 `package.prepared`；T3 前置 check 结果随输出返回。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import json
 import re
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +59,9 @@ ANSI_WORD_RE = re.compile(r"(?:不少于|不低于|至少|不少于)\s*(\d+(?:\.
 CN_WORD_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万字(?:以上|及以上)?")
 CHAR_WORD_RE = re.compile(r"(?:不少于|不低于|至少)\s*(\d+(?:\.\d+)?)\s*字")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: P2-9：合同履行期限（服务期）与施工/供货工期语义分开，避免 constructionPlan 语义错位
+SERVICE_PERIOD_LABEL_RE = re.compile(r"合同履行期限|履约期限|服务期限|服务期|履约期|履行期限")
+CONSTRUCTION_LABEL_RE = re.compile(r"工期|供货期|交付期|建设期")
 #: package-meta 瘦身字段（PRD 7.3；M4.3 只存决策/配置，不复制提取内容）
 PRD_META_KEYS: tuple[str, ...] = (
     "schemaVersion",
@@ -381,6 +384,44 @@ def derive_personnel_plan(texts: Mapping[str, str]) -> list[dict[str, Any]]:
     return plan
 
 
+def derive_personnel_total(texts: Mapping[str, str], *, multi_package: bool = False) -> int:
+    """从 08/09 人员表的「合计/小计」行取总人数（只作汇总镜像，不当作岗位条目）。
+
+    P2-8/C06：表头/合计行不作为岗位计入 personnelPlan，但「招标文件声明的合计人数」
+    是投标人承诺的总量口径，应在 auto 描述里以「，合计N人」镜像出来（整行原文优先）。
+    """
+    labels = ("合计", "小计", "总计", "总人数", "合 计")
+    for key in ("09", "08"):
+        text = texts.get(key, "")
+        for table in _section_tables(text):
+            header = table["header"]
+            header_text = " ".join(header)
+            if not any(token in header_text for token in ("人员", "岗位", "角色", "团队", "人员类别")):
+                if not any(token in table["section"] for token in ("人员", "团队", "岗位")):
+                    continue
+            role_index = _column_index(header, ("岗位", "角色", "人员类别", "职务", "职责"))
+            count_index = _column_index(header, ("人数", "数量", "编制", "配置人数"))
+            for row in table["rows"]:
+                if not row or _row_is_header(row, header):
+                    continue
+                row_text = " ".join(str(cell) for cell in row)
+                if multi_package and CROSS_PACKAGE_RE.search(row_text):
+                    continue
+                if role_index >= 0:
+                    label = _cell(row, role_index)
+                else:
+                    label, _detail = _pick_label_cell(row, skip={"序号", "岗位", "人员类别", "角色", "人数", "数量"})
+                if re.sub(r"\s+", "", label) not in labels:
+                    continue
+                if count_index >= 0:
+                    match = re.search(r"(\d+)", _cell(row, count_index))
+                else:
+                    match = re.search(r"(\d+)\s*(?:人|名)", row_text)
+                if match and int(match.group(1)) > 0:
+                    return int(match.group(1))
+    return 0
+
+
 def derive_equipment_plan(texts: Mapping[str, str]) -> list[dict[str, Any]]:
     """从 08/09 的拟投入设备/车辆/备件表按列名推导；数量取数量列，单位列不写入 purpose。"""
     combined = texts.get("08", "") + "\n" + texts.get("09", "")
@@ -438,30 +479,11 @@ def derive_equipment_plan(texts: Mapping[str, str]) -> list[dict[str, Any]]:
     return plan
 
 
-def derive_schedule_plan(texts: Mapping[str, str]) -> tuple[dict[str, str], bool]:
-    """从 01/08/09 合同履行期限推导计划；不编造具体日期。返回 (plan, derived)。"""
-    candidates: list[str] = []
-    for key in ("01", "08", "09"):
-        text = texts.get(key, "")
-        for table in _section_tables(text):
-            for row in table["rows"]:
-                if len(row) < 2:
-                    continue
-                label = row[0].strip()
-                if not re.search(r"合同履行期限|履约期限|服务期|工期|供货期", label):
-                    continue
-                value = row[1].strip()
-                if value:
-                    candidates.append(value)
-        for line in text.split("\n"):
-            if "|" in line:
-                continue
-            match = re.search(r"(?:合同履行期限|履约期限|服务期|工期)[：:]\s*([^\n]{2,60})", line)
-            if match:
-                candidates.append(match.group(1).strip())
+def _clean_period_candidates(candidates: Sequence[str]) -> str:
+    """清洗期限候选（去前缀/引号/尾标点、限长、去重），返回首个合法值。"""
     cleaned: list[str] = []
     for candidate in candidates:
-        value = re.sub(r"^[\s:：*·\-]+", "", candidate)
+        value = re.sub(r"^[\s:：*·\-]+", "", str(candidate or ""))
         value = re.sub(r"[「」『』*`]", "", value).strip(" ；;，,。、/")
         if not value or len(value) > 60:
             continue
@@ -469,11 +491,51 @@ def derive_schedule_plan(texts: Mapping[str, str]) -> tuple[dict[str, str], bool
             continue
         if value not in cleaned:
             cleaned.append(value)
-    construction = cleaned[0] if cleaned else ""
-    derived = bool(construction)
-    if not construction:
-        construction = "合同签订后按招标文件要求执行"
-    return {"startDate": "", "deliveryDate": "", "constructionPlan": construction}, derived
+    return cleaned[0] if cleaned else ""
+
+
+def derive_schedule_plan(texts: Mapping[str, str]) -> tuple[dict[str, str], bool]:
+    """从 01/08/09 期限字段推导计划；不编造具体日期。
+
+    P2-9 语义拆分：
+    - 合同履行期限/履约期限/服务期 → ``schedulePlan.servicePeriod``（服务期）；
+    - 工期/供货期/交付期 → ``schedulePlan.constructionPlan``（建设/供货计划）；
+    两者都不编造：未推导到就留空字符串，由调用方按 agent-default 记录依据。
+    """
+    service_candidates: list[str] = []
+    construction_candidates: list[str] = []
+    for key in ("01", "08", "09"):
+        text = texts.get(key, "")
+        for table in _section_tables(text):
+            for row in table["rows"]:
+                if len(row) < 2:
+                    continue
+                label = str(row[0]).strip()
+                value = str(row[1]).strip()
+                if not value:
+                    continue
+                if SERVICE_PERIOD_LABEL_RE.search(label):
+                    service_candidates.append(value)
+                elif CONSTRUCTION_LABEL_RE.search(label):
+                    construction_candidates.append(value)
+        for line in text.split("\n"):
+            if "|" in line:
+                continue
+            service_match = re.search(r"(?:合同履行期限|履约期限|服务期限|服务期|履约期|履行期限)[：:]\s*([^\n]{2,60})", line)
+            if service_match:
+                service_candidates.append(service_match.group(1).strip())
+            construction_match = re.search(r"(?:工期|供货期|交付期|建设期)[：:]\s*([^\n]{2,60})", line)
+            if construction_match:
+                construction_candidates.append(construction_match.group(1).strip())
+    service_period = _clean_period_candidates(service_candidates)
+    construction_plan = _clean_period_candidates(construction_candidates)
+    derived = bool(service_period or construction_plan)
+    return {
+        "startDate": "",
+        "deliveryDate": "",
+        "servicePeriod": service_period,
+        "constructionPlan": construction_plan,
+    }, derived
 
 
 def derive_key_chapters(texts: Mapping[str, str]) -> list[dict[str, Any]]:
@@ -706,6 +768,7 @@ def normalize_answers(raw: Any, *, allow_network_images: bool) -> dict[str, Any]
             "startDate": str(value.get("startDate") or ""),
             "deliveryDate": str(value.get("deliveryDate") or ""),
             "constructionPlan": str(value.get("constructionPlan") or "")[:300],
+            "servicePeriod": str(value.get("servicePeriod") or "")[:300],
         }
         for key in ("startDate", "deliveryDate"):
             if schedule[key] and not DATE_RE.match(schedule[key]):
@@ -839,10 +902,12 @@ def build_requirement_summary(texts: Mapping[str, str], package_id: str) -> dict
                     equipment.append(item[:240])
     schedule_plan, schedule_derived = derive_schedule_plan(texts)
     word_requirement = derive_word_count_requirement(texts)
+    schedule_kind = "servicePeriod" if schedule_plan.get("servicePeriod") else ("constructionPlan" if schedule_plan.get("constructionPlan") else "")
     return {
         "personnel": personnel[:12],
         "equipment": equipment[:12],
-        "schedule": schedule_plan["constructionPlan"] if schedule_derived else "",
+        "schedule": (schedule_plan.get("servicePeriod") or schedule_plan.get("constructionPlan") or "") if schedule_derived else "",
+        "scheduleKind": schedule_kind,
         "wordCount": word_requirement,
         "sources": {
             "personnel": _requirement_source(personnel_keys, package_id),
@@ -1019,7 +1084,10 @@ def _auto_plan_description(
 
     if deduped:
         mirrored = "、".join(f"{item['name']}{item['count']}{item['unit']}" for item in deduped[:8])
-        value = f"{text_prefix}{mirrored}，满足招标文件要求"
+        # C06：合计行不并入岗位列表，但把招标文件声明的总人数作为汇总镜像出来（「，合计N人」）
+        total = derive_personnel_total(texts, multi_package=multi_package) if field == "personnelPlan" else 0
+        total_suffix = f"，合计{total}人" if total > 0 else ""
+        value = f"{text_prefix}{mirrored}{total_suffix}，满足招标文件要求"
         basis = "、".join(sources) or "提取稿要求"
         return {"value": value, "basis": basis, "valueSource": "extracted", "tier": "explicit", "counts": deduped[:8]}
     if roles:
@@ -1031,6 +1099,20 @@ def _auto_plan_description(
     else:
         value = "按招标文件要求和履约需要配置设备，具体清单进场前报采购人确认"
     return {"value": value, "basis": "无明确要求", "valueSource": "agent-default", "tier": "commitment", "counts": []}
+
+
+def _auto_schedule_basis(plan: Mapping[str, Any]) -> str:
+    """P2-9：auto 推导依据写清「哪个字段来自哪类期限」，避免 constructionPlan 语义错位。"""
+    service = str(plan.get("servicePeriod") or "")
+    construction = str(plan.get("constructionPlan") or "")
+    parts: list[str] = []
+    if service:
+        parts.append(f"提取稿合同履行期限→schedulePlan.servicePeriod=「{service}」")
+    if construction:
+        parts.append(f"提取稿工期→schedulePlan.constructionPlan=「{construction}」")
+    if not parts:
+        return "无明确期限要求，schedulePlan 留空（agent-default，不编造日期/工期）"
+    return "；".join(parts) + "（extracted，不编造具体日期）"
 
 
 def build_auto_fill(
@@ -1077,7 +1159,7 @@ def build_auto_fill(
         "expectedWordCount": f"user-settings.defaultWordCountTier={word_count}",
         "personnelPlan": personnel["basis"],
         "equipmentPlan": equipment["basis"],
-        "schedulePlan": "提取稿合同履行期限" if schedule_derived else "无明确期限，采用履约承诺",
+        "schedulePlan": _auto_schedule_basis(schedule_default),
         "exportStyleProfile": "user-settings.styleProfiles.tech",
     }
     for key in FIGURE_KEYS:
@@ -1309,24 +1391,30 @@ def build_package_meta(
             "startDate": str(answers["schedulePlan"].get("startDate") or ""),
             "deliveryDate": str(answers["schedulePlan"].get("deliveryDate") or ""),
             "constructionPlan": str(answers["schedulePlan"].get("constructionPlan") or ""),
+            "servicePeriod": str(answers["schedulePlan"].get("servicePeriod") or ""),
         }
         value_source["schedulePlan"] = "user"
     elif existing_meta and str((existing_meta.get("valueSource") or {}).get("schedulePlan") or "") == "user":
         schedule = dict(existing_meta.get("schedulePlan") or schedule_default)
+        schedule.setdefault("servicePeriod", "")
         value_source["schedulePlan"] = "user"
     elif auto_values.get("schedulePlan") is not None and not (
         existing_meta and str((existing_meta.get("valueSource") or {}).get("schedulePlan") or "") == "user"
     ):
         schedule = dict(auto_values["schedulePlan"])
+        schedule.setdefault("servicePeriod", "")
         value_source["schedulePlan"] = str(auto_sources.get("schedulePlan") or "agent-default")
-        assumptions.append(f"auto 模式：工期采用{value_source['schedulePlan']}推导")
+        assumptions.append(f"auto 模式：schedulePlan 采用 {value_source['schedulePlan']} 推导（servicePeriod/constructionPlan 分字段记录）")
     else:
         schedule = dict(schedule_default)
         value_source["schedulePlan"] = "extracted" if schedule_derived else "agent-default"
-        if schedule_derived:
-            assumptions.append(f"schedulePlan：从提取稿合同履行期限推导「{schedule['constructionPlan']}」（extracted，不编造日期）")
-        else:
-            assumptions.append("schedulePlan：未推导出明确期限，采用「合同签订后按招标文件要求执行」模糊表述（agent-default，不编造日期）")
+        if schedule.get("servicePeriod"):
+            assumptions.append(f"schedulePlan：从提取稿合同履行期限推导 servicePeriod「{schedule['servicePeriod']}」（extracted，不编造日期）")
+        if schedule.get("constructionPlan"):
+            assumptions.append(f"schedulePlan：从提取稿工期要求推导 constructionPlan「{schedule['constructionPlan']}」（extracted，不编造日期）")
+        if not schedule_derived:
+            assumptions.append("schedulePlan：未推导出明确期限，servicePeriod/constructionPlan 留空（agent-default，不编造日期或工期）")
+    schedule.setdefault("servicePeriod", "")
 
     # 3) figureQuota
     allow_network = bool(answers.get("allowNetworkImages", settings.get("allowNetworkImages")))
@@ -1594,45 +1682,124 @@ def verify_prepared(workspace: Path, project_dir: Path, *, package_id: str | Non
     return payload
 
 
-def find_qualification_gaps(workspace: Path, project_dir: Path, project: Mapping[str, Any], package_id: str) -> list[dict[str, Any]]:
-    """F4 前提示资质缺口：对比 extraction 02/包要求与投标人证书（只提示，不判死）。"""
+#: P2-8：资质缺口关键词（只认资格/证书类硬项，正文性描述不算）
+QUALIFICATION_KEYWORDS = ("资质", "证书", "等级", "监理", "建造师", "安全许可", "认证", "许可证", "项目管理师", "职称")
+QUALIFICATION_CLAUSE_RE = re.compile(r"[，,；;。、]")
+QUALIFICATION_NOUN_RE = re.compile(
+    r"[\u4e00-\u9fffA-Za-z0-9（）()·]{2,16}(?:资质等级|资质证书|认证证书|安全生产许可证|许可证|建造师|监理工程师|项目管理师|职称|证书|资质|认证)"
+)
+QUALIFICATION_MODAL_RE = re.compile(r"具备|具有|须|应|需|提供|持有|要求")
+QUALIFICATION_MODAL_PREFIX_RE = re.compile(
+    r"^(?:投标人|供应商|响应人|申请人|本项目|项目|须|应|需|必须|具备|具有|提供|持有|要求|有效的|有效|相应的|相关|国家|行业|省级|及以上)+"
+)
+QUALIFICATION_MAX_GAPS = 5
+QUALIFICATION_MAX_TOKEN_CHARS = 120
+#: 程序性/条件性文本（不是"要求投标人具备什么"），不计入缺口
+QUALIFICATION_NOISE_RE = re.compile(r"审查|由采购人|招标代理|按照招标文件|未提供|不符|评标|评审程序|材料清单")
+#: 过于泛化的词，不作为可缺口名词
+QUALIFICATION_GENERIC_TERMS = frozenset({"资质", "证书", "等级", "认证", "许可证", "投标人资质", "投标人证书", "资质要求", "资格证书"})
+
+
+def load_bidder_cert_text(workspace: Path, project: Mapping[str, Any]) -> tuple[str, bool]:
+    """读取投标人证书清单文本；返回 (文本, 是否有可比对资料)。"""
     bidder_ref = project.get("bidderRef") if isinstance(project.get("bidderRef"), Mapping) else {}
     dir_name = str(bidder_ref.get("dirName") or "")
     cert_file = workspace / "dsh" / "bidders" / dir_name / "certificates.json" if dir_name else None
-    cert_text = ""
     if cert_file is not None and cert_file.is_file():
         try:
-            cert_doc = jsonio.read_json(cert_file)
-            cert_text = json.dumps(cert_doc, ensure_ascii=False)
+            return json.dumps(jsonio.read_json(cert_file), ensure_ascii=False), True
         except errors.BgError:
-            cert_text = ""
-    files = [project_dir / "extraction" / "common" / "02-Eligibility-Review.md"]
-    files.extend(project_dir / "extraction" / "packages" / package_id / name for name in ("06-Procurement-Content.md", "07-Evaluation-Criteria.md", "08-Business-Requirements.md", "09-Technical-Requirements.md"))
-    keywords = ("资质", "证书", "等级", "监理", "建造师", "安全许可", "认证")
+            return "", False
+    return "", False
+
+
+def _qualification_clauses(text: str) -> list[str]:
+    """把资格类文本切成**完整短语**（按标点分句，不切碎），只保留含资格关键词+义务语的条目。"""
+    clauses: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("|"):
+            # Markdown 表格行：单元格各自作为一个短语；跳过表头/分隔行
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if not cells or all(not cell or set(cell) <= set("-: ") for cell in cells):
+                continue
+            candidates = cells
+        else:
+            candidates = [stripped.lstrip("-*0123456789. ()").strip()]
+        for candidate in candidates:
+            for clause in QUALIFICATION_CLAUSE_RE.split(candidate):
+                clause = re.sub(r"\s+", " ", clause).strip(" ：:；;，,、*·「」『』")
+                if len(clause) < 6:
+                    continue
+                if not any(keyword in clause for keyword in QUALIFICATION_KEYWORDS):
+                    continue
+                if not QUALIFICATION_MODAL_RE.search(clause):
+                    continue
+                if QUALIFICATION_NOISE_RE.search(clause):
+                    continue
+                if clause not in clauses:
+                    clauses.append(clause)
+    return clauses
+
+
+def _qualification_terms(clause: str) -> list[str]:
+    """从完整短语抽资格名词（去掉「投标人/须/具备」等前缀、括号说明与「证书」类后缀），用于和投标人资料比对。"""
+    terms: list[str] = []
+    for match in QUALIFICATION_NOUN_RE.finditer(clause):
+        noun = QUALIFICATION_MODAL_PREFIX_RE.sub("", match.group(0)).strip()
+        variants = [noun, re.sub(r"[（(][^）)]*[）)]", "", noun).strip()]
+        for variant in list(variants):
+            base = re.sub(r"(?:资质等级|资质证书|认证证书|安全生产许可证|许可证|证书|资质|认证)$", "", variant).strip()
+            variants.append(base)
+        for candidate in variants:
+            if len(candidate) >= 3 and candidate not in QUALIFICATION_GENERIC_TERMS and candidate not in terms:
+                terms.append(candidate)
+    return terms
+
+
+def find_qualification_gaps(workspace: Path, project_dir: Path, project: Mapping[str, Any], package_id: str) -> list[dict[str, Any]]:
+    """F4 前提示资质缺口（P2-8 去噪）：只对 02/08/09 的资格硬项做比对，每包 ≤5 条 info。
+
+    - 按标点切出**完整短语**，missingTokens 就是整条短语（不再把中文切成 2–8 字碎片）；
+    - 只取资格硬性项（资质/证书/等级/许可证/建造师/监理/认证等 + 具备/须/应/需/提供/持有）；
+    - 仅作 info 提示（blocking=false）：未匹配不代表缺资质，不阻断 F4/T3。
+    """
+    cert_text, _cert_available = load_bidder_cert_text(workspace, project)
+    sources = [project_dir / "extraction" / "common" / "02-Eligibility-Review.md"]
+    sources.extend(
+        project_dir / "extraction" / "packages" / package_id / name
+        for name in ("08-Business-Requirements.md", "09-Technical-Requirements.md")
+    )
     gaps: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for path in files:
+    for path in sources:
         if not path.is_file():
             continue
         source = paths.rel_posix(project_dir, path)
-        for line in path.read_text(encoding="utf-8-sig").splitlines():
-            stripped = line.strip().lstrip("-*0123456789. ()").strip()
-            if not stripped or len(stripped) < 3:
+        for clause in _qualification_clauses(path.read_text(encoding="utf-8-sig")):
+            terms = _qualification_terms(clause)
+            if not terms:
                 continue
-            if not any(keyword in stripped for keyword in keywords):
+            if any(term in cert_text for term in terms):
                 continue
-            if stripped.startswith("#") or stripped.startswith("|"):
-                continue
-            tokens = [token for token in re.findall(r"[\u4e00-\u9fff]{2,8}", stripped) if token not in ("资质", "证书", "等级", "要求", "具备", "提供", "投标人", "本项目")]
-            missing = [token for token in tokens if token not in cert_text]
-            if not missing:
-                continue
-            key = stripped[:80]
+            key = clause[:80]
             if key in seen:
                 continue
             seen.add(key)
-            gaps.append({"packageId": package_id, "requirement": stripped[:300], "source": source, "missingTokens": missing[:5], "severity": "info"})
-            if len(gaps) >= 10:
+            gaps.append(
+                {
+                    "packageId": package_id,
+                    "requirement": clause[:300],
+                    "source": source,
+                    "missingTokens": [clause[:QUALIFICATION_MAX_TOKEN_CHARS]],
+                    "severity": "info",
+                    "blocking": False,
+                    "note": "info 不阻断 F4/T3；仅提示核对投标人资料",
+                }
+            )
+            if len(gaps) >= QUALIFICATION_MAX_GAPS:
                 return gaps
     return gaps
 
@@ -1756,6 +1923,7 @@ def prepare_project(
     )
     extensions["prepare"] = prepare_extension
     qualification_gaps = find_qualification_gaps(workspace, project_dir, project, target)
+    _cert_text, cert_available = load_bidder_cert_text(workspace, project)
     gaps_by_package = dict(extensions.get("qualificationGaps") or {}) if isinstance(extensions.get("qualificationGaps"), dict) else {}
     gaps_by_package[target] = qualification_gaps
     extensions["qualificationGaps"] = gaps_by_package
@@ -1795,6 +1963,13 @@ def prepare_project(
         "figureQuota": meta["figureQuota"],
         "valueSource": meta["valueSource"],
         "qualificationGaps": qualification_gaps,
+        "qualificationGapsInfo": {
+            "count": len(qualification_gaps),
+            "severity": "info",
+            "blocking": False,
+            "certDataAvailable": cert_available,
+            "note": "info 不阻断 F4/T3：仅提示核对投标人证书/资质资料；未匹配不代表缺资质",
+        },
         "assumptions": (meta.get("extensions") or {}).get("assumptions") or [],
         "packageMetaBytes": meta_path.stat().st_size,
         "status": "prepared",
@@ -1808,6 +1983,7 @@ def prepare_project(
         "setPackage": {
             "revision": set_package_result.get("revision"),
             "changed": set_package_result.get("changed") or [],
+            "historyKind": set_package_result.get("historyKind") or "event",
         },
         "t3Check": t3_check,
         "readyForT3": bool(t3_check.get("pass")),
@@ -1989,6 +2165,12 @@ def record_override(
             parsed = json.loads(value)
         except json.JSONDecodeError as exc:
             raise errors.BgError(errors.E_USAGE, f"{field} 必须是 JSON 对象") from exc
+        if field == "schedulePlan":
+            # P2-9：统一 shape（servicePeriod 与 constructionPlan 分开），缺省键补空串
+            normalized = normalize_answers({"schedulePlan": parsed}, allow_network_images=False).get("schedulePlan")
+            if not isinstance(normalized, Mapping):
+                raise errors.BgError(errors.E_USAGE, "schedulePlan 必须是 JSON 对象（startDate/deliveryDate/servicePeriod/constructionPlan）")
+            parsed = dict(normalized)
     candidate = dict(meta)
     backup_path = _backup_meta(meta_path)
     candidate[field] = parsed
@@ -2079,7 +2261,8 @@ def update_answers(
     raw_schedule = raw_answers.get("schedulePlan") if isinstance(raw_answers, Mapping) else None
     if isinstance(raw_schedule, Mapping) and "schedulePlan" in answers:
         merged_schedule = dict(base_slim.get("schedulePlan") or {})
-        for key in ("startDate", "deliveryDate", "constructionPlan"):
+        merged_schedule.setdefault("servicePeriod", "")
+        for key in ("startDate", "deliveryDate", "constructionPlan", "servicePeriod"):
             if key in raw_schedule:
                 merged_schedule[key] = str(answers["schedulePlan"].get(key) or "")
         if merged_schedule != base_slim.get("schedulePlan"):
@@ -2414,6 +2597,12 @@ def run_selftest() -> dict[str, Any]:
                 raise AssertionError(f"package-meta 不应再包含旧字段：{legacy}")
         if meta.get("expectedWordCount") != 50000 or meta.get("figureQuota", {}).get("network") != 0:
             raise AssertionError(f"默认值推导不正确：word={meta.get('expectedWordCount')} quota={meta.get('figureQuota')}")
+        # P2-9：schedulePlan 必须含 servicePeriod（合同履行期限语义），无期限时留空且不把承诺写进 constructionPlan
+        schedule_meta = meta.get("schedulePlan") if isinstance(meta.get("schedulePlan"), Mapping) else {}
+        if not isinstance(schedule_meta.get("servicePeriod"), str):
+            raise AssertionError(f"schedulePlan.servicePeriod 缺失/非字符串：{schedule_meta}")
+        if schedule_meta.get("constructionPlan"):
+            raise AssertionError(f"无工期要求时 constructionPlan 不应有值：{schedule_meta}")
         if not isinstance((meta.get("extensions") or {}).get("assumptions"), list):
             raise AssertionError("assumptions 应放入 extensions")
         if "allowNetworkImages" in (meta.get("extensions") or {}):
@@ -2620,7 +2809,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auto", action="store_true", help="auto 模式：除需撰写包确认外，8 项自动预填（也读取 settings.interactionMode=auto）")
     parser.add_argument("--all-selected", action="store_true", help="按 writingPackages 顺序逐个 prepare 全部选中包（再执行 T3）")
     parser.add_argument("--update-answers", dest="update_answers", help="M4.1：项目已在 outline 时只更新 package-meta 答案字段（JSON 文件）")
-    parser.add_argument("--field", help="record-override：personnelPlan/equipmentPlan/expectedWordCount/schedulePlan/figureQuota/exportStyleProfile")
+    parser.add_argument("--field", help="record-override：personnelPlan/equipmentPlan/expectedWordCount/schedulePlan(含 servicePeriod/constructionPlan)/figureQuota/exportStyleProfile")
     parser.add_argument("--value", help="record-override：新值（schedulePlan/figureQuota 用 JSON）")
     parser.add_argument("--note", help="record-override：改写来源/原因备注")
     parser.add_argument("--write", action="store_true", help="materials 子命令：把材料索引写入 <packageDir>/materials-index.json")
@@ -2671,19 +2860,71 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         project = state_lib.load_project(project_dir)
         packages = resolve_packages(project)
         results: list[dict[str, Any]] = []
-        for package_id in packages:
-            results.append(prepare_project(workspace, project_dir, package_id=package_id, answers_path=answers_path, auto=bool(getattr(args, "auto", False))))
+        pending_packages: list[str] = []
+        for index, package_id in enumerate(packages):
+            result = prepare_project(workspace, project_dir, package_id=package_id, answers_path=answers_path, auto=bool(getattr(args, "auto", False)))
+            # P2-7：--all-selected 中间包 readyForT3=false 是正常顺序中间态（后续包尚未 prepare），
+            # 显式标注 pendingReason，避免 Agent/用户误判 F4 失败；但只有“失败项都由其它包未 prepare
+            # 引起”时才这样标注，本包自身仍有失败项时保持原样要求处理。
+            t3_check = result.get("t3Check") if isinstance(result.get("t3Check"), Mapping) else {}
+            t3_guard = t3_check.get("guard") if isinstance(t3_check.get("guard"), Mapping) else {}
+            other_packages = set(packages) - {package_id}
+            only_sequence_reason = True
+            failed_checks = [
+                check
+                for check in (t3_guard.get("checks") or [])
+                if isinstance(check, Mapping) and check.get("pass") is False and check.get("id") != "pending_input"
+            ]
+            for check in failed_checks:
+                check_id = str(check.get("id") or "")
+                detail = check.get("detail") if isinstance(check.get("detail"), Mapping) else {}
+                if check_id == "all_selected_prepared":
+                    failing_packages = set(detail.get("missingPackages") or [])
+                elif check_id == "package_tree":
+                    # package_tree.detail 列全部包；只取真正缺目录/目录为空的包
+                    failing_packages = {
+                        key
+                        for key, value in (detail.get("packages") or {}).items()
+                        if isinstance(value, Mapping) and (not value.get("packageDir") or value.get("missingDirs"))
+                    }
+                elif check_id == "package_meta":
+                    failing_packages = set((detail.get("packages") or {}).keys())
+                else:
+                    only_sequence_reason = False
+                    break
+                if not failing_packages or not failing_packages <= other_packages:
+                    only_sequence_reason = False
+                    break
+            only_sequence_reason = bool(failed_checks) and only_sequence_reason
+            if index < len(packages) - 1 and not result.get("readyForT3") and only_sequence_reason:
+                result["pendingReason"] = "sequence-in-progress"
+                result["t3Pending"] = True
+                result["note"] = "中间包 readyForT3=false 属正常顺序中间态（后续包尚未 prepare）；以汇总/最后一包 readyForT3 为准"
+                pending_packages.append(package_id)
+            results.append(result)
         if packages:
             state_lib.set_package(workspace, project_dir, package=packages[0])
         state_after = state_lib.load_state(project_dir)
         last = results[-1] if results else {}
+        ready = bool(results) and bool(last.get("readyForT3"))
         return {
-            "ok": bool(results) and bool(last.get("readyForT3")),
+            "ok": ready,
             "command": "prepare_all_selected",
             "projectId": state_after.get("projectId"),
             "packagesToWrite": packages,
             "prepared": [item.get("packageId") for item in results],
             "readyForT3": bool(last.get("readyForT3")),
+            "pendingPackages": pending_packages,
+            "summary": {
+                "readyForT3": bool(last.get("readyForT3")),
+                "finalPackage": last.get("packageId"),
+                "pendingReason": "sequence-in-progress" if pending_packages else "",
+                "note": (
+                    "中间包 readyForT3=false 为顺序中间态（后续包未 prepare），非失败；最终以 readyForT3 为准"
+                    if pending_packages
+                    else "全部选中包 prepare 完成，最终 readyForT3 以最后一包为准"
+                ),
+            },
             "t3Check": last.get("t3Check"),
             "results": results,
             "state": {"revision": state_after.get("revision"), "currentStage": state_after.get("currentStage"), "currentPackage": state_after.get("currentPackage")},

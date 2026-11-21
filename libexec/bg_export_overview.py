@@ -4,6 +4,11 @@
 汇总：项目/包基础、state.history 阶段迁移、输入摘要、大纲/正文、审查优化、导出信息、
 AI 参与与用户确认；缺失字段写「未记录」，输出脱敏。
 产出：`<package>/export/工作概览-<项目名>-<ts>.md` + `.docx`（official-overview 样式）。
+
+字数口径（P2-10）：概览展示的「实际字数」优先按章节 md 用 `_lib/text.count_body_words`
+复算（审查口径：CJK 字符 + ASCII 连续词，去标题/HTML 注释），与 review/merge/export 一致；
+章节 md 不全时回退 `outline.stats.writtenWordTotal` 并给 warning。summary 的 200–400 是
+字符长度 `len(str)`，不是字数口径。
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,6 +28,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _lib import errors, jsonio, logging as event_log, paths, state as state_lib
+from _lib import text as text_lib
 import bg_outline_validate as outline_validate
 
 SCHEMA_VERSION = "1.0"
@@ -156,7 +163,11 @@ def aggregate(
             continue
         value = package_meta.get(field)
         if isinstance(value, Mapping):
-            visible = "；".join(f"{key}：{sanitize_text(item) if str(item).strip() else '未记录'}" for key, item in value.items() if key in ("startDate", "deliveryDate", "constructionPlan"))
+            visible = "；".join(
+                f"{key}：{sanitize_text(item) if str(item).strip() else '未记录'}"
+                for key, item in value.items()
+                if key in ("servicePeriod", "startDate", "deliveryDate", "constructionPlan")
+            )
         else:
             visible = sanitize_text(value) if str(value).strip() else "未记录"
         user_answers.append({"key": field, "answer": visible or "未记录", "valueSource": sanitize_text(value_sources.get(field) or "未记录")})
@@ -203,22 +214,60 @@ def aggregate(
     else:
         figure_planned = raw_figure_planned
         network_removed = 0
+    # P2-10：正文实际字数统一按审查口径（章节 md 的 CJK 字符 + ASCII 词，去标题/注释）复算；
+    # 章节 md 不全时回退 outline.stats.writtenWordTotal，并记录 warning。
+    measured_words = 0
+    chapters_measured = 0
+    missing_chapters: list[str] = []
+    for leaf in leaves:
+        file_path = str(leaf.get("filePath") or "")
+        if not file_path:
+            continue
+        path = package_dir / file_path
+        if not path.is_file():
+            missing_chapters.append(file_path)
+            continue
+        try:
+            measured_words += text_lib.count_body_words(path.read_text(encoding="utf-8-sig", errors="replace"))
+            chapters_measured += 1
+        except OSError:
+            missing_chapters.append(file_path)
+    stats_written = stats.get("writtenWordTotal") or stats.get("actualWordCount") or "未记录"
+    word_measured_ok = chapters_measured > 0 and not missing_chapters
+    actual_word_count = measured_words if word_measured_ok else stats_written
+    word_count_basis = "review" if word_measured_ok else "stats"
+    word_count_warnings: list[str] = []
+    if word_measured_ok and isinstance(stats_written, int) and stats_written != measured_words:
+        word_count_warnings.append(
+            f"outline.stats.writtenWordTotal={stats_written} 与按章节 md 复算的审查口径 {measured_words} 不一致（概览采用审查口径）"
+        )
+    if missing_chapters:
+        word_count_warnings.append(
+            f"有 {len(missing_chapters)} 个章节 md 缺失，实际字数回退 outline.stats.writtenWordTotal（{stats_written}）"
+        )
     outline_summary = {
         "parentCount": len(parents),
         "leafCount": len(leaves),
         "plannedWordCount": stats.get("plannedWordTotal") or stats.get("plannedWordCount") or stats.get("totalWordTarget") or "未记录",
-        "actualWordCount": stats.get("writtenWordTotal") or stats.get("actualWordCount") or "未记录",
+        "actualWordCount": actual_word_count,
+        "actualWordCountBasis": word_count_basis,
+        "statsWrittenWordTotal": stats_written,
+        "measuredWordCount": measured_words if chapters_measured else "未记录",
+        "wordCountWarnings": word_count_warnings,
         "figurePlanned": figure_planned,
         "networkRemoved": network_removed,
         "criterionCount": len(criteria),
         "criterionCovered": covered,
     }
     completions = [node.get("completion") for node in leaves if isinstance(node.get("completion"), Mapping)]
+    reported_word_total = sum(int(item.get("wordCount") or 0) for item in completions)
     body_summary = {
         "doneCount": sum(1 for item in completions if item.get("status") == "done"),
         "skippedCount": sum(1 for item in completions if item.get("status") == "skipped"),
         "blockedCount": sum(1 for item in completions if item.get("status") == "blocked"),
-        "actualWordCount": sum(int(item.get("wordCount") or 0) for item in completions),
+        "actualWordCount": measured_words if word_measured_ok else reported_word_total,
+        "reportedWordCount": reported_word_total,
+        "actualWordCountBasis": word_count_basis,
     }
     render_manifest = read_json_safe(package_dir / "resources" / "render-manifest.json") or {}
     anchors = render_manifest.get("anchors") if isinstance(render_manifest.get("anchors"), Mapping) else {}
@@ -310,7 +359,8 @@ def aggregate(
         "userAnswers": user_answers[:50],
         "outline": outline_summary,
         "body": body_summary,
-        "history": [item for item in state.get("history") or [] if isinstance(item, Mapping)],
+        "history": state_lib.history_transitions(state.get("history") or []),
+        "historyEvents": state_lib.history_events(state.get("history") or []),
         "completedStages": [item for item in state.get("completedStages") or [] if isinstance(item, Mapping)],
         "events": events,
         "decisionEvents": decision_events[-50:],
@@ -323,6 +373,7 @@ def aggregate(
         "aiChanges": ai_changes[:100],
         "userConfirmed": user_confirmed[:100],
         "export": export_info,
+        "warnings": word_count_warnings,
     }
 
 
@@ -376,7 +427,9 @@ def render_markdown(aggregate_data: Mapping[str, Any]) -> str:
     lines.append("")
     outline = aggregate_data["outline"]
     body = aggregate_data["body"]
-    lines.append(f"- 大纲：父级 {outline['parentCount']} 个，末级 {outline['leafCount']} 个；计划字数 {outline['plannedWordCount']}；实际字数 {outline['actualWordCount']}")
+    basis = str(outline.get("actualWordCountBasis") or "stats")
+    basis_label = "审查口径：CJK+ASCII 词、去标题/注释" if basis == "review" else "stats 回退"
+    lines.append(f"- 大纲：父级 {outline['parentCount']} 个，末级 {outline['leafCount']} 个；计划字数 {outline['plannedWordCount']}；实际字数 {outline['actualWordCount']}（{basis_label}）")
     lines.append(f"- 评分覆盖：criterion {outline['criterionCovered']}/{outline['criterionCount']}")
     lines.append(f"- 图表计划（不含已移除的网络配图）：{outline['figurePlanned']}" + (f"；旧数据 network 已移除 {outline['networkRemoved']} 张" if outline.get("networkRemoved") else ""))
     lines.append(f"- 正文：done {body['doneCount']}，skipped {body['skippedCount']}，blocked {body['blockedCount']}，字数 {body['actualWordCount']}，图表产出 {body['figureProduced']}")
@@ -393,6 +446,17 @@ def render_markdown(aggregate_data: Mapping[str, Any]) -> str:
             )
     else:
         lines.append("未记录")
+    history_events = aggregate_data.get("historyEvents") or []
+    if history_events:
+        counts: dict[str, int] = {}
+        for item in history_events:
+            label = str(item.get("action") or item.get("kind") or "event")
+            counts[label] = counts.get(label, 0) + 1
+        lines.append("")
+        lines.append(
+            f"另有 {len(history_events)} 条状态事件（不计入迁移）："
+            + "、".join(f"{key} ×{value}" for key, value in sorted(counts.items()))
+        )
     completed = aggregate_data["completedStages"]
     if completed:
         lines.append("")
@@ -605,15 +669,171 @@ def export_overview(
             "sources": len(aggregate_data["sources"]),
             "events": len(aggregate_data["events"]),
             "history": len(aggregate_data["history"]),
+            "historyEvents": len(aggregate_data.get("historyEvents") or []),
             "issues": aggregate_data["issues"]["currentCount"],
             "rounds": len(aggregate_data["issues"]["rounds"]),
             "aiChanges": len(aggregate_data["aiChanges"]),
             "userConfirmed": len(aggregate_data["userConfirmed"]),
             "userAnswers": len(aggregate_data["userAnswers"]),
+            "actualWordCount": aggregate_data["outline"].get("actualWordCount"),
+            "wordCountBasis": aggregate_data["outline"].get("actualWordCountBasis"),
         },
-        "warnings": warnings,
+        "wordCount": {
+            "actual": aggregate_data["outline"].get("actualWordCount"),
+            "basis": aggregate_data["outline"].get("actualWordCountBasis"),
+            "statsWrittenWordTotal": aggregate_data["outline"].get("statsWrittenWordTotal"),
+            "reportedWordTotal": aggregate_data["body"].get("reportedWordCount"),
+        },
+        "warnings": [*warnings, *(aggregate_data.get("warnings") or [])],
         "styleProfile": "official-overview",
     }
+
+
+# ---------------------------------------------------------------------------
+# 自检（--selftest）
+# ---------------------------------------------------------------------------
+_SELFTEST_BODY = "运维服务范围包括前端设备巡检、故障处置与应急演练，按季度形成运维报告并持续改进。"
+
+
+def _build_selftest_project(base: Path) -> tuple[Path, Path, Path, int]:
+    """构造最小工作区/项目/包（章节 md 有正文），返回 (ws, prj, pkg, 审查口径字数)。"""
+    import copy
+
+    from _lib import schema
+    import bg_outline_apply as outline_apply
+
+    workspace = base / "ws"
+    for rel in ("dsh/logs", "dsh/config", "dsh/bidders"):
+        (workspace / rel).mkdir(parents=True, exist_ok=True)
+    now = paths.iso_now()
+    project_id = f"prj-{paths.timestamp14()}-ovst"
+    jsonio.write_json_atomic(
+        workspace / "dsh" / "registry.json",
+        {
+            "schemaVersion": "1.0",
+            "workspaceRootFingerprint": paths.workspace_fingerprint(workspace),
+            "currentBidderId": "",
+            "bidders": [],
+            "projects": [
+                {
+                    "projectId": project_id,
+                    "dirName": f"概览自检项目-{paths.timestamp14()}-ovst",
+                    "projectName": "概览自检项目",
+                    "bidderId": "",
+                    "currentStage": "finalize",
+                    "currentPackage": "package-1",
+                    "createdAt": now,
+                    "updatedAt": now,
+                }
+            ],
+            "updatedAt": now,
+        },
+    )
+    project_dir = workspace / str(jsonio.read_json(workspace / "dsh" / "registry.json")["projects"][0]["dirName"])
+    project_dir.mkdir()
+    project = schema.initialize_project_document(
+        project_id=project_id,
+        bidder_ref={"bidderId": "bdr-20261111100000-ovst", "dirName": "示例", "displayName": "示例", "snapshotAt": now},
+        workspace_fingerprint=paths.workspace_fingerprint(workspace),
+        now_iso=now,
+        project_name="概览自检项目",
+    )
+    project["projectNo"] = "M8-OV-ST"
+    project["isSubcontracted"] = False
+    project["packageCount"] = 1
+    project["packagesToWrite"] = ["package-1"]
+    jsonio.write_json_atomic(project_dir / "project.json", project)
+    state = schema.initialize_state_document(project_id=project_id, now_iso=now)
+    state["currentStage"] = "finalize"
+    state["currentScope"] = "package-1"
+    state["currentPackage"] = "package-1"
+    state_lib.write_state(project_dir, state)
+    package_dir = project_dir / "packages" / f"package-1-{paths.timestamp14()}"
+    for rel in (
+        "chapters",
+        "chapters/_outline",
+        "reviews",
+        "reviews/rounds",
+        "resources",
+        "export",
+        "export/_frozen",
+        "extraction/common",
+        "extraction/packages/package-1",
+    ):
+        (package_dir / rel).mkdir(parents=True, exist_ok=True)
+    package_meta = {
+        "schemaVersion": "1.0",
+        "packageId": "package-1",
+        "packageNo": 1,
+        "packageName": "概览自检项目",
+        "expectedWordCount": 8000,
+        "figureQuota": {"table": 1, "mermaid": 1, "network": 0, "terminal": 1},
+        "valueSource": {"expectedWordCount": "user"},
+    }
+    jsonio.write_json_atomic(package_dir / "package-meta.json", package_meta)
+    outline = outline_apply.normalize_outline(
+        copy.deepcopy(outline_validate._golden_document()),  # noqa: SLF001 - 自检复用 golden 夹具
+        package_meta=package_meta,
+        project_name="概览自检项目",
+        package_id="package-1",
+    )
+    measured_total = 0
+    for node in outline_validate.iter_preorder(outline.get("chapters") or []):
+        if isinstance(node.get("children"), list) and node.get("children"):
+            continue
+        level = int(node.get("level") or 2)
+        markdown = f"{'#' * level} {node.get('title')}\n\n{_SELFTEST_BODY}\n"
+        chapter_path = package_dir / str(node.get("filePath"))
+        chapter_path.parent.mkdir(parents=True, exist_ok=True)
+        chapter_path.write_text(markdown, encoding="utf-8", newline="\n")
+        measured_total += text_lib.count_body_words(markdown)
+        # 故意写入与审查口径不一致的 reported wordCount / stats，验证概览取审查口径
+        node["completion"] = {"status": "done", "wordCount": 1000, "summary": "摘要" * 110, "updatedAt": now}
+    outline["stats"] = {
+        **dict(outline.get("stats") or {}),
+        "plannedWordTotal": 8000,
+        "writtenWordTotal": 999999,
+        "actualWordCount": 999999,
+    }
+    jsonio.write_json_atomic(outline_validate.outline_path(package_dir), outline)
+    return workspace, project_dir, package_dir, measured_total
+
+
+def run_selftest() -> dict[str, Any]:
+    """离线自检：概览实际字数按审查口径复算（P2-10）+ md/docx 产出。"""
+    checks: list[str] = []
+    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-overview-selftest-"))
+    try:
+        workspace, project_dir, package_dir, measured_total = _build_selftest_project(tmp)
+        out_dir = tmp / "out"
+        result = export_overview(
+            workspace=workspace,
+            project_dir=project_dir,
+            package_id="package-1",
+            out_dir=str(out_dir),
+            keep_history=1,
+        )
+        md_files = list(out_dir.glob("工作概览-*.md"))
+        docx_files = list(out_dir.glob("工作概览-*.docx"))
+        if not md_files or not docx_files:
+            raise AssertionError(f"概览 md/docx 未生成：{result}")
+        markdown = md_files[0].read_text(encoding="utf-8")
+        word_count = result.get("wordCount") or {}
+        if word_count.get("actual") != measured_total or word_count.get("basis") != "review":
+            raise AssertionError(f"概览实际字数未按审查口径：{word_count} measured={measured_total}")
+        if f"实际字数 {measured_total}（审查口径" not in markdown:
+            raise AssertionError(f"概览 md 未写审查口径字数：{markdown[:400]}")
+        if not any("不一致" in warning for warning in result.get("warnings") or []):
+            raise AssertionError(f"stats 与审查口径不一致时未给 warning：{result.get('warnings')}")
+        if not all(section in markdown for section in ("输入摘要", "大纲与正文", "阶段与状态迁移", "审查与优化", "导出信息", "AI 参与说明", "数据缺口")):
+            raise AssertionError("概览 md 缺少必备栏目")
+        checks.append("overview_sections")
+        checks.append("overview_wordcount_review_basis")
+        return {"ok": True, "selftest": {"script": "bg_export_overview.py", "checks": checks}}
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -627,10 +847,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--package", help="目标包 package-<N>")
     parser.add_argument("--out-dir", help="输出目录（缺省 <package>/export）")
     parser.add_argument("--keep-history", type=int, default=1, help="默认输出目录保留历史份数（默认 1，只留最新）")
+    parser.add_argument("--selftest", action="store_true", help="运行脚本离线自检")
     return parser
 
 
 def handle(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "selftest", False):
+        return run_selftest()
     if not args.project:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)

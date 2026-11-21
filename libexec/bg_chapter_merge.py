@@ -6,6 +6,17 @@
 `completion`（status/wordCount/summary/skipReason/blockReason/updatedAt）与 `reviewState`，
 重算 stats（含实际字数/完成数），备份后原子写，并记 `chapter.completed/skipped/blocked` 事件。
 
+口径（P1-5 / P2-10）：
+
+- **字数**：`stats.writtenWordTotal` 按 `_lib/text.count_body_words`（审查口径：CJK 字符 +
+  ASCII 连续词，去掉标题行/HTML 注释）复算章节 md 得到，与 review / export 同口径；
+  子智能体在 chapter-result 里报的 `wordCount` 保留进 `completion.wordCount`（审计用），
+  并在 stats 记 `reportedWordTotal` 对照；
+- **表格注册**：`chapter-result.tables[]` 里属于本章 figurePlan 的“计划表”（按 anchorId、
+  题注或 `plannedFigure=true` 判定）不再登记为 `outline.supplementTables`；只有真正的
+  补充表才登记（按 anchorId/题注去重），并清理历史遗留的“计划表重复登记”；
+- **summary 200–400 是字符长度 `len(str)`（含标点）**，不是字数口径，保持不变。
+
 CLI：
     --status                     只读进度（leaf 状态/结果文件/blocked/pending）
     --verify-all                 只读校验全部 leaf 完成（done/skipped、无 blocked、summary/wordCount）
@@ -20,6 +31,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -30,6 +42,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib
+from _lib import text as text_lib
 import bg_outline_validate as outline_validate
 
 SCHEMA_VERSION = "1.0"
@@ -112,6 +125,122 @@ def _default_completion() -> dict[str, Any]:
     }
 
 
+def _normalize_caption(value: Any) -> str:
+    """题注归一化：删除所有空白（含全角空格），用于 caption 级匹配。
+
+    写作子智能体常只填 `tables[].caption` 不填 anchorId（真实冒烟数据即如此），
+    因此计划表识别必须同时支持“按 anchorId”和“按本章 figurePlan 题注”两种匹配。
+    """
+    return re.sub(r"[\s\u3000]+", "", str(value or ""))
+
+
+def _figure_plan_maps(node: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """返回本章 (anchorId→type, 归一化题注→anchorId) 的 figurePlan 映射。"""
+    anchors: dict[str, str] = {}
+    captions: dict[str, str] = {}
+    for plan in node.get("figurePlan") or []:
+        if not isinstance(plan, Mapping):
+            continue
+        anchor_id = str(plan.get("anchorId") or "")
+        if not anchor_id:
+            continue
+        anchors[anchor_id] = str(plan.get("type") or "")
+        caption = _normalize_caption(plan.get("caption"))
+        if caption:
+            captions[caption] = anchor_id
+    return anchors, captions
+
+
+def _planned_table_refs(node: Mapping[str, Any], document: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+    """返回本章“计划表”的 anchorId 集合与归一化题注集合（P1-5）。
+
+    来源：figurePlan 中 type=table 的计划；再补充 chapter-result.figures[] 里声明为 table
+    且 anchorId 属于本章 figurePlan 的条目（兼容子智能体只在 figures[] 标 type）。
+    """
+    all_anchors, plan_captions = _figure_plan_maps(node)
+    planned_anchors = {anchor for anchor, figure_type in all_anchors.items() if figure_type == "table"}
+    planned_captions = {
+        caption for caption, anchor in plan_captions.items() if all_anchors.get(anchor) == "table"
+    }
+    figures = document.get("figures") if isinstance(document, Mapping) else None
+    if not isinstance(figures, list):
+        figures = document.get("figureResults") if isinstance(document, Mapping) else None
+    if isinstance(figures, list):
+        for figure in figures:
+            if not isinstance(figure, Mapping):
+                continue
+            anchor_id = str(figure.get("anchorId") or "")
+            if anchor_id and all_anchors.get(anchor_id) == "table":
+                planned_anchors.add(anchor_id)
+            if str(figure.get("type") or "") == "table" and anchor_id in all_anchors:
+                planned_anchors.add(anchor_id)
+                caption = _normalize_caption(figure.get("caption"))
+                if caption:
+                    planned_captions.add(caption)
+    return planned_anchors, planned_captions
+
+
+def table_is_planned(
+    table: Mapping[str, Any],
+    node: Mapping[str, Any],
+    document: Mapping[str, Any],
+) -> bool:
+    """判断 `chapter-result.tables[]` 的一条记录是否属于本章 figurePlan 的计划表。"""
+    explicit = table.get("plannedFigure")
+    if explicit is True:
+        return True
+    if explicit is False:
+        return False
+    anchor_id = str(table.get("anchorId") or "").strip()
+    planned_anchors, planned_captions = _planned_table_refs(node, document)
+    if anchor_id and anchor_id in planned_anchors:
+        return True
+    caption = _normalize_caption(table.get("caption"))
+    return bool(caption) and caption in planned_captions
+
+
+def _chapter_body_word_count(package_dir: Path, node: Mapping[str, Any]) -> int | None:
+    """按审查口径（_lib/text.count_body_words）读取章节 md 的字数；文件缺失返回 None。"""
+    file_path = node.get("filePath")
+    if not isinstance(file_path, str) or not file_path:
+        return None
+    path = package_dir / file_path
+    if not path.is_file():
+        return None
+    try:
+        return text_lib.count_body_words(path.read_text(encoding="utf-8-sig", errors="replace"))
+    except OSError:
+        return None
+
+
+def _supplement_key(entry: Mapping[str, Any]) -> tuple[str, str]:
+    """补充表去重键：优先 anchorId，其次归一化题注（同章内唯一）。"""
+    chapter_id = str(entry.get("chapterId") or "")
+    anchor_id = str(entry.get("anchorId") or "")
+    if anchor_id:
+        return chapter_id, anchor_id
+    return chapter_id, _normalize_caption(entry.get("caption"))
+
+
+def supplement_is_planned_table(entry: Mapping[str, Any], outline: Mapping[str, Any]) -> bool:
+    """判断一条 outline.supplementTables 记录是否是“计划表重复登记”（P1-5 历史数据清理）。"""
+    chapter_id = str(entry.get("chapterId") or "")
+    if not chapter_id:
+        return False
+    target_node = None
+    for node in outline_validate.iter_preorder(outline.get("chapters") or []):
+        if str(node.get("id")) == chapter_id:
+            target_node = node
+            break
+    if target_node is None:
+        return False
+    anchor_id = str(entry.get("anchorId") or "").strip()
+    planned_anchors, planned_captions = _planned_table_refs(target_node, {})
+    if anchor_id and anchor_id in planned_anchors:
+        return True
+    return _normalize_caption(entry.get("caption")) in planned_captions
+
+
 # ---------------------------------------------------------------------------
 # 结果校验
 # ---------------------------------------------------------------------------
@@ -141,9 +270,12 @@ def validate_result(result: Any, node: Mapping[str, Any], package_dir: Path) -> 
     summary = result.get("summary")
     if mapped == "done":
         if not isinstance(summary, str) or not summary.strip():
-            add("summary_missing", "status=done 时 summary 必填（200–400 字重点总结）")
+            add("summary_missing", "status=done 时 summary 必填（200–400 字符长度 len(str)，不是字数口径）")
         elif not (SUMMARY_MIN <= len(summary.strip()) <= SUMMARY_MAX):
-            add("summary_length", f"status=done 时 summary 必须 200–400 字（实际 {len(summary.strip())}）")
+            add(
+                "summary_length",
+                f"status=done 时 summary 必须 200–400 字符长度（len，含标点；实际 {len(summary.strip())}）",
+            )
     elif summary is not None and not isinstance(summary, str):
         add("summary_invalid", "summary 必须是字符串")
     if status == "skipped":
@@ -361,6 +493,10 @@ def merge_selected(
     merged: list[dict[str, Any]] = []
     unchanged: list[str] = []
     supplement_tables: list[dict[str, Any]] = []
+    supplement_seen: set[tuple[str, str]] = set()
+    planned_table_skips = 0
+    duplicate_supplements = 0
+    word_count_warnings: list[dict[str, Any]] = []
     for _path, document, _node, chapter_id in parsed:
         # 同步章节目录 figurePlan 的 caption 到 chapter-result（wordCount 由结果自身记录，合并后保留）
         plans = {
@@ -386,10 +522,13 @@ def merge_selected(
             for index, table in enumerate(tables):
                 if not isinstance(table, Mapping):
                     continue
-                anchor = str(table.get("anchorId") or "")
-                if anchor and anchor in plans:
-                    continue
+                anchor = str(table.get("anchorId") or "").strip()
                 caption = str(table.get("caption") or "").strip()
+                # P1-5：chapter-result.tables[] 会登记本章所有 Markdown 表（含 figurePlan 里的
+                # 计划表）。计划表不再写入 outline.supplementTables，避免 sup-* 与 fig-* 重复。
+                if table_is_planned(table, _node, document):
+                    planned_table_skips += 1
+                    continue
                 entry = {
                     "anchorId": anchor or f"sup-{chapter_id}-{index + 1}",
                     "chapterId": chapter_id,
@@ -397,9 +536,15 @@ def merge_selected(
                     "source": paths.rel_posix(project_dir, Path(_path)),
                     "kind": "supplement",
                 }
+                key = _supplement_key(entry)
+                if key in supplement_seen:
+                    duplicate_supplements += 1
+                    continue
+                supplement_seen.add(key)
                 chapter_supplements.append(entry)
                 supplement_tables.append(entry)
-            if chapter_supplements:
+            previous_supplements = document.get("supplementTables")
+            if previous_supplements != chapter_supplements and (chapter_supplements or previous_supplements):
                 document["supplementTables"] = chapter_supplements
                 jsonio.write_json_atomic(Path(_path), document)
         status = STATUS_MAP[str(document.get("status"))]
@@ -434,17 +579,31 @@ def merge_selected(
                 "chapterId": chapter_id,
                 "status": status,
                 "wordCount": new_completion["wordCount"],
+                "bodyWordCount": _chapter_body_word_count(package_dir, node),
                 "summaryLength": len(str(new_completion.get("summary") or "")),
                 "skipReason": new_completion.get("skipReason", ""),
                 "blockReason": new_completion.get("blockReason", ""),
             }
         )
     selected_chapters = {chapter_id for _path, _document, _node, chapter_id in parsed}
-    existing_supplements = [item for item in updated_outline.get("supplementTables") or [] if isinstance(item, Mapping) and str(item.get("chapterId") or "") not in selected_chapters]
-    merged_supplements = {(str(item.get("chapterId") or ""), str(item.get("anchorId") or ""), str(item.get("caption") or "")): dict(item) for item in existing_supplements}
+    # P1-5：清理历史遗留的“计划表重复登记”（旧版本把 figurePlan.table 也写进
+    # outline.supplementTables，产生 sup-1-2-1 与 fig-1-2-01 并存的重复）。
+    stale_supplements = [
+        item
+        for item in updated_outline.get("supplementTables") or []
+        if isinstance(item, Mapping)
+        and str(item.get("chapterId") or "") not in selected_chapters
+        and not supplement_is_planned_table(item, updated_outline)
+    ]
+    merged_supplements: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in stale_supplements:
+        merged_supplements[_supplement_key(item)] = dict(item)
     for item in supplement_tables:
-        merged_supplements[(str(item.get("chapterId") or ""), str(item.get("anchorId") or ""), str(item.get("caption") or ""))] = dict(item)
-    updated_outline["supplementTables"] = sorted(merged_supplements.values(), key=lambda item: (str(item.get("chapterId") or ""), str(item.get("anchorId") or "")))
+        merged_supplements[_supplement_key(item)] = dict(item)
+    updated_outline["supplementTables"] = sorted(
+        merged_supplements.values(),
+        key=lambda item: (str(item.get("chapterId") or ""), str(item.get("anchorId") or "")),
+    )
     # 可选：按实际资源同步 figureIndex（figurePlan 合法状态 planned/deferred/done）
     before_figures = json.dumps(updated_outline.get("figureIndex") or [], ensure_ascii=False, sort_keys=True)
     before_plan = json.dumps(
@@ -481,11 +640,33 @@ def merge_selected(
     # 重算 stats（保留 7.4 必需键，额外记录进度）
     base_stats = outline_validate.build_stats(updated_outline, package_meta)
     statuses = [str(node.get("completion", {}).get("status") or "pending") for node in updated_nodes.values()]
-    written = sum(
-        int(node.get("completion", {}).get("wordCount") or 0)
-        for node in updated_nodes.values()
-        if node.get("completion", {}).get("status") == "done"
-    )
+    # P2-10：正文字数统一走 _lib/text.count_body_words（与 review/export 同口径），
+    # 子智能体上报的 wordCount 仅保留在 completion 与 reportedWordTotal 中用于审计。
+    reported_total = 0
+    written = 0
+    measured_chapters = 0
+    measured_missing: list[str] = []
+    for node in updated_nodes.values():
+        completion = node.get("completion") if isinstance(node.get("completion"), Mapping) else {}
+        if completion.get("status") != "done":
+            continue
+        reported = int(completion.get("wordCount") or 0)
+        reported_total += reported
+        measured = _chapter_body_word_count(package_dir, node)
+        if measured is None:
+            measured_missing.append(str(node.get("id") or ""))
+            written += reported
+            continue
+        measured_chapters += 1
+        written += measured
+        if measured > 0 and abs(reported - measured) / measured > 0.20:
+            word_count_warnings.append(
+                {
+                    "code": "word_count_deviation",
+                    "chapterId": str(node.get("id") or ""),
+                    "message": f"chapter-result.wordCount={reported} 与章节 md 审查口径 {measured} 偏差 >20%（stats 采用审查口径）",
+                }
+            )
     done = statuses.count("done")
     skipped = statuses.count("skipped")
     blocked = statuses.count("blocked")
@@ -497,12 +678,27 @@ def merge_selected(
         "blockedCount": blocked,
         "pendingCount": pending,
         "writtenWordTotal": written,
+        "reportedWordTotal": reported_total,
+        "wordCountBasis": "review" if not measured_missing else "review_with_fallback",
+        "measuredChapterCount": measured_chapters,
         "completionRate": round((done + skipped) / len(statuses), 6) if statuses else 0.0,
     }
+    if measured_missing:
+        word_count_warnings.append(
+            {
+                "code": "word_count_fallback",
+                "message": f"章节 md 缺失，字数回退 chapter-result.wordCount：{measured_missing[:5]}",
+            }
+        )
     updated_outline["stats"].setdefault("plannedWordTotal", base_stats.get("plannedWordTotal"))
     updated_outline["stats"].setdefault("parentCount", base_stats.get("parentCount"))
     updated_outline["stats"].setdefault("leafCount", base_stats.get("leafCount"))
     idempotent = not merged
+    # 除 completion 变化外，supplementTables 清理/字数口径复算也可能需要落盘；
+    # 幂等语义 = 本次没有需要落盘的语义变化（重复合并同一结果必须不写、不备份）。
+    supplements_changed = (outline.get("supplementTables") or []) != (updated_outline.get("supplementTables") or [])
+    stats_changed = updated_outline.get("stats") != (outline.get("stats") or {})
+    idempotent = idempotent and not supplements_changed and not stats_changed
     backup = ""
     if not idempotent:
         path = outline_path(package_dir)
@@ -542,6 +738,10 @@ def merge_selected(
         "idempotent": idempotent,
         "backup": backup,
         "stats": updated_outline.get("stats"),
+        "supplementTables": updated_outline.get("supplementTables") or [],
+        "supplementTableCount": len(updated_outline.get("supplementTables") or []),
+        "supplementTablesDropped": {"plannedTableEntries": planned_table_skips, "duplicates": duplicate_supplements},
+        "wordCountWarnings": word_count_warnings,
         "currentStage": state.get("currentStage"),
         "revision": state.get("revision"),
         "note": "只更新 outline.completion/reviewState/summary/wordCount 与 stats；state.json 不变（单写者）",
@@ -790,6 +990,14 @@ def run_selftest() -> dict[str, Any]:
         workspace, project_dir, package_dir, outline = _build_selftest_project(tmp)
         leaves = leaf_nodes(outline)
         first, second = leaves[0], leaves[1]
+        # 自检章节 md 补一段正文，用于验证 stats 字数按审查口径（CJK+ASCII 词）复算
+        first_chapter_path = package_dir / str(first.get("filePath"))
+        first_chapter_path.write_text(
+            first_chapter_path.read_text(encoding="utf-8")
+            + "\n\n运维服务人员 8 人，按季度开展巡检、应急演练与性能评估，保障系统稳定运行。\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         results = results_dir(package_dir)
         results.mkdir(parents=True, exist_ok=True)
 
@@ -804,15 +1012,48 @@ def run_selftest() -> dict[str, Any]:
             jsonio.write_json_atomic(path, document)
             return path
 
-        write_result(first, "done", wordCount=1800, summary=_summary_text(str(first.get("id"))))
+        # P1-5 / P2-10 回归：计划表不得重复登记为 supplementTables；stats 字数走审查口径。
+        outline_file = outline_validate.outline_path(package_dir)
+        seeded_outline = jsonio.read_json(outline_file)
+        seeded_outline["supplementTables"] = [
+            {"anchorId": "sup-1-1-1", "chapterId": str(first.get("id")), "caption": "项目现状对比", "kind": "supplement"},
+        ]
+        jsonio.write_json_atomic(outline_file, seeded_outline)
+        first_tables = [
+            {"caption": "项目现状对比", "rows": 4},  # 计划表：只有题注，无 anchorId
+            {"anchorId": "fig-1-1-02", "caption": "需求清单", "rows": 3},  # 计划表：有 anchorId
+            {"caption": "真实补充表", "rows": 2},  # 真补充表：应登记
+        ]
+        write_result(
+            first,
+            "done",
+            wordCount=1800,
+            summary=_summary_text(str(first.get("id"))),
+            tables=first_tables,
+        )
         merged = merge_selected(workspace=workspace, project_dir=project_dir, chapter=str(first.get("id")))
-        updated = jsonio.read_json(outline_validate.outline_path(package_dir))
+        updated = jsonio.read_json(outline_file)
         node = next(item for item in leaf_nodes(updated) if item.get("id") == first.get("id"))
         if not merged.get("merged") or node["completion"]["status"] != "done" or node["completion"]["wordCount"] != 1800:
             raise AssertionError(f"合并结果不正确：{merged} / {node.get('completion')}")
         if not merged.get("backup"):
             raise AssertionError("合并未备份 outline")
+        supplements = [item for item in updated.get("supplementTables") or []]
+        if [item.get("caption") for item in supplements] != ["真实补充表"]:
+            raise AssertionError(f"计划表被重复登记为 supplementTables：{supplements}")
+        if (merged.get("supplementTablesDropped") or {}).get("plannedTableEntries") != 2:
+            raise AssertionError(f"计划表剔除计数不正确：{merged.get('supplementTablesDropped')}")
+        first_result = jsonio.read_json(result_file(package_dir, str(first.get("id"))))
+        if [item.get("caption") for item in first_result.get("supplementTables") or []] != ["真实补充表"]:
+            raise AssertionError(f"chapter-result.supplementTables 未按补充表回写：{first_result.get('supplementTables')}")
+        measured_first = _chapter_body_word_count(package_dir, node)
+        if not measured_first or updated["stats"].get("writtenWordTotal") != measured_first:
+            raise AssertionError(f"stats.writtenWordTotal 未用审查口径复算：{updated['stats']} measured={measured_first}")
+        if updated["stats"].get("reportedWordTotal") != 1800 or updated["stats"].get("wordCountBasis") != "review":
+            raise AssertionError(f"stats 字数口径元信息不正确：{updated['stats']}")
         checks.append("merge_done")
+        checks.append("supplement_planned_excluded")
+        checks.append("wordcount_review_basis")
         backups_before = len(list((package_dir / "chapters/_outline").glob("outline.json.bak-*")))
         again = merge_selected(workspace=workspace, project_dir=project_dir, chapter=str(first.get("id")))
         backups_after = len(list((package_dir / "chapters/_outline").glob("outline.json.bak-*")))
@@ -854,6 +1095,10 @@ def run_selftest() -> dict[str, Any]:
         if not verify_ok["allDone"]:
             raise AssertionError(f"全部完成后 verify-all 仍失败：{verify_ok['findings']}")
         checks.append("verify_all")
+        final_supplements = [item.get("caption") for item in jsonio.read_json(outline_file).get("supplementTables") or []]
+        if final_supplements != ["真实补充表"]:
+            raise AssertionError(f"后续合并丢失/污染 supplementTables：{final_supplements}")
+        checks.append("supplement_tables_stable")
         status = status_payload(workspace=workspace, project_dir=project_dir)
         if status["statusCounts"].get("done", 0) != len(leaves) - 1 or status["statusCounts"].get("skipped", 0) != 1:
             raise AssertionError(f"status 计数不正确：{status['statusCounts']}")

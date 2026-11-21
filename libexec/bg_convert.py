@@ -10,13 +10,18 @@
 
 支持：`.docx`（python-docx → 标题/段落/表格/文本框/图片 → GFM；文本框 `w:txbxContent` 按文档序并入正文）、`.doc`（Word COM 转 docx 再解析；
 无 COM 时尝试 soffice；都不可用 → 该文件标记 failed 并提示另存 `.docx`）、`.pdf`（pymupdf4llm，
-pdfplumber 复核表格；扫描件标记 `scanned_unsupported`）、`.md`/`.txt`（直转/复制）。
+pdfplumber 复核表格：≤60 页全量、更大文件回退页优先 + 均匀抽样分批限时复核；扫描件标记 `scanned_unsupported`）、`.md`/`.txt`（直转/复制）。
+
+PDF 逐页覆盖（P0-2 / P2-11）：pymupdf4llm 整页丢失时按页回退追加纯文本，并把回退页写入
+manifest（`fallbackPages/fallbackPageCount/keyDataFromFallbackOnly/fallbackNote` + warning
+`key_data_from_fallback_only:<n>`），供 F3 汇报显式提示「关键数据仅来自回退文本」。
 
 输出（CONTRACT §10.1）：
 - `<project>/sources/converted/<原文件名>.md`
 - `<project>/sources/conversion-manifest.json`
   `{schemaVersion, generatedAt, converter, files:[{sourcePath, sourceName, sourceType, sizeBytes,
-    convertedPath, mdChars, headings, tables, warnings, status}]}`（附加 `hash/quality/images/mtime`）
+    convertedPath, mdChars, headings, tables, warnings, status}]}`（附加 `hash/quality/images/mtime/
+    pageCoverage/fallbackPages/fallbackPageCount/keyDataFromFallbackOnly/fallbackNote/tableRecheck`）
 
 约束：不联网、不改源文件；失败不写半成品（临时文件 + os.replace）；重复转换幂等
 （未变化 → skipped 不改 mtime；变化 → 先备份到 `sources/.backup-<ts14>/` 再覆盖）；单文件 300s 预算。
@@ -61,6 +66,16 @@ PDF_MIN_TEXT_CHARS = 50
 MAX_SOURCE_BYTES = 200 * 1024 * 1024
 BACKUP_KEEP = 2
 IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "bmp"}
+
+# PDF 表格复核策略（P2-11）：≤PDF_TABLE_RECHECK_FULL_MAX_PAGES 全量复核；更大文件改为
+# 回退页优先 + 均匀抽样的分批复核（限页数 + 限时预算），超时/失败只降级记录，不中断转换。
+PDF_TABLE_RECHECK_FULL_MAX_PAGES = 60
+PDF_TABLE_RECHECK_SAMPLE_MAX_PAGES = 60
+PDF_TABLE_RECHECK_BATCH_SIZE = 10
+PDF_TABLE_RECHECK_BUDGET_SEC = 60.0
+PDF_LARGE_PDF_PAGES = 200
+#: manifest 中回退页名单最多保留条数（完整覆盖数据仍在 pageCoverage 里）
+PDF_FALLBACK_LIST_LIMIT = 50
 
 _HEADING_RE = re.compile(r"^(?:heading|标题)\s*([1-9])$", re.IGNORECASE)
 _BULLET_STYLES = ("list bullet", "list paragraph", "项目符号", "列表段落")
@@ -952,6 +967,166 @@ def _convert_doc_to_docx(source: Path, work_dir: Path, timeout: float) -> tuple[
 # ---------------------------------------------------------------------------
 # pdf → markdown
 # ---------------------------------------------------------------------------
+def _evenly_pick(items: list[int], count: int) -> list[int]:
+    """从有序序列中均匀抽取 count 项（count 不足时全取），用于大 PDF 抽样复核。"""
+    if count <= 0 or not items:
+        return []
+    if count >= len(items):
+        return list(items)
+    step = len(items) / count
+    picked: list[int] = []
+    for index in range(count):
+        picked.append(items[min(len(items) - 1, int(index * step))])
+    return sorted(set(picked))
+
+
+def _table_recheck_plan(page_count: int, fallback_pages: list[int]) -> dict[str, Any]:
+    """表格复核计划（P2-11）：小文件全量复核；大文件回退页优先 + 均匀抽样的分批复核。
+
+    - `page_count <= PDF_TABLE_RECHECK_FULL_MAX_PAGES` → mode=full，逐页全量（历史行为）；
+    - 更大文件 → mode=sampled，总样本 ≤ `PDF_TABLE_RECHECK_SAMPLE_MAX_PAGES`；
+      回退页优先全覆盖（预算内），其余页均匀抽样补足，避免 200+ 页 PDF 复核无限拖慢转换。
+    """
+    total = max(0, int(page_count))
+    if total <= PDF_TABLE_RECHECK_FULL_MAX_PAGES:
+        return {"mode": "full", "pages": list(range(1, total + 1)), "totalPages": total, "reason": "all_pages"}
+    valid_fallback = sorted({int(page) for page in fallback_pages if 1 <= int(page) <= total})
+    # 回退页优先全覆盖（它们最可能丢表格/关键数据），其余均匀抽样补足总预算；
+    # 回退页很多（>60）时按预算均匀抽样，避免逐个复核拖慢转换。
+    fallback_budget = min(len(valid_fallback), PDF_TABLE_RECHECK_SAMPLE_MAX_PAGES)
+    sampled_fallback = _evenly_pick(valid_fallback, fallback_budget)
+    remaining = max(0, PDF_TABLE_RECHECK_SAMPLE_MAX_PAGES - len(sampled_fallback))
+    sampled_rest: list[int] = []
+    if remaining:
+        candidates = _evenly_pick(list(range(1, total + 1)), min(total, PDF_TABLE_RECHECK_SAMPLE_MAX_PAGES + len(sampled_fallback)))
+        sampled_rest = [page for page in candidates if page not in set(sampled_fallback)][:remaining]
+    pages = sorted(set(sampled_fallback) | set(sampled_rest))
+    return {
+        "mode": "sampled",
+        "pages": pages,
+        "totalPages": total,
+        "fallbackSampled": len(sampled_fallback),
+        "reason": "too_many_pages",
+    }
+
+
+def _recheck_tables(path: Path, page_count: int, fallback_pages: list[int], markdown_tables: int) -> tuple[int, dict[str, Any], list[str]]:
+    """pdfplumber 表格复核：小文件全量、大文件抽样分批（限页数 + 限时预算，失败降级只记录）。
+
+    返回 (tables, tableRecheck 元数据, warnings)；复核失败/超时不影响主转换（降级并记录）。
+    """
+    plan = _table_recheck_plan(page_count, fallback_pages)
+    warnings: list[str] = []
+    info: dict[str, Any] = {
+        "mode": plan["mode"],
+        "totalPages": plan["totalPages"],
+        "plannedPages": len(plan["pages"]),
+        "sampledPages": 0,
+        "pdfplumberTables": 0,
+        "batches": 0,
+        "batchSize": PDF_TABLE_RECHECK_BATCH_SIZE if plan["mode"] == "sampled" else 0,
+        "budgetSec": PDF_TABLE_RECHECK_BUDGET_SEC if plan["mode"] == "sampled" else None,
+        "fallbackSampled": plan.get("fallbackSampled", 0),
+        "timedOut": False,
+        "error": "",
+    }
+    sampled_tables = 0
+    deadline = time.monotonic() + PDF_TABLE_RECHECK_BUDGET_SEC
+    try:
+        import pdfplumber
+
+        with _silence_stdout():
+            with pdfplumber.open(str(path)) as pdf:
+                pages = plan["pages"]
+                for start in range(0, len(pages), PDF_TABLE_RECHECK_BATCH_SIZE):
+                    if plan["mode"] == "sampled" and time.monotonic() > deadline:
+                        info["timedOut"] = True
+                        break
+                    batch = pages[start:start + PDF_TABLE_RECHECK_BATCH_SIZE]
+                    for page_no in batch:
+                        sampled_tables += len(pdf.pages[page_no - 1].extract_tables() or [])
+                    info["batches"] += 1
+                    info["sampledPages"] += len(batch)
+                    info["pdfplumberTables"] = sampled_tables
+    except Exception:  # noqa: BLE001 - 复核失败不影响主转换
+        warnings.append("pdfplumber_recheck_failed")
+        info["error"] = "recheck_failed"
+        return markdown_tables, info, warnings
+    if plan["mode"] == "full":
+        tables = markdown_tables
+        if info["pdfplumberTables"] > tables:
+            warnings.append(f"tables_maybe_lost:pymupdf4llm={tables},pdfplumber={info['pdfplumberTables']}")
+            tables = info["pdfplumberTables"]
+        return tables, info, warnings
+    # 抽样模式：不覆盖全量表格计数，只按抽样页给出量级提示
+    warnings.append(
+        f"pdf_table_recheck_mode:sampled,sampled={info['sampledPages']},"
+        f"total={info['totalPages']},pdfplumberTables={info['pdfplumberTables']}"
+    )
+    if info["totalPages"] > PDF_LARGE_PDF_PAGES:
+        warnings.append(
+            f"pdf_table_recheck_large_pdf:pages={info['totalPages']}>{PDF_LARGE_PDF_PAGES},"
+            f"sampled={info['sampledPages']}（大文件按批抽样复核，表格数仅供量级参考）"
+        )
+    if info["timedOut"]:
+        warnings.append(f"pdf_table_recheck_partial:batched={info['sampledPages']},planned={len(plan['pages'])}")
+    if info["sampledPages"]:
+        estimate = round(info["pdfplumberTables"] / info["sampledPages"] * info["totalPages"])
+        info["estimatedTables"] = estimate
+        if estimate > markdown_tables * 1.5 and estimate - markdown_tables >= 5:
+            warnings.append(f"tables_maybe_lost_estimated:pymupdf4llm={markdown_tables},pdfplumber_est={estimate}")
+    return markdown_tables, info, warnings
+
+
+def _pdf_page_coverage(markdown: str, page_texts: list[str]) -> dict[str, Any]:
+    """逐页覆盖校验（P0-2）：pymupdf4llm 整页丢失时回退追加该页纯文本，并生成回退标记。
+
+    返回 `markdown/pageCoverage/fallbackPages/fallbackPageCount/keyDataFromFallbackOnly/fallbackNote/warnings`；
+    回退页的 warning 文案即「关键数据仅来自回退文本」的机器标记，供 F3 汇报显式提示核对原件（P2-11）。
+    """
+    compact_md = re.sub(r"\s+", "", markdown)
+    page_coverage: list[dict[str, Any]] = []
+    fallback_pages: list[int] = []
+    warnings: list[str] = []
+    result_markdown = markdown
+    for page_no, page_text in enumerate(page_texts, start=1):
+        compact_page = re.sub(r"\s+", "", page_text)
+        if len(compact_page) < 20:
+            page_coverage.append({"page": page_no, "chars": len(compact_page), "covered": True, "fallback": False})
+            continue
+        sample_step = max(1, len(compact_page) // 20)
+        samples = [compact_page[index:index + 20] for index in range(0, len(compact_page), sample_step)][:20]
+        matched = sum(1 for sample in samples if sample in compact_md)
+        numbers = {token for token in re.findall(r"\d{3,}", compact_page)}
+        numeric_ok = not numbers or any(token in compact_md for token in numbers)
+        covered = matched >= max(1, int(len(samples) * 0.6)) and numeric_ok
+        page_coverage.append({"page": page_no, "chars": len(compact_page), "covered": covered, "fallback": False})
+        if not covered:
+            fallback_pages.append(page_no)
+            page_coverage[-1]["fallback"] = True
+            result_markdown += f"\n\n## 第 {page_no} 页（转换回退文本）\n\n{page_text.strip()}\n"
+            compact_md += compact_page
+    fallback_note = ""
+    if fallback_pages:
+        warnings.append(f"pdf_pages_fallback:{len(fallback_pages)}")
+        warnings.append("pdf_pages_fallback_list:" + ",".join(str(item) for item in fallback_pages[:20]))
+        warnings.append(f"key_data_from_fallback_only:{len(fallback_pages)}")
+        pages_text = "、".join(str(item) for item in fallback_pages[:20])
+        fallback_note = (
+            f"关键数据仅来自回退文本：第 {pages_text} 页由纯文本回退补齐（表格/版式结构可能已丢失），"
+            "F3 提取与写作引用这些页面的数字/条款前必须核对招标文件 PDF 原件"
+        )
+    return {
+        "markdown": result_markdown,
+        "pageCoverage": page_coverage,
+        "fallbackPages": fallback_pages[:PDF_FALLBACK_LIST_LIMIT],
+        "fallbackPageCount": len(fallback_pages),
+        "keyDataFromFallbackOnly": bool(fallback_pages),
+        "fallbackNote": fallback_note,
+        "warnings": warnings,
+    }
+
+
 def _pdf_to_markdown(path: Path) -> dict[str, Any]:
     import fitz  # PyMuPDF
 
@@ -980,54 +1155,34 @@ def _pdf_to_markdown(path: Path) -> dict[str, Any]:
             exit_code=errors.EXIT_GENERIC,
         ) from exc
     markdown = _norm_newlines(markdown or "").strip() + "\n" if markdown else ""
-    # P0-2 逐页覆盖校验：pymupdf4llm 偶发整页丢失时回退追加该页纯文本
-    compact_md = re.sub(r"\s+", "", markdown)
-    page_coverage: list[dict[str, Any]] = []
-    fallback_pages: list[int] = []
-    for page_no, page_text in enumerate(page_texts, start=1):
-        compact_page = re.sub(r"\s+", "", page_text)
-        if len(compact_page) < 20:
-            page_coverage.append({"page": page_no, "chars": len(compact_page), "covered": True, "fallback": False})
-            continue
-        sample_step = max(1, len(compact_page) // 20)
-        samples = [compact_page[index:index + 20] for index in range(0, len(compact_page), sample_step)][:20]
-        matched = sum(1 for sample in samples if sample in compact_md)
-        numbers = {token for token in re.findall(r"\d{3,}", compact_page)}
-        numeric_ok = not numbers or any(token in compact_md for token in numbers)
-        covered = matched >= max(1, int(len(samples) * 0.6)) and numeric_ok
-        page_coverage.append({"page": page_no, "chars": len(compact_page), "covered": covered, "fallback": False})
-        if not covered:
-            fallback_pages.append(page_no)
-            page_coverage[-1]["fallback"] = True
-            markdown += f"\n\n## 第 {page_no} 页（转换回退文本）\n\n{page_text.strip()}\n"
-            compact_md += compact_page
-    if fallback_pages:
-        warnings.append(f"pdf_pages_fallback:{len(fallback_pages)}")
-        warnings.append("pdf_pages_fallback_list:" + ",".join(str(item) for item in fallback_pages[:20]))
+    # P0-2 逐页覆盖校验 + P2-11 回退页标记：pymupdf4llm 偶发整页丢失时回退追加该页纯文本
+    coverage = _pdf_page_coverage(markdown, page_texts)
+    markdown = coverage["markdown"]
+    warnings.extend(coverage["warnings"])
     tables = _count_tables(markdown)
-    pdfplumber_tables = 0
-    if page_count <= 60:
-        try:
-            import pdfplumber
-
-            with _silence_stdout():
-                with pdfplumber.open(str(path)) as pdf:
-                    for page in pdf.pages:
-                        pdfplumber_tables += len(page.extract_tables() or [])
-        except Exception:  # noqa: BLE001 - 复核失败不影响主转换
-            warnings.append("pdfplumber_recheck_failed")
-    else:
-        warnings.append("pdf_table_recheck_skipped:too_many_pages")
-    if pdfplumber_tables > tables:
-        warnings.append(f"tables_maybe_lost:pymupdf4llm={tables},pdfplumber={pdfplumber_tables}")
-        tables = pdfplumber_tables
+    tables, table_recheck, recheck_warnings = _recheck_tables(path, page_count, coverage["fallbackPages"], tables)
+    warnings.extend(recheck_warnings)
     quality = ""
     if text_chars < PDF_MIN_TEXT_CHARS:
         warnings.append("scanned_unsupported")
         quality = "scanned_unsupported"
-    return {"markdown": markdown, "warnings": warnings, "headings": _count_headings(markdown),
-            "tables": tables, "images": 0, "textChars": text_chars, "pages": page_count,
-            "pageCoverage": page_coverage, "pdfQuality": quality}
+    return {
+        "markdown": markdown,
+        "warnings": warnings,
+        "headings": _count_headings(markdown),
+        "tables": tables,
+        "images": 0,
+        "textChars": text_chars,
+        "pages": page_count,
+        "pageCoverage": coverage["pageCoverage"],
+        "fallbackPages": coverage["fallbackPages"],
+        "fallbackPageCount": coverage["fallbackPageCount"],
+        "keyDataFromFallbackOnly": coverage["keyDataFromFallbackOnly"],
+        "fallbackNote": coverage["fallbackNote"],
+        "tableRecheck": table_recheck,
+        "pdfQuality": quality,
+    }
+
 
 
 # ---------------------------------------------------------------------------
@@ -1262,6 +1417,11 @@ def convert_files(
                 "quality": str(existing.get("quality") or "") if existing else "",
                 "mtime": source.stat().st_mtime,
                 "convertedAt": str(existing.get("convertedAt") or "") if existing else "",
+                "fallbackPages": list(existing.get("fallbackPages") or []) if existing and isinstance(existing.get("fallbackPages"), list) else [],
+                "fallbackPageCount": int(existing.get("fallbackPageCount") or 0) if existing else 0,
+                "keyDataFromFallbackOnly": bool(existing.get("keyDataFromFallbackOnly")) if existing else False,
+                "fallbackNote": str(existing.get("fallbackNote") or "") if existing else "",
+                "tableRecheck": dict(existing.get("tableRecheck") or {}) if existing and isinstance(existing.get("tableRecheck"), Mapping) else {},
             }
             if (
                 not force
@@ -1375,6 +1535,11 @@ def convert_files(
                     "quality": quality,
                     "convertedAt": paths.iso_now(),
                     "converter": str(outcome.get("converter") or ""),
+                    "fallbackPages": list(outcome.get("fallbackPages") or []),
+                    "fallbackPageCount": int(outcome.get("fallbackPageCount") or 0),
+                    "keyDataFromFallbackOnly": bool(outcome.get("keyDataFromFallbackOnly")),
+                    "fallbackNote": str(outcome.get("fallbackNote") or ""),
+                    "tableRecheck": dict(outcome.get("tableRecheck") or {}),
                 }
             )
             converted.append(relative)
@@ -1750,6 +1915,50 @@ def run_selftest() -> dict[str, Any]:
             raise AssertionError("manifest 缺少 updatedAt")
         checks.append("manifest")
         checks.append("manifest_sources")
+        # P2-11：PDF 回退页标记 + 表格复核元数据（构造小样，不解析真实大 PDF）
+        if pdf_available:
+            pdf_entry = next(entry for entry in manifest["files"] if entry.get("sourceName") == "示例文件.pdf")
+            recheck = pdf_entry.get("tableRecheck") or {}
+            if (
+                pdf_entry.get("keyDataFromFallbackOnly") is not False
+                or int(pdf_entry.get("fallbackPageCount") or 0) != 0
+                or pdf_entry.get("fallbackPages") != []
+                or not isinstance(recheck, dict)
+                or recheck.get("mode") != "full"
+                or int(recheck.get("sampledPages") or 0) < 1
+            ):
+                raise AssertionError(f"PDF 无回退时 manifest 标记不正确：{pdf_entry}")
+        coverage = _pdf_page_coverage(
+            "# 首页\n\n第一页正文内容足够长足以覆盖抽样校验并且包含表格数据\n",
+            ["第一页正文内容足够长足以覆盖抽样校验并且包含表格数据", "第2页关键数据 2334 1936 1691 81 909"],
+        )
+        coverage_markdown = str(coverage.get("markdown") or "")
+        if (
+            coverage.get("fallbackPages") != [2]
+            or coverage.get("fallbackPageCount") != 1
+            or coverage.get("keyDataFromFallbackOnly") is not True
+            or "关键数据仅来自回退文本" not in str(coverage.get("fallbackNote") or "")
+            or "## 第 2 页（转换回退文本）" not in coverage_markdown
+            or "第2页关键数据 2334 1936 1691 81 909" not in coverage_markdown
+            or "key_data_from_fallback_only:1" not in list(coverage.get("warnings") or [])
+            or "pdf_pages_fallback:1" not in list(coverage.get("warnings") or [])
+        ):
+            raise AssertionError(f"PDF 回退页标记不正确：{coverage}")
+        checks.append("pdf_fallback_markers")
+        full_plan = _table_recheck_plan(PDF_TABLE_RECHECK_FULL_MAX_PAGES, [])
+        sampled_plan = _table_recheck_plan(261, [49, 11])
+        if (
+            full_plan.get("mode") != "full"
+            or len(full_plan.get("pages") or []) != PDF_TABLE_RECHECK_FULL_MAX_PAGES
+            or sampled_plan.get("mode") != "sampled"
+            or len(sampled_plan.get("pages") or []) > PDF_TABLE_RECHECK_SAMPLE_MAX_PAGES
+            or 49 not in (sampled_plan.get("pages") or [])
+            or 11 not in (sampled_plan.get("pages") or [])
+            or int(sampled_plan.get("fallbackSampled") or 0) != 2
+            or list(sampled_plan.get("pages") or []) != sorted(sampled_plan.get("pages") or [])
+        ):
+            raise AssertionError(f"大 PDF 表格复核抽样计划不正确：{sampled_plan}")
+        checks.append("pdf_table_recheck_plan")
 
         # 幂等：未变化 → skipped，md mtime 不变
         before_mtime = docx_md.stat().st_mtime

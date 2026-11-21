@@ -7,18 +7,21 @@ Agent 只写 `<packageDir>/chapters/_outline/outline.draft.json`；本脚本负�
    （floor=800、单章上限 min(8000, W/2)、Σ=W），回写 `wordTargetBasis`；
 3) 汇总 `figureIndex`/`stats`（图表配额对账）、补 `completion` 默认值、重算 `coveredBy`；
 4) 备份旧 `outline.json` 后原子写；`--materialize` 建章节树/文件头；`--check-tree` 只读校验；
-6) `--migrate-storage` 把 M5.1 前散落在包根的 outline 文件迁入 `chapters/_outline/`（保留备份，不改 state）。
-5) 事件 `outline.generated` / `outline.materialized`。
+5) 包根旧布局（M5.1 前）的 `outline*.json` 在 apply 时**自动迁移**到 `chapters/_outline/`
+   （备份+warning，不阻断）；`--migrate-storage` 仍可显式迁移；
+6) 事件 `outline.generated` / `outline.materialized`。
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -47,6 +50,17 @@ def outline_path(package_dir: Path) -> Path:
 
 def draft_path(package_dir: Path) -> Path:
     return outline_validate.draft_path(package_dir)
+
+
+def legacy_outline_files(package_dir: Path) -> list[Path]:
+    """M5.1 前散落在包根的 outline 元数据文件（outline/draft/.lock/bak）。"""
+    candidates: list[Path] = []
+    for name in (OUTLINE_FILE, DRAFT_FILE, f"{OUTLINE_FILE}.lock"):
+        candidate = package_dir / name
+        if candidate.is_file():
+            candidates.append(candidate)
+    candidates.extend(sorted(package_dir.glob(f"{OUTLINE_FILE}.bak-*")))
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -263,17 +277,17 @@ def migrate_outline_storage(
     project_dir: Path,
     package_id: str | None = None,
 ) -> dict[str, Any]:
-    """M5.1：把包根 legacy outline 文件移入 chapters/_outline/（保留迁移前 backup，不改 state/包目录）。"""
+    """M5.1：把包根 legacy outline 文件移入 chapters/_outline/（保留迁移前 backup，不改 state/包目录）。
+
+    迁移=同盘 ``shutil.move``（原子重命名，不产生半写文件）；目标已存在时：
+    - 内容相同 → 只删包根副本（幂等，可重复执行）；
+    - 内容不同 → 旧文件改名 ``<name>.pre-migration-<ts>`` 保留，绝不覆盖已有新位置文件。
+    """
     workspace_path, project_dir_path, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
         workspace, project_dir, package_id
     )
     out_dir = outline_dir(package_dir, create=True)
-    legacy_files: list[Path] = []
-    for name in (OUTLINE_FILE, DRAFT_FILE, f"{OUTLINE_FILE}.lock"):
-        candidate = package_dir / name
-        if candidate.is_file():
-            legacy_files.append(candidate)
-    legacy_files.extend(sorted(package_dir.glob(f"{OUTLINE_FILE}.bak-*")))
+    legacy_files = legacy_outline_files(package_dir)
     backup = ""
     legacy_outline = package_dir / OUTLINE_FILE
     if legacy_outline.is_file():
@@ -287,6 +301,7 @@ def migrate_outline_storage(
         backup = f"{OUTLINE_DIR}/{backup_path.name}"
     moved: list[str] = []
     skipped: list[str] = []
+    superseded: list[str] = []
     for source in legacy_files:
         target_path = out_dir / source.name
         if target_path.exists():
@@ -297,6 +312,23 @@ def migrate_outline_storage(
             if same:
                 source.unlink()
                 skipped.append(source.name)
+                continue
+            # 内容不同：比较 mtime 择优。用户按旧文档刚在包根写的草稿通常更新，
+            # 不能用 _outline 里的旧文件生成 outline 而把新草稿降级成备份。
+            try:
+                source_newer = source.stat().st_mtime > target_path.stat().st_mtime
+            except OSError:
+                source_newer = False
+            if source_newer:
+                old_target = out_dir / f"{target_path.name}.superseded-{paths.timestamp14()}"
+                suffix = 1
+                while old_target.exists():
+                    old_target = out_dir / f"{target_path.name}.superseded-{paths.timestamp14()}-{suffix}"
+                    suffix += 1
+                shutil.move(str(target_path), str(old_target))
+                shutil.move(str(source), str(target_path))
+                moved.append(f"{OUTLINE_DIR}/{source.name}")
+                superseded.append(f"{OUTLINE_DIR}/{old_target.name}")
                 continue
             alt = out_dir / f"{source.name}.pre-migration-{paths.timestamp14()}"
             suffix = 1
@@ -330,12 +362,13 @@ def migrate_outline_storage(
         "outlineDir": f"{paths.rel_posix(project_dir_path, package_dir)}/{OUTLINE_DIR}",
         "migrated": moved,
         "skippedSameContent": skipped,
+        "superseded": superseded,
         "backup": backup,
         "remainingLegacy": sorted(
             str(path.relative_to(package_dir).as_posix())
-            for path in package_dir.glob(f"{OUTLINE_FILE}*")
-            if path.is_file()
+            for path in legacy_outline_files(package_dir)
         ),
+        "atomic": True,
         "validAfterMigration": outline_valid,
         "currentStage": state.get("currentStage"),
         "revision": state.get("revision"),
@@ -423,7 +456,7 @@ def apply_outline(
             raise errors.BgError(
                 errors.E_NOT_FOUND,
                 "缺少 outline.json，无法 --check-tree",
-                hint="先运行 bg_outline_apply.py --materialize；旧项目先 --migrate-storage",
+                hint="先运行 bg_outline_apply.py --materialize（包根旧文件会自动迁移）；旧项目也可先 --migrate-storage",
                 detail={"packageDir": paths.rel_posix(project_dir_path, package_dir)},
             )
         document = jsonio.read_json(outline_file)
@@ -459,12 +492,32 @@ def apply_outline(
             "revision": state.get("revision"),
         }
 
+    # P1-2：旧布局（包根 outline 元数据文件）自动迁移到 chapters/_outline/，给 warning 不阻断；
+    # 仅默认解析时自动迁移；显式 --input 指向包根旧文件仍走 E_NOT_FOUND 提示（避免搬走用户指定文件）。
+    warnings: list[str] = []
+    migration: dict[str, Any] | None = None
+    if input_path is None and legacy_outline_files(package_dir):
+        migration = migrate_outline_storage(workspace=workspace_path, project_dir=project_dir_path, package_id=target)
+        moved = list(migration.get("migrated") or [])
+        skipped = list(migration.get("skippedSameContent") or [])
+        superseded = list(migration.get("superseded") or [])
+        if moved or skipped:
+            parts = [f"检测到大纲文件位于包根旧位置（M5.1 前布局），已自动迁移到 {migration.get('outlineDir')}"]
+            if moved:
+                parts.append("迁移：" + "、".join(moved))
+            if superseded:
+                parts.append("包根草稿较新，已采用并保留旧目标：" + "、".join(superseded))
+            if skipped:
+                parts.append("同名同内容清理：" + "、".join(skipped))
+            if migration.get("backup"):
+                parts.append(f"迁移前备份：{migration['backup']}")
+            warnings.append("；".join(parts))
     source_path, draft_mode = outline_validate.resolve_input_path(package_dir, input_path)
     if source_path.parent == package_dir:
         raise errors.BgError(
             errors.E_NOT_FOUND,
             "大纲文件仍在包根旧位置（M5.1 前布局）",
-            hint="先运行 bg_outline_apply.py --migrate-storage 迁移到 chapters/_outline/",
+            hint="默认路径为 chapters/_outline/outline.draft.json：去掉 --input 让 apply 自动迁移并告警，或先运行 bg_outline_apply.py --migrate-storage",
             detail={"legacyPath": source_path.name, "outlineDir": OUTLINE_DIR},
         )
     applied = False
@@ -559,9 +612,13 @@ def apply_outline(
         "backup": backup_name,
         "outlinePath": paths.rel_posix(project_dir_path, outline_file),
         "stats": (normalized or {}).get("stats", {}),
+        "warnings": warnings,
+        "autoMigrated": bool(migration and (migration.get("migrated") or migration.get("skippedSameContent"))),
         "currentStage": state.get("currentStage"),
         "revision": state.get("revision"),
     }
+    if migration is not None:
+        payload["migration"] = migration
     if materialize_result is not None:
         payload["materialize"] = materialize_result
     return payload
@@ -586,7 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", help="工作区根绝对路径")
     parser.add_argument("--project", help="项目目录（绝对/相对）或 projectId（配合 --workspace）")
     parser.add_argument("--package", help="目标包 package-<N>（缺省 state.currentPackage / packagesToWrite 首个）")
-    parser.add_argument("--input", help="指定草稿文件（缺省 <packageDir>/outline.draft.json）")
+    parser.add_argument("--input", help="指定草稿文件（缺省 <packageDir>/chapters/_outline/outline.draft.json；包根旧布局文件在缺省路径下会自动迁移）")
     parser.add_argument("--materialize", action="store_true", help="按 outline 创建 chapters 文件夹/末级 .md（已存在不覆盖，除非 --force）")
     parser.add_argument("--force", action="store_true", help="materialize 时覆盖已存在章节文件")
     parser.add_argument("--check-tree", action="store_true", help="只读校验 chapters/** 与 outline.json 一致（materialize 后）")
@@ -669,7 +726,7 @@ def run_selftest() -> dict[str, Any]:
             "figureQuota": {"table": 5, "mermaid": 5, "network": 0, "terminal": 5},
             "personnelPlan": "",
             "equipmentPlan": "",
-            "schedulePlan": {"startDate": "", "deliveryDate": "", "constructionPlan": ""},
+            "schedulePlan": {"startDate": "", "deliveryDate": "", "servicePeriod": "", "constructionPlan": ""},
         }
         jsonio.write_json_atomic(package_dir / "package-meta.json", package_meta)
         # project.json/state.json（apply 的 context 解析需要）
@@ -778,6 +835,38 @@ def run_selftest() -> dict[str, Any]:
         if not outline_path(package_dir).is_file() or (package_dir / OUTLINE_FILE).exists():
             raise AssertionError("迁移后包根 outline 未清理/新位置缺失")
         checks.append("migrate_storage")
+        # P1-2：旧布局草稿放在包根时，apply 自动迁移 + warning（不阻断），且可重复执行
+        shutil.rmtree(outline_dir(package_dir), ignore_errors=True)
+        jsonio.write_json_atomic(package_dir / DRAFT_FILE, draft)
+        auto = apply_outline(workspace=workspace, project_dir=project_dir, materialize=True)
+        if not auto.get("autoMigrated") or not auto.get("warnings"):
+            raise AssertionError(f"apply 未自动迁移旧布局草稿：{auto}")
+        if not draft_path(package_dir).is_file() or (package_dir / DRAFT_FILE).exists():
+            raise AssertionError("自动迁移后包根草稿未清理/新位置缺失")
+        if not outline_path(package_dir).is_file():
+            raise AssertionError("自动迁移后未重新生成 outline.json")
+        if not any("自动迁移" in str(item) for item in auto.get("warnings") or []):
+            raise AssertionError(f"自动迁移 warning 文案缺少说明：{auto.get('warnings')}")
+        checks.append("auto_migrate_on_apply")
+        second_auto = apply_outline(workspace=workspace, project_dir=project_dir)
+        if second_auto.get("autoMigrated") or second_auto.get("warnings"):
+            raise AssertionError(f"自动迁移不幂等（无旧文件仍报迁移）：{second_auto}")
+        checks.append("auto_migrate_idempotent")
+        # 内容不同且包根草稿更新：优先采用包根新草稿，旧目标改名 .superseded 保留
+        target_draft_path = draft_path(package_dir)
+        old_draft = copy.deepcopy(draft)
+        old_draft["chapters"][0]["title"] = str(old_draft["chapters"][0]["title"]) + "（旧）"
+        new_draft = copy.deepcopy(draft)
+        new_draft["chapters"][0]["title"] = str(new_draft["chapters"][0]["title"]) + "（新）"
+        jsonio.write_json_atomic(target_draft_path, old_draft)
+        old_ts = time.time() - 3600
+        os.utime(target_draft_path, (old_ts, old_ts))
+        jsonio.write_json_atomic(package_dir / DRAFT_FILE, new_draft)
+        migrated_new = migrate_outline_storage(workspace=workspace, project_dir=project_dir)
+        migrated_titles = [str(node.get("title") or "") for node in jsonio.read_json(target_draft_path).get("chapters") or []]
+        if not migrated_new.get("superseded") or migrated_titles[0] != new_draft["chapters"][0]["title"]:
+            raise AssertionError(f"较新包根草稿未被采用：{migrated_new} / {migrated_titles[:1]}")
+        checks.append("migrate_prefers_newer_draft")
         return {"ok": True, "selftest": {"script": "bg_outline_apply.py", "checks": checks}}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

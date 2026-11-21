@@ -3,20 +3,28 @@
 
 CLI：
     bg_export_verify.py --docx <path> --mode tech|keyinfo|overview [--report] [--strict]
-                        [--workspace <ws>] [--project <prj>] [--package <pkg>] [--json]
+                        [--workspace <ws>] [--project <prj>] [--package <pkg>] [--json] [--selftest]
 
 检查：docx 可打开；outline 标题全部以 Heading 1–6 输出且编号样式挂接 numbering.xml；
-图片数=produced 图；表格数=▼表题注±1；正文总字数 vs outline.stats ±20%；抽查 3 章首段非空；
-无 TOC/目录；颜色 auto、标题/正文字体；缺失图/占位 major（strict 下失败）。
-通过写 export/_last-export-report.json（含自检结果）；失败 exit4。
+图片数=produced 图；表格数=计划表 + 去重后的补充表；正文总字数 vs outline.stats ±20%；
+抽查 3 章首段非空；无 TOC/目录；颜色 auto、标题/正文字体；缺失图/占位 major（strict 下失败）。
+
+口径（P1-5 / P2-10）：
+- **字数**：`wordCount` 用 `_lib.text.count_body_words` 按章节 md 复算（审查口径：
+  CJK 字符 + ASCII 连续词，去掉标题行/HTML 注释），与 review/merge 同口径；
+  docx 原始文本字数另记 `docxTextWords` 仅作导出完整性参考（含标题/题注/表格单元格）；
+- **表格**：`tableRegistration.expected = 计划 figurePlan.table + 去重后的补充表`；
+  outline.supplementTables 里若残留“计划表重复登记”（旧版 bug），对账时自动剔除并给 warning。
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import re
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -25,6 +33,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _lib import errors, jsonio, logging as event_log, paths, state as state_lib
+from _lib import text as text_lib
 import bg_outline_validate as outline_validate
 
 SCHEMA_VERSION = "1.0"
@@ -32,6 +41,7 @@ REPORT_REL = "export/_last-export-report.json"
 HEADING_RE = re.compile(r"^Heading ([1-6])$")
 CAPTION_PREFIXES = ("▼表", "▲图", "表", "图")
 ALLOWED_FONTS = {"宋体", "黑体", "Arial", "Times New Roman", "Consolas"}
+WORD_COUNT_TOLERANCE = 0.20
 
 
 def _document_text(document: Any) -> str:
@@ -44,9 +54,93 @@ def _document_text(document: Any) -> str:
 
 
 def count_words(text: str) -> int:
-    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
-    words = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", text))
-    return cjk + words
+    """统一字数口径（P2-10）：见 `_lib/text.py`。
+
+    保留本函数名供既有调用方（测试/夹具）复用；口径为 CJK 字符 + ASCII 连续词，
+    默认剥离 HTML 注释与 Markdown 标题行，与 review / merge / overview 一致。
+    """
+    return text_lib.count_words(text)
+
+
+def body_word_count(package_dir: Path, outline: Mapping[str, Any]) -> dict[str, Any]:
+    """按章节 md 复算正文字数（审查口径）；返回字数、章节数与缺失文件。"""
+    texts: list[str] = []
+    missing: list[str] = []
+    for leaf in _leaf_nodes(outline):
+        file_path = str(leaf.get("filePath") or "")
+        if not file_path:
+            continue
+        path = package_dir / file_path
+        if not path.is_file():
+            missing.append(file_path)
+            continue
+        try:
+            texts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
+        except OSError:
+            missing.append(file_path)
+    return {
+        "wordCount": text_lib.count_body_words("\n".join(texts)),
+        "chaptersCounted": len(texts),
+        "missingChapters": missing,
+    }
+
+
+def _normalize_caption(value: Any) -> str:
+    return re.sub(r"[\s\u3000]+", "", str(value or ""))
+
+
+def planned_table_info(outline: Mapping[str, Any]) -> dict[str, Any]:
+    """返回 outline.figurePlan 的计划表 anchorId/题注（用于表格注册对账）。"""
+    anchors: set[str] = set()
+    captions: set[tuple[str, str]] = set()
+    for node in outline_validate.iter_preorder(outline.get("chapters") or []):
+        chapter_id = str(node.get("id") or "")
+        for plan in node.get("figurePlan") or []:
+            if not isinstance(plan, Mapping) or str(plan.get("type") or "") != "table":
+                continue
+            anchor_id = str(plan.get("anchorId") or "")
+            if anchor_id:
+                anchors.add(anchor_id)
+            caption = _normalize_caption(plan.get("caption"))
+            if caption:
+                captions.add((chapter_id, caption))
+    return {"anchors": anchors, "captions": captions, "count": len(anchors) or len(captions)}
+
+
+def summarize_table_registration(outline: Mapping[str, Any]) -> dict[str, Any]:
+    """P1-5：计划表 + 去重后的补充表 = 导出 docx 期望表格数。
+
+    outline.supplementTables 里属于计划表的重复登记（旧版 merge bug：sup-* 与 fig-* 并存）
+    会被剔除（记入 `dropped`），同一补充表重复条目也去重；真正补充表按原有顺序保留。
+    """
+    planned = planned_table_info(outline)
+    planned_anchors: set[str] = planned["anchors"]
+    planned_captions: set[tuple[str, str]] = planned["captions"]
+    supplements: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in outline.get("supplementTables") or []:
+        if not isinstance(item, Mapping):
+            continue
+        chapter_id = str(item.get("chapterId") or "")
+        anchor_id = str(item.get("anchorId") or "").strip()
+        caption = _normalize_caption(item.get("caption"))
+        if (anchor_id and anchor_id in planned_anchors) or (chapter_id, caption) in planned_captions:
+            dropped.append({"anchorId": anchor_id, "chapterId": chapter_id, "reason": "planned_table_duplicate"})
+            continue
+        key = (chapter_id, anchor_id or caption)
+        if key in seen:
+            dropped.append({"anchorId": anchor_id, "chapterId": chapter_id, "reason": "duplicate_supplement"})
+            continue
+        seen.add(key)
+        supplements.append(dict(item))
+    return {
+        "planned": planned["count"],
+        "supplements": supplements,
+        "supplementCount": len(supplements),
+        "dropped": dropped,
+        "expected": planned["count"] + len(supplements),
+    }
 
 
 def _outline_titles(outline: Mapping[str, Any]) -> list[str]:
@@ -224,15 +318,38 @@ def verify_docx(
         findings.append({"code": "tables_mismatch", "message": f"表格数 {expected_tables} vs ▼表题注 {len(captions)}（容差±1）"})
     if "▼表" in text and not captions:
         findings.append({"code": "table_caption_missing", "message": "正文含 ▼表 文本但无题注段落"})
-    if isinstance(report_data, Mapping) and report_data.get("plannedTables") is not None and "supplementTables" in outline:
-        supplements = [item for item in report_data.get("supplementTables") or [] if isinstance(item, Mapping)]
-        planned = int(report_data.get("plannedTables") or 0)
-        expected_registered = planned + len(supplements)
-        checks["tableRegistration"] = {"planned": planned, "supplements": len(supplements), "expected": expected_registered, "docxTables": expected_tables}
-        if expected_tables < planned:
-            findings.append({"code": "table_registration_mismatch", "message": f"docx 表格 {expected_tables} < 计划 table {planned}（计划表缺失）"})
-        elif expected_tables > expected_registered:
-            warnings.append(f"docx 额外表格 {expected_tables - expected_registered} 个未登记到 supplementTables（上不封顶，仅提示）")
+    if isinstance(report_data, Mapping) and report_data.get("plannedTables") is not None:
+        # P1-5：expected = 计划 figurePlan.table + 去重后的补充表（不再直接用 report 里
+        # 可能含“计划表重复登记”的 raw supplementTables，避免 planned=5/supplements=5/expected=10 的假口径）。
+        registration = summarize_table_registration(outline)
+        checks["tableRegistration"] = {
+            "planned": registration["planned"],
+            "supplements": registration["supplementCount"],
+            "expected": registration["expected"],
+            "docxTables": expected_tables,
+            "droppedSupplements": len(registration["dropped"]),
+        }
+        reported_planned = int(report_data.get("plannedTables") or 0)
+        checks["tableRegistration"]["reportedPlanned"] = reported_planned
+        if reported_planned != registration["planned"]:
+            warnings.append(
+                f"导出报告 plannedTables={reported_planned} 与 outline 计划表 {registration['planned']} 不一致（以 outline 为准）"
+            )
+        if registration["dropped"]:
+            warnings.append(
+                f"outline.supplementTables 有 {len(registration['dropped'])} 条计划表重复/重复登记，已按计划表去重后对账"
+            )
+        if expected_tables < registration["planned"]:
+            findings.append(
+                {
+                    "code": "table_registration_mismatch",
+                    "message": f"docx 表格 {expected_tables} < 计划 table {registration['planned']}（计划表缺失）",
+                }
+            )
+        elif expected_tables > registration["expected"]:
+            warnings.append(
+                f"docx 额外表格 {expected_tables - registration['expected']} 个未登记到 supplementTables（上不封顶，仅提示）"
+            )
 
     bad_captions: list[dict[str, Any]] = []
     for paragraph in document.paragraphs:
@@ -261,10 +378,35 @@ def verify_docx(
 
     stats = outline.get("stats") if isinstance(outline.get("stats"), Mapping) else {}
     expected_words = int(stats.get("writtenWordTotal") or stats.get("writtenWordCount") or stats.get("actualWordCount") or stats.get("totalWordCount") or package_meta.get("expectedWordCount") or 0)
-    actual_words = count_words(text)
-    checks["wordCount"] = {"expected": expected_words, "actual": actual_words}
-    if expected_words > 0 and abs(actual_words - expected_words) / expected_words > 0.20:
+    source_counts = body_word_count(package_dir, outline)
+    docx_text_words = count_words(text)
+    if source_counts["chaptersCounted"]:
+        actual_words = source_counts["wordCount"]
+        word_basis = "review（CJK+ASCII 词，去标题/注释，按章节 md 复算）"
+    else:
+        # 章节 md 缺失（例如单独校验一份外部 docx）时回退到 docx 文本口径
+        actual_words = docx_text_words
+        word_basis = "docx 文本（章节 md 缺失回退）"
+    checks["wordCount"] = {
+        "expected": expected_words,
+        "actual": actual_words,
+        "basis": word_basis,
+        "docxTextWords": docx_text_words,
+        "chaptersCounted": source_counts["chaptersCounted"],
+        "missingChapters": source_counts["missingChapters"][:10],
+    }
+    if source_counts["missingChapters"]:
+        warnings.append(f"有 {len(source_counts['missingChapters'])} 个章节 md 缺失，正文字数按已存在章节统计")
+    if expected_words > 0 and abs(actual_words - expected_words) / expected_words > WORD_COUNT_TOLERANCE:
         findings.append({"code": "word_count_out_of_range", "message": f"正文 {actual_words} vs 大纲 {expected_words}（>±20%）"})
+    # 导出完整性：docx 文本（含标题/题注/表格单元格）不应明显少于正文口径（防止导出截断）
+    if source_counts["chaptersCounted"] and docx_text_words < actual_words * (1 - WORD_COUNT_TOLERANCE):
+        findings.append(
+            {
+                "code": "docx_text_truncated",
+                "message": f"docx 文本字数 {docx_text_words} 明显少于正文口径 {actual_words}（>20%，疑似导出截断）",
+            }
+        )
 
     samples: list[dict[str, Any]] = []
     leaves = _leaf_nodes(outline)
@@ -334,6 +476,161 @@ def verify_docx(
     }
 
 
+# ---------------------------------------------------------------------------
+# 自检（--selftest）
+# ---------------------------------------------------------------------------
+def _ensure_three_level_numbering(document: Any) -> None:
+    """给默认 docx 模板补 ≥3 级编号定义（verify 的 numbering 检查要求）。"""
+    from docx.oxml.ns import qn
+
+    try:
+        numbering = document.part.numbering_part.element
+    except (NotImplementedError, AttributeError):
+        return
+    abstract = numbering.find(qn("w:abstractNum"))
+    if abstract is None:
+        return
+    levels = abstract.findall(qn("w:lvl"))
+    if not levels:
+        return
+    for ilvl in range(len(levels), 3):
+        clone = copy.deepcopy(levels[0])
+        clone.set(qn("w:ilvl"), str(ilvl))
+        abstract.append(clone)
+
+
+def _add_table_caption(document: Any, caption: str) -> None:
+    paragraph = document.add_paragraph()
+    paragraph.add_run("▼")
+    bold = paragraph.add_run("表")
+    bold.bold = True
+    paragraph.add_run(f"-{caption}")
+
+
+def _build_selftest_docx(path: Path, *, table_count: int, titles: list[str], body: str) -> Path:
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("M8 导出自检项目技术方案")
+    document.add_paragraph("项目编号：M8-VERIFY-001    导出时间：2026-11-21T00:00:00+08:00")
+    for level, title in enumerate(titles, start=1):
+        document.add_heading(title, level=level)
+        document.add_paragraph(body)
+    for index in range(table_count):
+        _add_table_caption(document, f"测试表{index + 1}")
+        table = document.add_table(rows=2, cols=2)
+        table.cell(0, 0).text = "项目"
+        table.cell(0, 1).text = "内容"
+        table.cell(1, 0).text = "服务范围"
+        table.cell(1, 1).text = "按招标要求实施"
+    _ensure_three_level_numbering(document)
+    document.save(str(path))
+    return path
+
+
+def run_selftest() -> dict[str, Any]:
+    """离线自检：表格注册口径（计划表去重）+ 字数审查口径 + docx 校验正反例。"""
+    checks: list[str] = []
+    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-export-verify-selftest-"))
+    try:
+        package_dir = tmp / "package"
+        (package_dir / "chapters").mkdir(parents=True, exist_ok=True)
+        body = "运维服务范围包括前端设备巡检、故障处置与应急演练，按季度形成运维报告并持续改进。"
+        markdown = "# 项目理解\n\n## 服务范围\n\n" + body + "\n"
+        (package_dir / "chapters" / "1-1-1.md").write_text(markdown, encoding="utf-8", newline="\n")
+        expected_words = text_lib.count_body_words(markdown)
+        if count_words(markdown) != expected_words:
+            raise AssertionError("count_words 未复用 _lib.text 统一口径")
+        checks.append("word_count_basis")
+        outline = {
+            "chapters": [
+                {
+                    "id": "1-1",
+                    "title": "项目理解",
+                    "level": 1,
+                    "children": [
+                        {
+                            "id": "1-1-1",
+                            "title": "服务范围",
+                            "level": 2,
+                            "filePath": "chapters/1-1-1.md",
+                            "completion": {"status": "done"},
+                            "figurePlan": [
+                                {"anchorId": "fig-1-1-1-01", "type": "table", "caption": "服务清单"},
+                                {"anchorId": "fig-1-1-1-02", "type": "table", "caption": "人员配置"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "supplementTables": [
+                # 旧版 merge bug 的“计划表重复登记”：必须在对账时剔除
+                {"anchorId": "sup-1-1-1", "chapterId": "1-1-1", "caption": "服务清单"},
+                {"anchorId": "sup-1-1-1-2", "chapterId": "1-1-1", "caption": "真实补充表"},
+            ],
+            "stats": {"writtenWordTotal": expected_words},
+        }
+        registration = summarize_table_registration(outline)
+        if (
+            registration["planned"] != 2
+            or registration["supplementCount"] != 1
+            or registration["expected"] != 3
+            or len(registration["dropped"]) != 1
+        ):
+            raise AssertionError(f"表格注册口径不正确：{registration}")
+        checks.append("table_registration_dedupe")
+
+        titles = ["项目理解", "服务范围"]
+        docx_path = _build_selftest_docx(tmp / "selftest.docx", table_count=3, titles=titles, body=body)
+        result = verify_docx(
+            docx_path=docx_path,
+            mode="tech",
+            package_dir=package_dir,
+            outline=outline,
+            package_meta={"expectedWordCount": expected_words},
+            report_data={"plannedTables": 2, "supplementTables": outline["supplementTables"]},
+            strict=False,
+        )
+        table_registration = (result.get("checks") or {}).get("tableRegistration") or {}
+        if not result.get("ok"):
+            raise AssertionError(f"自检 docx 应通过：{result.get('findings')}")
+        if (
+            table_registration.get("planned") != 2
+            or table_registration.get("supplements") != 1
+            or table_registration.get("expected") != 3
+            or table_registration.get("docxTables") != 3
+            or table_registration.get("droppedSupplements") != 1
+        ):
+            raise AssertionError(f"tableRegistration 不自洽：{table_registration}")
+        if result.get("wordCount") != expected_words:
+            raise AssertionError(f"导出字数与审查口径不一致：{result.get('wordCount')} != {expected_words}")
+        word_checks = (result.get("checks") or {}).get("wordCount") or {}
+        if word_checks.get("basis") is None or "docxTextWords" not in word_checks:
+            raise AssertionError(f"字数口径未记录 basis/docxTextWords：{word_checks}")
+        checks.append("table_registration_self_consistent")
+        checks.append("export_wordcount_matches_review")
+
+        broken = _build_selftest_docx(tmp / "broken.docx", table_count=1, titles=titles, body=body)
+        broken_result = verify_docx(
+            docx_path=broken,
+            mode="tech",
+            package_dir=package_dir,
+            outline=outline,
+            package_meta={"expectedWordCount": expected_words},
+            report_data={"plannedTables": 2},
+            strict=False,
+        )
+        broken_codes = {item.get("code") for item in broken_result.get("findings") or []}
+        if broken_result.get("ok") or "table_registration_mismatch" not in broken_codes:
+            raise AssertionError(f"缺计划表负例未报 table_registration_mismatch：{broken_result.get('findings')}")
+        checks.append("table_registration_negative")
+        return {"ok": True, "selftest": {"script": "bg_export_verify.py", "checks": checks}}
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = errors.CliParser(
         prog="bg_export_verify.py",
@@ -347,10 +644,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("tech", "keyinfo", "overview"), default="tech")
     parser.add_argument("--report", action="store_true", help="写 export/_last-export-report.json（含 verify 结果）")
     parser.add_argument("--strict", action="store_true", help="缺失图/警告升级为失败")
+    parser.add_argument("--selftest", action="store_true", help="运行脚本离线自检")
     return parser
 
 
 def handle(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "selftest", False):
+        return run_selftest()
     if not args.project:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)

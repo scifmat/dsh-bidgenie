@@ -26,7 +26,7 @@
   "expectedWordCount": 50000,
   "personnelPlan": "项目经理1名、驻场运维约8人（具体以进场安排为准）",
   "equipmentPlan": "高空作业车1台、运维检测终端2台",
-  "schedulePlan": { "startDate": "", "deliveryDate": "", "constructionPlan": "合同签订后30日内开工" },
+  "schedulePlan": { "startDate": "", "deliveryDate": "", "servicePeriod": "1 年", "constructionPlan": "合同签订后30日内开工" },
   "figureQuota": { "table": 5, "mermaid": 5, "terminal": 5 },
   "valueSource": { "expectedWordCount": "agent-default", "personnelPlan": "user", "equipmentPlan": "user", "schedulePlan": "agent-default", "table": "user", "mermaid": "user", "terminal": "user" },
   "exportStyleProfile": "official-tech"
@@ -34,9 +34,11 @@
 ```
 
 - 7 项 = 字数、人员、设备、工期、表格/流程图/终端图配额；样式不作为提问项。
+- 工期字段语义分开：`servicePeriod`=合同履行期限/服务期（「1 年」「3 个月」）；`constructionPlan`=施工/供货/交付工期；`startDate`/`deliveryDate` 只写 YYYY-MM-DD 或空（不编造）。auto 映射来源记在 `extensions.autoFill.autoBasis.schedulePlan`。
 - 字数默认**动态**：`user-settings.defaultWordCountTier`（缺省 50000），提问卡显示实际值；与提取稿要求下限取大值，不写死 5 万
 - 样式默认：`styleProfiles.tech` → 兼容 `styleProfile` → `official-tech`（写 `exportStyleProfile`）。
 - 配额是下限、上不封顶；人员/设备/工期 guided 每包必须有答案或「用默认」。
+- `qualificationGaps`/`qualificationGapsInfo`：仅 info 提示（`blocking=false`，每包 ≤5 条、`missingTokens` 整条短语），不阻断 F4/T3。
 
 ## T3 前置与迁移
 
@@ -47,6 +49,12 @@
 ```
 
 T3 必须显式 `--package "<writingPackages[0]>"`；失败先 `--verify` 出缺包清单补齐。
+`set-package`/`lock` 在 `state.history` 记为 `kind=event`（`action=set_package`/`lock`），不是阶段迁移；读历史用 `state_lib.history_transitions/history_events`（旧记录 `from==to` 也按事件兼容）。
+
+## --all-selected 输出
+
+- `results[]`：逐包 prepare 结果；中间包 `readyForT3=false` 时会带 `pendingReason="sequence-in-progress"`、`t3Pending=true`，是顺序中间态不是失败。
+- 顶层 `readyForT3` = 最后一包结果；`pendingPackages` 列中间态包；`summary.note` 说明判定口径。汇报以顶层 `readyForT3` 为准。
 
 ## 异常
 

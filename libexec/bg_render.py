@@ -2,7 +2,9 @@
 """BidGenie F5-2 图表资源渲染（PRD F5.1.6 / F5.2.3–F5.2.5、决策 9.8/9.9）。
 
 - 读取 `<packageDir>/chapters/_outline/outline.json` 的 figurePlan 与章节 md 插入标记
-  （`<!-- BG:FIGURE:<anchorId> -->`）；
+  （`<!-- BG:FIGURE:<anchorId> -->`）；**table 类型按 bg-write 硬规则不写 BG:FIGURE
+  （用 `▼表` 题注定位），因此不做缺失标记检查**（P1-4；误加的标记由导出自检
+  `tableMarkers` 记 warning / A 层审查约束，渲染侧不再提示“补标记”）；
 - mermaid：源码 `<anchorId>.mmd`（缺失时从章节 md 的 ```mermaid 代码块提取）→ Node 脚本
   `libexec/node/render_mermaid.js`（系统 Chrome/Edge headless + 内置 `assets/mermaid/mermaid.min.js`）
   → `<anchorId>.png`；浏览器/库失败时降级 Pillow 简化占位图（warning，不中断正文）；
@@ -10,6 +12,10 @@
 - network：quota=0 时全部跳过（`networkDisabled`），保留接口；>0 时仅校验既有 `<anchorId>.png` + `sources.json`，缺素材记 warning；
 - 资源命名 `<anchorId>.png/.mmd/.txt`；正文 md 只保留插入标记（本脚本不改 md、不内嵌 base64）；
 - 幂等：`resources/render-manifest.json` 记录 source/png hash，已存在且 hash 一致跳过（`--force` 重渲染）；
+- 临时目录：每次 node/浏览器渲染使用私有 TEMP 根目录，结束后整体删除（含浏览器自身
+  的 `scoped_dir*`/`HeadlessChrome*` 兄弟目录），避免在系统 TEMP 或会话 TEMP
+  （如 `<workspace>/dsh/tmp`）留下残留；浏览器子进程仍占用导致删不掉时记
+  `render_temp_residue` warning 与 `tempResidue` 字段（跨进程无法强杀，系统会自行清理）；
 - `--anchor` 单图重渲染、`--selftest` 离线自检。
 """
 
@@ -88,6 +94,44 @@ def rel(project_dir: Path, path: Path) -> str:
 def find_node() -> str | None:
     candidate = os.environ.get("BG_NODE") or shutil.which("node")
     return candidate if candidate and Path(candidate).is_file() else None
+
+
+#: 单次 node/浏览器渲染的私有临时根目录前缀（P1-4：渲染不留 dsh/tmp / 系统 TEMP 残留）。
+RENDER_SCRATCH_PREFIX = "bidgenie-render-scratch-"
+
+
+def make_render_scratch() -> Path:
+    """为一次 node+浏览器渲染创建私有临时根目录。
+
+    把 `TEMP`/`TMP`/`TMPDIR` 指向该目录后：node 自己的 `bidgenie-mermaid-*` 目录，
+    以及 Chrome/Edge headless 自己创建的 `scoped_dir*` / `HeadlessChrome*` 兄弟目录
+    都会落在本目录内，渲染结束可整体删除，不会污染系统 TEMP 或会话 TEMP
+    （例如 `<workspace>/dsh/tmp`）。
+    """
+    return Path(tempfile.mkdtemp(prefix=RENDER_SCRATCH_PREFIX))
+
+
+def cleanup_render_scratch(scratch: Path, *, attempts: int = 10) -> list[dict[str, str]]:
+    """删除渲染私有临时根目录；返回未能删除的残留项（path/error）。
+
+    Windows 下浏览器的 crashpad/GPU 子进程可能在截图后短暂占用文件，这里做短重试；
+    仍失败说明是浏览器自身进程持有句柄，跨进程无法可靠删除（本脚本不 kill 用户浏览器），
+    交由系统临时目录清理，同时以 warning + `tempResidue` 字段暴露。
+    """
+    if not scratch.is_dir():
+        return []
+    last_error = ""
+    for attempt in range(max(1, attempts)):
+        try:
+            shutil.rmtree(scratch)
+            return []
+        except OSError as exc:  # pragma: no cover - 依赖浏览器进程时序，回归只断言成功路径
+            last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(0.05 * (attempt + 1))
+    if scratch.exists():
+        return [{"path": str(scratch), "error": last_error}]
+    return []
+
 
 
 def _font(size: int, *, cjk: bool = False) -> Any:
@@ -357,7 +401,22 @@ def render_mermaid_via_node(
         "--scale",
         str(scale),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    # P1-4：node 的 os.tmpdir() 与浏览器临时目录都跟随 TEMP/TMP，指向本次私有根目录，
+    # 渲染结束（成功/失败/超时）后整体删除，避免残留。
+    scratch = make_render_scratch()
+    env = {**os.environ, "TEMP": str(scratch), "TMP": str(scratch), "TMPDIR": str(scratch)}
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=env,
+        )
+    finally:
+        residue = cleanup_render_scratch(scratch)
     payload: dict[str, Any] | None = None
     try:
         payload = json.loads(completed.stdout)
@@ -366,7 +425,9 @@ def render_mermaid_via_node(
     if completed.returncode != 0 or not isinstance(payload, Mapping) or not payload.get("ok"):
         detail = payload or {"stdout": completed.stdout[-500:], "stderr": completed.stderr[-500:]}
         raise RenderFallback(f"Node 渲染失败：{detail}")
-    return dict(payload)
+    result = dict(payload)
+    result["tempResidue"] = residue
+    return result
 
 
 def collect_figures(document: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -425,6 +486,8 @@ def render_resources(
     skipped: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    temp_residues: list[dict[str, str]] = []
+    marker_checks = {"required": 0, "found": 0, "missing": 0, "tableSkipped": 0}
     changed = False
 
     def item_result(plan: Mapping[str, Any], node: Mapping[str, Any], status: str, **extra: Any) -> dict[str, Any]:
@@ -449,10 +512,27 @@ def render_resources(
         ) if markdown else False
         if chapter_path is None or not markdown:
             warnings.append({"anchorId": anchor_id, "code": "chapter_file_missing", "message": f"章节文件不存在：{node.get('filePath')}"})
-        elif not marker_found:
-            warnings.append({"anchorId": anchor_id, "code": "figure_marker_missing", "message": "章节 md 缺少 BG:FIGURE 插入标记"})
+        elif figure_type == "table":
+            # P1-4：table 按 bg-write 硬规则不写 BG:FIGURE（用 ▼表 题注定位），
+            # 不参与“缺插入标记”检查；误加的标记由 A 层审查（bg_review_script）拦截。
+            marker_checks["tableSkipped"] += 1
+        else:
+            marker_checks["required"] += 1
+            if marker_found:
+                marker_checks["found"] += 1
+            else:
+                marker_checks["missing"] += 1
+                warnings.append({"anchorId": anchor_id, "code": "figure_marker_missing", "message": "章节 md 缺少 BG:FIGURE 插入标记"})
         if figure_type == "table":
-            skipped.append(item_result(plan, node, "skipped", reason="table 无需 png"))
+            skipped.append(
+                item_result(
+                    plan,
+                    node,
+                    "skipped",
+                    reason="table 无需 png（table 无需 BG:FIGURE 插入标记，按 ▼表 题注定位）",
+                    markerExpected=False,
+                )
+            )
             continue
         if figure_type == "network":
             if network_quota == 0:
@@ -529,6 +609,7 @@ def render_resources(
                 if browser == "none":
                     raise RenderFallback("--browser none（强制降级）")
                 render_meta = render_mermaid_via_node(source_path, png_path, browser=browser)
+                temp_residues.extend(render_meta.pop("tempResidue", []) or [])
                 engine = str(render_meta.get("engine") or "chrome")
                 status = "produced"
                 if not crop:
@@ -647,6 +728,15 @@ def render_resources(
     render_fallback = bool(fallback_items)
     if render_fallback:
         warnings.append({"code": "render_fallback_summary", "message": f"渲染降级：{len(fallback_items)} 个图使用 Pillow 占位（属于降级产物，不是真实渲染）"})
+    for residue in temp_residues:
+        warnings.append(
+            {
+                "code": "render_temp_residue",
+                "message": f"渲染临时目录未能删除（多为浏览器子进程仍占用文件，退出后由系统清理）：{residue.get('path')}",
+                "path": residue.get("path"),
+                "error": residue.get("error"),
+            }
+        )
     return {
         "ok": True,
         "command": "render_resources",
@@ -656,6 +746,8 @@ def render_resources(
         "network": {"quota": network_quota, "disabled": network_quota == 0},
         "renderFallback": render_fallback,
         "fallbackCount": len(fallback_items),
+        "markerChecks": marker_checks,
+        "tempResidue": temp_residues,
         "rendered": rendered,
         "skipped": skipped,
         "failed": failed,
@@ -838,6 +930,19 @@ def run_selftest() -> dict[str, Any]:
         first = render_resources(workspace=workspace, project_dir=project_dir, browser="auto")
         rendered = {item["anchorId"]: item for item in first["rendered"]}
         skipped = {item["anchorId"]: item for item in first["skipped"]}
+        # P1-4：table 不写 BG:FIGURE，渲染不得因缺标记报 warning；table 应被跳过（无需 png）。
+        table_warnings = [item for item in first["warnings"] if item.get("anchorId") == "fig-1-1-04"]
+        if table_warnings:
+            raise AssertionError(f"table 不应产生渲染 warning：{table_warnings}")
+        if first.get("markerChecks", {}).get("tableSkipped") != 1:
+            raise AssertionError(f"markerChecks 未统计 table 跳过：{first.get('markerChecks')}")
+        if skipped.get("fig-1-1-04", {}).get("markerExpected") is not False:
+            raise AssertionError(f"table 跳过原因未标注 markerExpected=false：{skipped.get('fig-1-1-04')}")
+        # P1-4：本次渲染的私有临时目录（含浏览器 scoped_dir*/HeadlessChrome*）必须清理干净。
+        if first.get("tempResidue"):
+            raise AssertionError(f"渲染留下临时目录残留：{first['tempResidue']}")
+        checks.append("table_no_marker_warning")
+        checks.append("temp_cleanup")
         if "fig-1-1-01" not in rendered or rendered["fig-1-1-01"]["status"] not in ("produced", "fallback"):
             raise AssertionError(f"mermaid 未生成：{first['rendered']} {first['warnings']}")
         mermaid_png = project_dir / rendered["fig-1-1-01"]["resourcePath"]
@@ -945,6 +1050,34 @@ def run_selftest() -> dict[str, Any]:
         if [item["anchorId"] for item in single["rendered"]] != ["fig-1-1-02"]:
             raise AssertionError(f"--anchor 过滤不正确：{single['rendered']}")
         checks.append("anchor_filter")
+        # 反向检查：P1-4 只对 table 豁免；mermaid 缺 BG:FIGURE 仍必须报 warning。
+        marker_leaf = next(
+            node
+            for node in outline_validate.iter_preorder(outline.get("chapters") or [])
+            if any(
+                isinstance(plan, Mapping) and plan.get("anchorId") == "fig-1-1-01"
+                for plan in node.get("figurePlan") or []
+            )
+        )
+        marker_chapter = package_dir / str(marker_leaf.get("filePath"))
+        original_markdown = marker_chapter.read_text(encoding="utf-8")
+        marker_chapter.write_text(
+            original_markdown.replace("<!-- BG:FIGURE:fig-1-1-01 -->", ""),
+            encoding="utf-8",
+            newline="\n",
+        )
+        try:
+            missing_marker = render_resources(
+                workspace=workspace, project_dir=project_dir, anchor="fig-1-1-01", force=True, browser="auto"
+            )
+        finally:
+            marker_chapter.write_text(original_markdown, encoding="utf-8", newline="\n")
+        if not any(
+            item.get("code") == "figure_marker_missing" and item.get("anchorId") == "fig-1-1-01"
+            for item in missing_marker["warnings"]
+        ):
+            raise AssertionError(f"mermaid 缺标记未报 warning：{missing_marker['warnings']}")
+        checks.append("non_table_marker_required")
         return {"ok": True, "selftest": {"script": "bg_render.py", "checks": checks}}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -3,7 +3,7 @@
 
 --lock   校验 finalize 阶段/outline 后，计算 chapters md + outline.json + resources/** 的 SHA-256，
          写 `export/_frozen/manifest.json`、`_frozen/snapshot/` 快照与 `chapters/.locked`；
-         通过 `_lib/state.py` 写 `locks.draftLocked/lockedAt/lockReason`。
+         通过 `_lib/state.py` 写 `locks.draftLocked/lockedAt/lockReason`（history 记 `kind=event/action=lock` 审计事件，不是 finalize→finalize 迁移）。
 --verify 比对当前文件哈希与 manifest；被改动/缺失 → E_VALIDATE_FAILED（exit4）。
 --unlock 仅允许 `--force --reason`：归档 _frozen、删除 .locked、解除锁定并回到 optimize（R4）。
 --status 只读报告锁定/冻结清单状态。
@@ -325,6 +325,7 @@ def lock_project(
         "lockedAt": manifest["lockedAt"],
         "snapshotCount": snapshot_count,
         "lockMarker": LOCK_MARKER,
+        "historyKind": "event",
         "revision": new_state.get("revision"),
     }
 

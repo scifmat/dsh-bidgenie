@@ -35,7 +35,9 @@
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_run_manifest.py" --finalize --workspace "<ws>" --project "<projectDir>" --json
 ```
 
-- 归档：按返回 `runId` 将 JSON+MD 放到 `<workspace>/dsh/run-manifests/<runId>.json`。
+- 归档：`--finalize` 按返回 `runId` 写 `<workspace>/dsh/run-manifests/<runId>.json` + `.md`；`--start` 写 `<runId>.start.json`；验收报告统一引用 start 的 runId。
+- 中间记录（每包导出后不带 `--start/--finalize`）**复用同一 runId**：读最近的 `<runId>.start.json`，产物写成 `<runId>.snapshot-<ts>.json/.md`，不会新增第二个 runId；没有 start 记录时降级为新 runId 并返回 warning。
+- `dsh/run-manifests/_latest.json` 为实体指针（`runId/kind/updatedAt/...`），随 start/记录/finalize 原子更新；历史遗留的 `_latest.json.lock`（无实体）会被清理。
 - `--finalize` 返回 `versionDrift`/`envSnapshotAfterStart`/`envRefreshedAfterStart`（start 内）/`exitCode`；验收报告引用 runId/rootHash 与这些结论。
 - 运行中刷新过 env-check → start 记录带 `envRefreshedAfterStart`，finalize 会判 envHash 漂移/环境快照晚于 start，不视为零漂移。
 

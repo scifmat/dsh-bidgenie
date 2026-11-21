@@ -10,8 +10,10 @@ description: BidGenie 撰写前准备（F4）。当项目处于 package_prepare 
 - 只关注技术范围/技术评分；商务问题（合同分包/中小企业/资格/报价）不处理、不写入。
 - `package-meta.json` 只存包级决策/配置（7 项答案 + valueSource、字数、三类图配额、人员/设备/工期、样式、时间戳）；不复制提取内容。
 - 7 项 = 字数/人员/设备/工期/表格/流程图/终端图；**导出样式不是提问项**，默认取 `styleProfiles.tech` → `styleProfile` → `official-tech` 写 `exportStyleProfile`。
+- 工期字段语义分开（P2-9）：`schedulePlan.servicePeriod` = 合同履行期限/服务期（如「1 年」）；`schedulePlan.constructionPlan` = 施工/供货/交付工期；`startDate`/`deliveryDate` = 具体日期（YYYY-MM-DD，不编造）。auto 只在对应期限明确时填对应字段，`autoFill.autoBasis.schedulePlan` 记录映射来源；写作任务书不要引用 `constructionPlan` 当服务期。
 - 字数默认**动态**：`user-settings.defaultWordCountTier`（缺省 50000），提问卡显示实际值，并与提取要求下限取大值，不写死。
 - 图表配额是下限、上不封顶；人员/设备/工期 guided 每包必须有答案或「用默认」。
+- `qualificationGaps` 只是 **info 提示**（`blocking=false`）：按 02/08/09 资格硬项比对投标人资料，每包 ≤5 条、`missingTokens` 为整条短语；**不阻断 F4/T3**，不要据此判定缺资质。
 
 ## 偏好与选包（只问一次）
 
@@ -21,7 +23,7 @@ description: BidGenie 撰写前准备（F4）。当项目处于 package_prepare 
 
 ## guided 逐包提问
 
-- 按包逐个展示该包人员/设备/工期要求并请用户回答（或明确「用默认」）；答案/默认写入该包 `personnelPlan`/`equipmentPlan`/`schedulePlan` + `valueSource`。
+- 按包逐个展示该包人员/设备/工期要求并请用户回答（或明确「用默认」）；答案/默认写入该包 `personnelPlan`/`equipmentPlan`/`schedulePlan`（含 servicePeriod/constructionPlan）+ `valueSource`。
 - 每包 7 项汇总后展示该包摘要（字数/人员/设备/工期/三类图/未用默认项/留空项），确认后再执行该包 prepare；不合并多包摘要。
 - 人员/设备用单文本输入框，原样记录；不脱敏/不裁剪/不结构化/不编造。
 - **任一包人员/设备/工期缺失且无默认记录 → 不得 T3**，停 `package_prepare` 补齐。
@@ -29,10 +31,12 @@ description: BidGenie 撰写前准备（F4）。当项目处于 package_prepare 
 ## auto 模式
 
 - 仅「需撰写包确认」阻塞（仍只问一次）；其余 7 项不提问，`bg_prepare.py --auto` 静默填（autoValue/autoBasis），人员/设备用脚本合规描述；汇报列静默默认项与 autoFill 来源。
+- 人员描述：岗位表逐行镜像数量；表内「合计」行不当作岗位，但会以「，合计N人」追加为总量口径（招标文件声明多少就镜像多少）。
 
 ## 执行顺序（多包）
 
 1. 先对全部 `writingPackages` 执行 `bg_prepare.py --all-selected`（或循环 `--package`），逐包 `--verify`。
+   - `--all-selected` 的中间包 `readyForT3=false` 是顺序中间态：结果带 `pendingReason="sequence-in-progress"`、汇总 `pendingPackages`/`summary.note`；**以汇总 `readyForT3`（最后一包）为准**，不要误判 F4 失败。
 2. 全部通过、且 guided 逐包人员/设备/工期有答案或默认后，对 `writingPackages[0]` **显式** `transition --to outline --package "<writingPackages[0]>"`（T3，不依赖 currentPackage）。
 3. T13 回来后下一包只 `--verify` + `set-package` + 显式 T3，不重复 prepare/提问。
 4. T3 失败：全部 selected `--verify` 出缺包清单，补齐 prepare 后重试，不强行迁移。
@@ -41,13 +45,13 @@ description: BidGenie 撰写前准备（F4）。当项目处于 package_prepare 
 ## 校验与汇报
 
 - 文件存在性：project.json/state/package-meta（7 项含逐包人员设备工期）/包目录（`resources/{mermaid,terminal}`、export）；不要求 network/tables。
-- 汇报：要写的包列表、当前包字数/配额/日期、人员/设备（用户原话或 auto 合规描述）、valueSource、T3 结果。
+- 汇报：要写的包列表、当前包字数/配额/日期（servicePeriod/constructionPlan 分开写）、人员/设备（用户原话或 auto 合规描述）、valueSource、T3 结果、迁移/资质提示（info 不阻断）。
 - 下一步加载 `bg-outline`。
 
 ## 硬约束
 
-1. 不编造；无法推导留空或模糊表述。
-2. 状态/元数据只由脚本写；不手写 package-meta/目录。
+1. 不编造；无法推导留空或模糊表述（servicePeriod/constructionPlan 不互相顶替）。
+2. 状态/元数据只由脚本写；不手写 package-meta/目录。`set-package`/`lock` 在 history 记为 `kind=event` 事件（不是阶段迁移）。
 3. 不越过 package-meta；字数/配额/人员/设备/日期以后续唯一口径。
 4. 商务边界；技术范围/评分点之外不提问。
 5. 包确认只问一次；guided 逐包必问人员/设备/工期；auto 除包确认外静默默认。

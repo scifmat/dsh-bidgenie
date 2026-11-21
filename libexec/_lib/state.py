@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import jsonio, paths, schema
+from . import jsonio, paths, schema, text as text_lib
 from .errors import (
     E_ALREADY_IN_STAGE,
     E_GUARD_FAILED,
@@ -79,6 +79,10 @@ PACKAGE_VALUE_SOURCE_KEYS: tuple[str, ...] = (
 )
 PACKAGE_VALUE_SOURCE_VALUES: tuple[str, ...] = ("user", "agent-default", "extracted")
 PACKAGE_META_REL = "package-meta.json"
+#: 图表类型（与 bg_outline_validate.FIGURE_TYPES 同序；T4 配额对账用）
+FIGURE_TYPES: tuple[str, ...] = ("table", "mermaid", "network", "terminal")
+#: history 事件动作（自迁移类动作：不改变阶段，只进入 history 审计，不按 transition 统计）
+HISTORY_EVENT_ACTIONS: tuple[str, ...] = ("set_package", "lock")
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +118,81 @@ class Transition:
     from_any_active: bool = False
     handled_by_command: str = ""
     milestone: str = "M2"
+
+
+# ---------------------------------------------------------------------------
+# history 记录类型（PRD 4.8.6）：transition=阶段推进/回退；event=自迁移审计动作
+# ---------------------------------------------------------------------------
+def is_history_event(entry: Any) -> bool:
+    """判断 history 条目是**事件**而非阶段迁移（set-package/lock 等自迁移动作）。
+
+    新记录显式带 ``kind``：``transition``=阶段迁移，``event``=事件；
+    旧记录（M5.1 前）无 ``kind``：``from == to`` 的一律视为事件——正常迁移必然改变阶段，
+    旧版 set-package（无 action）与 lock_draft（action=lock_draft）都满足该特征。
+    """
+    if not isinstance(entry, Mapping):
+        return False
+    kind = entry.get("kind")
+    if kind == "event":
+        return True
+    if kind == "transition":
+        return False
+    return str(entry.get("from") or "") == str(entry.get("to") or "")
+
+
+def history_transitions(history: Any) -> list[dict[str, Any]]:
+    """只取阶段迁移记录（过滤事件；兼容无 kind 的旧记录）。"""
+    if not isinstance(history, list):
+        return []
+    return [dict(entry) for entry in history if isinstance(entry, Mapping) and not is_history_event(entry)]
+
+
+def history_events(history: Any) -> list[dict[str, Any]]:
+    """只取事件记录（set_package/lock 等自迁移审计动作）。"""
+    if not isinstance(history, list):
+        return []
+    return [dict(entry) for entry in history if isinstance(entry, Mapping) and is_history_event(entry)]
+
+
+def append_history_event(
+    state: dict[str, Any],
+    *,
+    action: str,
+    reason: str,
+    actor: str,
+    revision: int,
+    scope: str | None = None,
+    at: str | None = None,
+    detail: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """把一个自迁移动作写入 history（``kind=event`` + ``action``），不伪装成 X→X 迁移。
+
+    ``from``/``to`` 仍写当前阶段（schema 要求 stage 枚举合法），但读取方用
+    :func:`is_history_event` / :func:`history_transitions` 区分，不再误计为迁移。
+    """
+    if action not in HISTORY_EVENT_ACTIONS:
+        raise BgError(
+            E_USAGE,
+            f"未登记的历史事件动作：{action}",
+            hint=f"可用：{', '.join(HISTORY_EVENT_ACTIONS)}",
+            detail={"action": action},
+        )
+    stage = str(state.get("currentStage") or "")
+    entry: dict[str, Any] = {
+        "at": at or paths.iso_now(),
+        "from": stage,
+        "to": stage,
+        "scope": str(scope or state.get("currentScope") or "project"),
+        "actor": actor,
+        "reason": reason,
+        "action": action,
+        "kind": "event",
+        "revision": revision,
+    }
+    if detail:
+        entry["detail"] = dict(detail)
+    state.setdefault("history", []).append(entry)
+    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +685,10 @@ def _package_meta_issues(meta: Any, package_id: str) -> list[str]:
         for key in ("startDate", "deliveryDate", "constructionPlan"):
             if key not in schedule:
                 issues.append(f"schedulePlan.{key} 缺失")
+        # P2-9：servicePeriod=合同履行期限（“1 年/3 个月”），与 constructionPlan（工期/供货期）语义分开；
+        # 旧 package-meta 无该键仍兼容（不强制），有新键时必须是字符串。
+        if "servicePeriod" in schedule and not isinstance(schedule.get("servicePeriod"), str):
+            issues.append("schedulePlan.servicePeriod 必须是字符串")
     quota = meta.get("figureQuota")
     if not isinstance(quota, Mapping):
         issues.append("figureQuota 必须是对象")
@@ -788,6 +871,33 @@ def _outline_validator() -> Any:
         return importlib.import_module("bg_outline_validate")
 
 
+def _figure_quota_check(stats: Mapping[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """T4 图表配额对账：planned >= quota（下限口径，与 bg_outline_validate 一致）。
+
+    - 配额是**下限**、上不封顶：planned 多于 quota 不算失败（多出不返工）；
+    - quota=0 的类型（如已移除的 network）planned 必须为 0，避免规划了禁用类型；
+    - 返回 (是否通过, 明细)，明细含缺口/超额类型与逐类型 planned/quota。
+    """
+    planned_raw = stats.get("figurePlanned") if isinstance(stats.get("figurePlanned"), Mapping) else {}
+    quota_raw = stats.get("figureQuota") if isinstance(stats.get("figureQuota"), Mapping) else {}
+    planned = {key: int(planned_raw.get(key) or 0) for key in FIGURE_TYPES}
+    quota = {key: int(quota_raw.get(key) or 0) for key in FIGURE_TYPES}
+    deficits = {key: {"planned": planned[key], "quota": quota[key]} for key in FIGURE_TYPES if planned[key] < quota[key]}
+    over_disabled = {key: planned[key] for key in FIGURE_TYPES if quota[key] == 0 and planned[key] > 0}
+    ok = bool(quota_raw) and not deficits and not over_disabled
+    detail: dict[str, Any] = {
+        "figurePlanned": planned,
+        "figureQuota": quota,
+        "allowed": "planned >= quota（配额为下限；多出不返工）",
+    }
+    if deficits:
+        detail["deficits"] = deficits
+    if over_disabled:
+        detail["overDisabledQuota"] = over_disabled
+        detail["overDisabledHint"] = "quota=0 的图表类型不得规划；deferred 仍计入 figurePlanned，需删除或改为其它类型"
+    return ok, detail
+
+
 def guard_t4(ctx: TransitionContext) -> list[dict[str, Any]]:
     """T4 guard：outline.json strict 校验 + chapters 文件树一致 + 图表配额对账（PRD 4.3/F5.1.8）。"""
     checks: list[dict[str, Any]] = [_pending_input_check(ctx.state)]
@@ -813,7 +923,7 @@ def guard_t4(ctx: TransitionContext) -> list[dict[str, Any]]:
         outline_path is not None and outline_path.is_file(),
         {
             "path": (str(outline_path.relative_to(ctx.project_dir).as_posix()) if outline_path is not None else ""),
-            "hint": "旧项目先运行 bg_outline_apply.py --migrate-storage",
+            "hint": "旧项目直接运行 bg_outline_apply.py --materialize（自动迁移到 chapters/_outline/ 并告警）；仍可用 --migrate-storage 显式迁移",
         },
     )
     if outline_path is None or not outline_path.is_file() or package_dir is None:
@@ -854,12 +964,13 @@ def guard_t4(ctx: TransitionContext) -> list[dict[str, Any]]:
         {"blockers": tree_blockers},
     )
     stats = result.get("stats") or {}
+    quota_ok, quota_detail = _figure_quota_check(stats)
     _check(
         checks,
         "figure_quota",
-        "图表规划总数与 package-meta.figureQuota 一致",
-        stats.get("figurePlanned") == stats.get("figureQuota") and bool(stats.get("figureQuota")),
-        {"figurePlanned": stats.get("figurePlanned"), "figureQuota": stats.get("figureQuota")},
+        "图表规划数不低于 package-meta.figureQuota（配额是下限、上不封顶；quota=0 时 planned 必须为 0）",
+        quota_ok,
+        quota_detail,
     )
     _check(
         checks,
@@ -1269,7 +1380,7 @@ def effect_t7(ctx: TransitionContext, state: dict[str, Any]) -> None:
 
 
 def guard_t8(ctx: TransitionContext) -> list[dict[str, Any]]:
-    """T8 optimize→review：openCount==0、blocker/major verified 或 wontfix+确认、optimization 记录存在、轮次上限内。"""
+    """T8 optimize→review：openCount==0、blocker/major fixed/verified 或 wontfix+确认、optimization 记录存在、轮次上限内。"""
     checks: list[dict[str, Any]] = [_pending_input_check(ctx.state)]
     target, extra, package_dir, issues_doc, outline_doc, _ = _load_review_context(ctx)
     checks.extend(extra)
@@ -1293,7 +1404,7 @@ def guard_t8(ctx: TransitionContext) -> list[dict[str, Any]]:
     _check(
         checks,
         "verified_issues",
-        "blocker/major 已 verified（或 wontfix+userConfirmed）；minor 已 fixed/verified/wontfix+确认",
+        "blocker/major 已 fixed/verified（或 wontfix+userConfirmed）；minor 已 fixed/verified/wontfix+确认",
         not unverified,
         {"unverified": unverified[:20]},
     )
@@ -1317,11 +1428,8 @@ def guard_t8(ctx: TransitionContext) -> list[dict[str, Any]]:
 
 
 def _count_cjk_words(text: str) -> int:
-    clean = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    clean = re.sub(r"^#{1,6}\s+.*$", "", clean, flags=re.MULTILINE)
-    cjk = len(re.findall(r"[\u4e00-\u9fff]", clean))
-    words = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", clean))
-    return cjk + words
+    """统一字数口径（P2-10）：转发 _lib.text.count_body_words，避免多份实现漂移。"""
+    return text_lib.count_body_words(text)
 
 
 def _recompute_outline_wordcounts(ctx: TransitionContext, target: str) -> int:
@@ -1597,7 +1705,7 @@ def lock_draft(
     package_id: str | None = None,
     locked_at: str | None = None,
 ) -> dict[str, Any]:
-    """经 state 模块写 locks（唯一写者），并追加 history。"""
+    """经 state 模块写 locks（唯一写者），并把 lock 记为 history **事件**（P3-13）。"""
     project_dir_path = Path(project_dir)
     state = load_state(project_dir_path)
     now = paths.iso_now()
@@ -1609,18 +1717,16 @@ def lock_draft(
             locks["manifestPath"] = f"packages/{package_id}/{manifest_path}"
     state["locks"] = locks
     next_revision = int(state.get("revision") or 0) + 1
-    state.setdefault("history", []).append(
-        {
-            "at": now,
-            "from": state.get("currentStage"),
-            "to": state.get("currentStage"),
-            "scope": str(state.get("currentPackage") or state.get("currentScope") or "package-1"),
-            "actor": actor,
-            "reason": reason,
-            "action": "lock_draft",
-            "revision": next_revision,
-            "detail": {"rootHash": root_hash},
-        }
+    # P3-13：lock 是自迁移动作，记为 event（不是 finalize→finalize 迁移）
+    append_history_event(
+        state,
+        action="lock",
+        reason=reason,
+        actor=actor,
+        revision=next_revision,
+        scope=package_id or str(state.get("currentPackage") or state.get("currentScope") or "package-1"),
+        at=now,
+        detail={"rootHash": root_hash, "manifestPath": locks.get("manifestPath")},
     )
     state["revision"] = next_revision
     state["updatedAt"] = now
@@ -1658,6 +1764,7 @@ def unlock_draft(
             "actor": actor,
             "reason": reason,
             "action": "unlock_draft",
+            "kind": "transition",
             "revision": next_revision,
             "detail": {"previousLock": previous},
         }
@@ -1687,8 +1794,8 @@ def _completed_packages(project: Mapping[str, Any], state: Mapping[str, Any]) ->
     for package, entry in _package_progress(project).items():
         if isinstance(entry, Mapping) and str(entry.get("status") or "") == "completed":
             completed.add(package)
-    for entry in state.get("history") or []:
-        if isinstance(entry, Mapping) and str(entry.get("to") or "") == "completed" and str(entry.get("scope") or "").startswith("package-"):
+    for entry in history_transitions(state.get("history")):
+        if str(entry.get("to") or "") == "completed" and str(entry.get("scope") or "").startswith("package-"):
             completed.add(str(entry["scope"]))
     if state.get("currentStage") == "completed" and str(state.get("currentPackage") or ""):
         completed.add(str(state["currentPackage"]))
@@ -2280,6 +2387,7 @@ def perform_transition(
         "scope": scope,
         "actor": actor,
         "reason": reason or transition.title,
+        "kind": "transition",
         "revision": new_revision,
     }
     new_state["history"] = list(new_state.get("history") or []) + [history_entry]
@@ -2448,19 +2556,21 @@ def set_package(
     new_state["currentPackage"] = package
     new_state["currentScope"] = package
     new_state["revision"] = int(state.get("revision") or 1) + 1
-    new_state["updatedAt"] = paths.iso_now()
+    now = paths.iso_now()
+    new_state["updatedAt"] = now
     new_state["updatedBy"] = "script:bg_state.py"
+    history_entry: dict[str, Any] | None = None
     if record_history:
-        new_state.setdefault("history", []).append(
-            {
-                "at": new_state["updatedAt"],
-                "from": stage,
-                "to": stage,
-                "scope": package,
-                "actor": actor,
-                "reason": f"切换当前包：{state.get('currentPackage') or '-'} → {package}",
-                "revision": new_state["revision"],
-            }
+        # P3-13：set-package 是自迁移动作，记为 event（不是 package_prepare→package_prepare 迁移）
+        history_entry = append_history_event(
+            new_state,
+            action="set_package",
+            reason=f"切换当前包：{state.get('currentPackage') or '-'} → {package}",
+            actor=actor,
+            revision=new_state["revision"],
+            scope=package,
+            at=now,
+            detail={"from": state.get("currentPackage"), "to": package, "stage": stage},
         )
     write_state(project_dir, new_state, lock_timeout=lock_timeout)
     sync_registry_mirror(workspace, new_state, project, lock_timeout=lock_timeout)
@@ -2471,6 +2581,8 @@ def set_package(
         "currentScope": package,
         "revision": new_state["revision"],
         "changed": [f"{project_dir.name}/state.json", "dsh/registry.json"],
+        "historyKind": "event",
+        "historyEntry": history_entry,
         "allowedNext": allowed_next(new_state, project),
     }
 
@@ -2515,6 +2627,7 @@ def abort_project(
         "scope": state.get("currentScope"),
         "actor": actor,
         "reason": str(reason).strip(),
+        "kind": "transition",
         "revision": new_revision,
     }
     new_state["history"] = list(new_state.get("history") or []) + [history_entry]
@@ -2557,8 +2670,8 @@ def resume_project(
         )
     previous_stage = ""
     previous_scope = ""
-    for entry in reversed(state.get("history") or []):
-        if isinstance(entry, Mapping) and entry.get("to") == "aborted":
+    for entry in reversed(history_transitions(state.get("history"))):
+        if entry.get("to") == "aborted":
             previous_stage = str(entry.get("from") or "")
             previous_scope = str(entry.get("scope") or "")
             break
@@ -2588,6 +2701,7 @@ def resume_project(
         "scope": previous_scope or state.get("currentScope"),
         "actor": actor,
         "reason": reason,
+        "kind": "transition",
         "revision": new_revision,
     }
     new_state["history"] = list(new_state.get("history") or []) + [history_entry]
@@ -2634,6 +2748,8 @@ def status_summary(workspace: Path, project_dir: Path) -> dict[str, Any]:
         "envCheckSummary": state.get("envCheckSummary"),
         "allowedNext": allowed_next(state, project),
         "historyCount": len(state.get("history") or []),
+        "transitionCount": len(history_transitions(state.get("history"))),
+        "eventCount": len(history_events(state.get("history"))),
         "updatedAt": state.get("updatedAt"),
         "updatedBy": state.get("updatedBy"),
         "workspace": str(workspace),
