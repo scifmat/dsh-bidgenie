@@ -56,6 +56,9 @@
 
 渲染前源文件：mermaid `.mmd`、terminal `.txt`（写在 `resources/<type>/<anchorId>.*`）。
 
+- **渲染只由主 Agent 执行**（合并全部批次后跑一次 `bg_render.py`）；子智能体只写 `.mmd/.txt`，不跑 `bg_render`、不在包内留 png。
+- 合并输出 `wordCountDiagnostics`：全包 `deviationPct` 超 ±10% 时，按 `chaptersOverTarget/UnderTarget` 定点调整后再 T5。
+
 ## 异常与时限
 
 | 场景 | 处理 |
@@ -64,6 +67,8 @@
 | 重试仍 blocked | 主 Agent 补上下文/问用户/确认 skipped（写 skipReason）；T5 前清零 |
 | 依赖环/缺失 | 停止正文，回大纲修复 |
 | 字数 <90% | 先重派并给扩写要点；仍不足如实记录留审查 |
+| 全包字数 >±10% | 按 `wordCountDiagnostics.chaptersOverTarget/UnderTarget` 定点精简/扩写，再 T5 |
+| 子智能体留下临时 png/目录 | 交付前删除；渲染统一由主 Agent 执行 |
 | 标题越级 | 合并脚本报错 → 重写；连续 2 次记 blocker |
 | 图表渲染失败 | 保留源文件、`figures[].status="failed"`、记 issues |
 | 沙箱权限失败 | 提示切换 danger-full-access/授权工作区；不静默降级、不伪造 png |

@@ -40,6 +40,7 @@
 - `dsh/run-manifests/_latest.json` 为实体指针（`runId/kind/updatedAt/...`），随 start/记录/finalize 原子更新；历史遗留的 `_latest.json.lock`（无实体）会被清理。
 - `--finalize` 返回 `versionDrift`/`envSnapshotAfterStart`/`envRefreshedAfterStart`（start 内）/`exitCode`；验收报告引用 runId/rootHash 与这些结论。
 - 运行中刷新过 env-check → start 记录带 `envRefreshedAfterStart`，finalize 会判 envHash 漂移/环境快照晚于 start，不视为零漂移。
+- **run 中途升级过插件/脚本**（start 与 finalize 的 pluginHash/scriptsHash 不同）→ `versionDrift=true`、finalize 退出码 4 属预期；验收以“start 后未升级”的干净运行为准，不要把它当成流程缺陷。
 
 ## T10 与 cleanup
 

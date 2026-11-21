@@ -693,6 +693,61 @@ def merge_selected(
     updated_outline["stats"].setdefault("plannedWordTotal", base_stats.get("plannedWordTotal"))
     updated_outline["stats"].setdefault("parentCount", base_stats.get("parentCount"))
     updated_outline["stats"].setdefault("leafCount", base_stats.get("leafCount"))
+
+    # 字数总量诊断（VM 复测观察 1/2）：合并后立即给出全包偏差告警 + 逐章超/欠目标清单，
+    # 让 Agent 在 T5 前就能发现“每章都顶 120% 导致全包 +16%”并定点精简，少走一轮 optimize。
+    expected_total = int(package_meta.get("expectedWordCount") or 0) or int(base_stats.get("plannedWordTotal") or 0)
+    deviation_pct = round((written - expected_total) / expected_total * 100, 2) if expected_total and written else 0.0
+    word_total_warning = ""
+    if expected_total and written and abs(deviation_pct) > 10.0:
+        word_total_warning = (
+            f"全包实测字数 {written} vs 计划 {expected_total}（{deviation_pct:+.1f}%），超出 ±10% 容差；"
+            "建议按 wordCountDiagnostics.chaptersOverTarget/UnderTarget 定点调整后再 T5"
+        )
+        word_count_warnings.append(
+            {
+                "code": "word_total_deviation",
+                "expected": expected_total,
+                "actual": written,
+                "deviationPct": deviation_pct,
+                "message": word_total_warning,
+            }
+        )
+    chapter_word_diagnostics: list[dict[str, Any]] = []
+    for node in leaf_nodes(updated_outline):
+        completion = node.get("completion") if isinstance(node.get("completion"), Mapping) else {}
+        if str(completion.get("status") or "") != "done":
+            continue
+        target = int(node.get("wordTarget") or 0)
+        measured = _chapter_body_word_count(package_dir, node)
+        if not target or measured is None:
+            continue
+        delta = measured - target
+        chapter_word_diagnostics.append(
+            {
+                "chapterId": str(node.get("id") or ""),
+                "title": str(node.get("title") or ""),
+                "wordTarget": target,
+                "actual": measured,
+                "delta": delta,
+                "pct": round(delta / target * 100, 1),
+            }
+        )
+    chapters_over = sorted((item for item in chapter_word_diagnostics if item["delta"] > 0), key=lambda item: item["delta"], reverse=True)[:10]
+    chapters_under = sorted((item for item in chapter_word_diagnostics if item["delta"] < 0), key=lambda item: item["delta"])[:10]
+    word_count_diagnostics = {
+        "expectedTotal": expected_total,
+        "actualTotal": written,
+        "deviationPct": deviation_pct,
+        "withinTolerance": bool(expected_total) and abs(deviation_pct) <= 10.0,
+        "warning": word_total_warning,
+        "chaptersMeasured": len(chapter_word_diagnostics),
+        "overTargetCount": sum(1 for item in chapter_word_diagnostics if item["delta"] > 0),
+        "underTargetCount": sum(1 for item in chapter_word_diagnostics if item["delta"] < 0),
+        "chaptersOverTarget": chapters_over,
+        "chaptersUnderTarget": chapters_under,
+    }
+
     idempotent = not merged
     # 除 completion 变化外，supplementTables 清理/字数口径复算也可能需要落盘；
     # 幂等语义 = 本次没有需要落盘的语义变化（重复合并同一结果必须不写、不备份）。
@@ -742,6 +797,7 @@ def merge_selected(
         "supplementTableCount": len(updated_outline.get("supplementTables") or []),
         "supplementTablesDropped": {"plannedTableEntries": planned_table_skips, "duplicates": duplicate_supplements},
         "wordCountWarnings": word_count_warnings,
+        "wordCountDiagnostics": word_count_diagnostics,
         "currentStage": state.get("currentStage"),
         "revision": state.get("revision"),
         "note": "只更新 outline.completion/reviewState/summary/wordCount 与 stats；state.json 不变（单写者）",
@@ -834,6 +890,12 @@ def verify_all_payload(
         else:
             findings.append({"code": "status_invalid", "chapterId": chapter_id, "message": f"非法 completion.status：{status}"})
     stats = outline_validate.build_stats(outline, package_meta)
+    expected_total = int(package_meta.get("expectedWordCount") or 0) or int(stats.get("plannedWordTotal") or 0)
+    written_total = int(((outline.get("stats") or {}).get("writtenWordTotal")) or 0)
+    deviation_pct = round((written_total - expected_total) / expected_total * 100, 2) if expected_total and written_total else 0.0
+    total_warnings: list[str] = []
+    if expected_total and written_total and abs(deviation_pct) > 10.0:
+        total_warnings.append(f"全包实测字数 {written_total} vs 计划 {expected_total}（{deviation_pct:+.1f}%），超出 ±10% 容差")
     return {
         "ok": True,
         "command": "chapter_merge",
@@ -845,6 +907,13 @@ def verify_all_payload(
         "validForT5": not findings,
         "leafCount": len(nodes),
         "findings": findings,
+        "warnings": total_warnings,
+        "wordCountTotal": {
+            "expectedTotal": expected_total,
+            "actualTotal": written_total,
+            "deviationPct": deviation_pct,
+            "withinTolerance": bool(expected_total) and abs(deviation_pct) <= 10.0,
+        },
         "stats": stats,
         "reviewLoop": state.get("reviewLoop"),
     }
@@ -1052,6 +1121,17 @@ def run_selftest() -> dict[str, Any]:
         if updated["stats"].get("reportedWordTotal") != 1800 or updated["stats"].get("wordCountBasis") != "review":
             raise AssertionError(f"stats 字数口径元信息不正确：{updated['stats']}")
         checks.append("merge_done")
+        diagnostics = merged.get("wordCountDiagnostics") or {}
+        if (
+            not diagnostics
+            or int(diagnostics.get("expectedTotal") or 0) <= 0
+            or int(diagnostics.get("actualTotal") or 0) != measured_first
+            or int(diagnostics.get("chaptersMeasured") or 0) < 1
+            or not isinstance(diagnostics.get("chaptersOverTarget"), list)
+            or not isinstance(diagnostics.get("chaptersUnderTarget"), list)
+        ):
+            raise AssertionError(f"字数总量诊断缺失或不正确：{diagnostics}")
+        checks.append("wordcount_diagnostics")
         checks.append("supplement_planned_excluded")
         checks.append("wordcount_review_basis")
         backups_before = len(list((package_dir / "chapters/_outline").glob("outline.json.bak-*")))
@@ -1094,6 +1174,9 @@ def run_selftest() -> dict[str, Any]:
         verify_ok = verify_all_payload(workspace=workspace, project_dir=project_dir)
         if not verify_ok["allDone"]:
             raise AssertionError(f"全部完成后 verify-all 仍失败：{verify_ok['findings']}")
+        total_info = verify_ok.get("wordCountTotal") or {}
+        if int(total_info.get("expectedTotal") or 0) <= 0 or "withinTolerance" not in total_info:
+            raise AssertionError(f"verify-all 缺少全包字数偏差信息：{total_info}")
         checks.append("verify_all")
         final_supplements = [item.get("caption") for item in jsonio.read_json(outline_file).get("supplementTables") or []]
         if final_supplements != ["真实补充表"]:

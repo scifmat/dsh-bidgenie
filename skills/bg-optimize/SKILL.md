@@ -27,6 +27,8 @@ description: BidGenie 技术方案优化（F6.4/F6.5）。当项目处于 optimi
 2. 每问题：`fixing` → 修改 → `fixed` + `resolutionNote`（做了什么/文件/前后字数）；每批生成 `rounds/round-<k>.optimization.json`。
 3. blocker 必修复；无法在现有大纲内修复 → 停走 R1；major 补内容/换图；minor 微调。
 4. 允许统一口径（响应时限、自设指标、模板化开头），但必须记录统一前后与涉及章节，不静默、不扩范围。
+5. **字数类问题按诊断定点修**：先看 `bg_chapter_merge.py` 输出的 `wordCountDiagnostics.chaptersOverTarget/UnderTarget`（或 review 的逐章字数），只改超出目标最多的章节；不要整包重写。
+6. **优化子智能体不渲染 png**：只改章节 md、`.mmd`、`.txt` 源文件；不要运行 `bg_render.py`，也不要在包内/临时目录留下预览 png。需要预览时由主 Agent 在全部修复后统一渲染一次，并清理临时产物。
 
 ## M6 遗留专项
 
@@ -47,6 +49,7 @@ description: BidGenie 技术方案优化（F6.4/F6.5）。当项目处于 optimi
 3. 锁定态禁止写正文（`E_LOCKED`）。
 4. 状态只由脚本写；T8 前置 open 清零 + check 通过。
 5. 文风引用 `bg-writing-style`；不承诺 package-meta 之外的人/设备/日期。
+6. 渲染只由主 Agent 执行；子智能体不产 png、不留临时文件。
 
 ## 汇报
 

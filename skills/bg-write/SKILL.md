@@ -22,21 +22,23 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 
 1. **正文**：写 `filePath`；首行标题 `#`×level；正文标题只允许 level+1 及以内；表格用真实 Markdown，题注在表上方 `▼表<表名>`，**table 不写 `BG:FIGURE` 标记**；图/终端写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`，不嵌图片。
 2. **章节结果**：每章写 `chapters/_results/<chapterId>.chapter-result.json`（status/wordCount/summary/criterionRefs/figures/tables/issues）。
-3. **图表**：mermaid `.mmd`、terminal `.txt` → `bg_render.py` 渲染 png；配额是最低值、上不封顶，多出允许不返工；失败保留源文件并记 issues。
-4. **沙箱**：渲染/写入因 workspace-write 权限失败（EPERM）→ 停止并提示用户切换 DSH 文件策略为 **danger-full-access** 或授权工作区后重试；不静默降级、不伪造 png。
-5. 只写本批各章文件；不改 outline.json、不写其他批次、不删资源。
+3. **图表源码**：mermaid `.mmd`、terminal `.txt` 写到 `resources/<type>/<anchorId>.*`；**不要运行 `bg_render.py`**——渲染统一由主 Agent 在整批合并后执行，避免并发写 `render-manifest.json`、避免包内 png 与临时目录残留。子智能体确需本地预览只能生成临时文件，交付前必须删除，不得留下 png/临时目录。
+4. **沙箱**：写入因 workspace-write 权限失败（EPERM）→ 停止并提示用户切换 DSH 文件策略为 **danger-full-access** 或授权工作区后重试；不静默降级、不伪造 png。
+5. 只写本批各章文件；不改 outline.json、不写其他批次、不删资源、不渲染 png。
 
 ## 口径（字数 / 表格 / summary）
 
 - **字数 = 审查口径**：汉字逐个计数 + ASCII 连续词（如 `2026-11-21`、`PLC_01` 各记 1 个词），标点与空白不计；统计时去掉 Markdown 标题行与 `<!-- ... -->` 注释。`chapter-result.wordCount` 必须用这个口径；合并脚本 `bg_chapter_merge.py` 会再按章节 md 复核，并以该口径写 `outline.stats.writtenWordTotal`（导出/概览同口径）。
-- **字数目标区间是 90%–120%**（低于 90% 需扩写，高于 120% 需精简，审查 A 层会拦）。
+- **字数目标区间是 90%–120%**（低于 90% 需扩写，高于 120% 需精简，审查 A 层会拦）。**全包合计以 ±10% 为验收口径**：单章建议按 95%–110% 写，不要系统性顶到 118%–120%（16 章都顶上限会让全包 +16%，多花一轮优化）。
+- **合并后先看字数诊断**：`bg_chapter_merge.py` 输出 `wordCountDiagnostics`（`expectedTotal/actualTotal/deviationPct/chaptersOverTarget/chaptersUnderTarget`）；全包超 ±10% 或超目标章节较多时，先按清单定点精简/扩写再进 T5。
 - **summary 的 200–400 是字符长度 `len(str)`（含标点），不是字数**；两者不要混用。
 - **表格注册**：`chapter-result.tables[]` 登记本章所有 Markdown 表；属于 figurePlan 的“计划表”必须带 `anchorId`（或与 figurePlan 的 `caption` 完全一致），合并脚本只在 `outline.supplementTables` 登记真正的补充表，不会把计划表重复登记成 `sup-*`。计划表不写 `BG:FIGURE`，误加会被 A 层审查拦截、导出也会跳过该标记并给 warning。
 
 ## 合并与 T5
 
 - 每批结束调 `bg_chapter_merge.py`；检查各章 completion：done 继续，blocked 重试该章 ≤2 次，仍 blocked 交主 Agent。
-- 合并脚本会重算 `outline.stats`：`writtenWordTotal` 按章节 md 的审查口径复算（同时记 `reportedWordTotal` 供对照）、清理 `supplementTables` 里的计划表重复登记；`wordCountWarnings` 提示“上报字数与实测偏差 >20%”的章节。
+- 合并脚本会重算 `outline.stats`：`writtenWordTotal` 按章节 md 的审查口径复算（同时记 `reportedWordTotal` 供对照）、清理 `supplementTables` 里的计划表重复登记；`wordCountWarnings` 提示“上报字数与实测偏差 >20%”的章节，`wordCountDiagnostics` 给出全包偏差与逐章超/欠目标清单。
+- 全包偏差 >±10% 时先按诊断清单定点调整，再进入 T5；避免“全包超额”被审查 A 层记为 major 后才返工。
 - 全部 leaf 为 done/skipped、无 blocked → `bg_chapter_merge.py --verify-all` → `bg_state.py check --to review` → `transition --to review`（T5）。
 - post-check 断言 `currentStage=="review"`；不成立报 `E_STATE_CORRUPT`。
 
@@ -47,7 +49,7 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 3. 不编造事实；不承诺 package-meta 之外的人/设备/日期/品牌。
 4. 不自引用、不写敏感信息。
 5. 层级不越级；题注表上/图下、不带编号；table 不写 BG:FIGURE，mermaid/terminal 才写标记。
-6. 图表配额是下限、可多不可少；多出不返工；渲染失败保留源并记录。
+6. 图表配额是下限、可多不可少；多出不返工；**渲染统一由主 Agent 执行**，子智能体只交 `.mmd/.txt` 源文件并清理临时预览产物。
 7. 状态只由脚本写；T5 前置 `--verify-all` + check 通过。
 8. 单批 60 分钟（单章约 20 分钟）上限；超出分批/次日继续，状态可恢复。
 
