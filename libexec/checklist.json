@@ -187,7 +187,7 @@
     {
       "id": "browser_renderer",
       "label": "图表渲染",
-      "description": "能否把流程图渲染成图片",
+      "description": "能否把示意图（Mermaid）渲染成图片",
       "required": false,
       "itemVersion": "1.0",
       "check": "检测 Chrome/Edge + 内置 assets/mermaid/mermaid.min.js",

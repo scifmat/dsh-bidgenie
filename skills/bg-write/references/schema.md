@@ -11,7 +11,7 @@
   "summary": "响应『前端设备运维』评审点；关键承诺/数据；与 1-3-2 衔接。",
   "criterionRefs": ["C-03"],
   "figures": [
-    { "anchorId": "fig-1-3-1-01", "type": "mermaid", "caption": "前端设备运维流程", "status": "produced",
+    { "anchorId": "fig-1-3-1-01", "type": "mermaid", "subtype": "flowchart", "caption": "前端设备运维流程", "status": "produced",
       "resourcePath": "resources/mermaid/fig-1-3-1-01.png", "sourcePath": "resources/mermaid/fig-1-3-1-01.mmd" }
   ],
   "tables": [ { "caption": "前端设备巡检项", "rows": 6 } ],
@@ -35,7 +35,7 @@
   "chapters": [
     { "chapterId": "1-3-1", "title": "…", "level": 3, "filePath": "…", "criterionRefs": ["C-03"],
       "contentRequirements": ["…"], "wordTarget": 1800,
-      "figurePlan": [ { "anchorId": "fig-1-3-1-01", "type": "mermaid", "caption": "…" } ],
+      "figurePlan": [ { "anchorId": "fig-1-3-1-01", "type": "mermaid", "subtype": "flowchart", "caption": "…" } ],
       "context": { "dependencySummaries": {}, "projectFacts": "…", "userPlans": "…" } }
   ],
   "constraints": { "noSelfReference": true, "noSensitive": true, "noBusinessMaterial": true }
@@ -54,7 +54,7 @@
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_state.py" transition --to review --package "package-<N>" --workspace "<ws>" --project "<projectDir>" --json
 ```
 
-渲染前源文件：mermaid `.mmd`、terminal `.txt`（写在 `resources/<type>/<anchorId>.*`）。
+渲染前源文件：mermaid `.mmd`（首行类型与大纲 `subtype` 一致）、terminal `.txt`（写在 `resources/<type>/<anchorId>.*`）。图表生成前加载 `bg-figures`；terminal 可按大纲在一章写多张，但不得新增未规划的图。
 
 - **渲染只由主 Agent 执行**（合并全部批次后跑一次 `bg_render.py`）；子智能体只写 `.mmd/.txt`，不跑 `bg_render`、不在包内留 png。
 - 合并输出 `wordCountDiagnostics`：全包 `deviationPct` 超 ±10% 时，按 `chaptersOverTarget/UnderTarget` 定点调整后再 T5。

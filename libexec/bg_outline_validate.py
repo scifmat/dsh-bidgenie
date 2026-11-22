@@ -33,6 +33,20 @@ from _lib import errors, jsonio, paths, state as state_lib
 SCHEMA_VERSION = "1.0"
 FIGURE_TYPES: tuple[str, ...] = ("table", "mermaid", "network", "terminal")
 FIGURE_QUOTA_KEYS = FIGURE_TYPES
+MERMAID_SUBTYPES: tuple[str, ...] = (
+    "flowchart",
+    "sequence",
+    "gantt",
+    "state",
+    "er",
+    "timeline",
+    "mindmap",
+    "block",
+    "architecture",
+    "quadrant",
+    "pie",
+    "xychart",
+)
 PRIORITIES = ("P0", "P1", "P2")
 COMPLETION_STATUS = ("pending", "writing", "done", "skipped", "blocked")
 REVIEW_COVERAGE = ("unreviewed", "pass", "weak", "missing")
@@ -259,6 +273,7 @@ def build_figure_index(document: Mapping[str, Any]) -> list[dict[str, Any]]:
                 {
                     "anchorId": plan.get("anchorId"),
                     "type": plan.get("type"),
+                    "subtype": plan.get("subtype"),
                     "chapterId": node.get("id"),
                     "caption": plan.get("caption"),
                     "status": plan.get("status") or "planned",
@@ -405,6 +420,7 @@ def _validate_figures(
         elif not is_leaf and plans:
             _add(findings, "figure_plan_on_parent", "blocker", f"{pointer}/figurePlan", "图表规划只允许出现在末级章节")
         else:
+            terminal_count = 0
             for position, plan in enumerate(plans):
                 plan_pointer = f"{pointer}/figurePlan/{position}"
                 if not isinstance(plan, Mapping):
@@ -415,6 +431,26 @@ def _validate_figures(
                     _add(findings, "figure_type_invalid", "blocker", f"{plan_pointer}/type", f"图表类型必须是 {FIGURE_TYPES}")
                 else:
                     figure_counts[str(figure_type)] += 1
+                    if figure_type == "terminal":
+                        terminal_count += 1
+                    if figure_type == "mermaid":
+                        subtype = plan.get("subtype")
+                        if not isinstance(subtype, str) or subtype not in MERMAID_SUBTYPES:
+                            _add(
+                                findings,
+                                "figure_subtype_invalid",
+                                "blocker",
+                                f"{plan_pointer}/subtype",
+                                f"mermaid 必须指定 subtype，取值：{MERMAID_SUBTYPES}",
+                            )
+                    elif plan.get("subtype") not in (None, ""):
+                        _add(
+                            findings,
+                            "figure_subtype_unexpected",
+                            "warning",
+                            f"{plan_pointer}/subtype",
+                            "只有 type=mermaid 的图表需要 subtype；table/terminal 不应填写",
+                        )
                 anchor = plan.get("anchorId")
                 if not isinstance(anchor, str) or not anchor:
                     _add(findings, "figure_anchor_missing", "blocker", f"{plan_pointer}/anchorId", "anchorId 不能为空")
@@ -441,6 +477,14 @@ def _validate_figures(
                 status = plan.get("status", "planned")
                 if status not in ("planned", "deferred", "done"):
                     _add(findings, "figure_status_invalid", "blocker", f"{plan_pointer}/status", "status 必须是 planned/deferred/done")
+            if terminal_count > 4:
+                _add(
+                    findings,
+                    "figure_terminal_too_many",
+                    "warning",
+                    f"{pointer}/figurePlan",
+                    f"本章 terminal 规划 {terminal_count} 张，超过建议上限 4 张；请确认是否应拆到其他章节",
+                )
     anchors = node.get("insertAnchors")
     if anchors is not None:
         if not isinstance(anchors, list):
@@ -842,10 +886,21 @@ def validate_document(
                 f"ΣwordTarget={stats['plannedWordTotal']} 与 totalWordTarget={total_target} 偏差 {stats['wordDeltaPct']}%（容差 ±1%）",
                 "重调 wordTarget（apply 会按 F5.1.5 重新分配）",
             )
-    # 图表配额对账
+    # 图表配额对账：table/mermaid 是下限；terminal 是参考值（0 仍禁用）
     quota = stats["figureQuota"]
     for key in FIGURE_TYPES:
         planned = stats["figurePlanned"][key]
+        if key == "terminal":
+            if quota[key] == 0 and planned > 0:
+                _add(
+                    findings,
+                    "figure_quota_mismatch",
+                    "blocker",
+                    "/chapters",
+                    f"terminal 参考值为 0，但规划了 {planned} 张；请删除 terminal 规划或回写 package-meta",
+                )
+            # quota>0 时 terminal 少于参考值不报错（参考值，不强制凑数）
+            continue
         if planned < quota[key]:
             _add(
                 findings,
@@ -861,7 +916,7 @@ def validate_document(
         if not isinstance(figure_index, list):
             _add(findings, "figure_index_missing", "blocker", "/figureIndex", "缺少 figureIndex（apply 生成）")
         else:
-            core_keys = ("anchorId", "type", "chapterId", "caption", "status")
+            core_keys = ("anchorId", "type", "subtype", "chapterId", "caption", "status")
             expected_core = [{key: item.get(key) for key in core_keys} for item in expected_figures]
             actual_core = [
                 {key: item.get(key) for key in core_keys} for item in figure_index if isinstance(item, Mapping)
@@ -1220,7 +1275,7 @@ def _golden_document() -> dict[str, Any]:
                           {"anchorId": "fig-1-1-02", "type": "table", "purpose": "需求清单", "caption": "需求清单", "status": "planned"}]),
                     leaf("1-2", "项目目标分析", 2, "CR-001", 3, 10000,
                          [{"anchorId": "fig-1-2-01", "type": "table", "purpose": "目标指标", "caption": "目标指标表", "status": "planned"},
-                          {"anchorId": "fig-1-2-02", "type": "mermaid", "purpose": "目标关系", "caption": "项目目标关系", "status": "planned"}]),
+                          {"anchorId": "fig-1-2-02", "type": "mermaid", "subtype": "flowchart", "purpose": "目标关系", "caption": "项目目标关系", "status": "planned"}]),
                     leaf("1-3", "运维重点分析", 3, "CR-001", 3, 10000,
                          [{"anchorId": "fig-1-3-01", "type": "terminal", "purpose": "巡检命令", "caption": "巡检命令示例", "status": "planned"},
                           {"anchorId": "fig-1-3-02", "type": "terminal", "purpose": "诊断命令", "caption": "故障诊断命令示例", "status": "planned"}]),
@@ -1240,8 +1295,8 @@ def _golden_document() -> dict[str, Any]:
                     leaf("2-1", "巡检内容", 1, "CR-002", 2, 8000,
                          [{"anchorId": "fig-2-1-01", "type": "table", "purpose": "巡检清单", "caption": "巡检内容清单", "status": "planned"}]),
                     leaf("2-2", "巡检方式", 2, "CR-002", 2, 8000,
-                         [{"anchorId": "fig-2-2-01", "type": "mermaid", "purpose": "巡检流程", "caption": "巡检流程", "status": "planned"},
-                          {"anchorId": "fig-2-2-02", "type": "mermaid", "purpose": "组织关系", "caption": "巡检组织关系", "status": "planned"}]),
+                         [{"anchorId": "fig-2-2-01", "type": "mermaid", "subtype": "flowchart", "purpose": "巡检流程", "caption": "巡检流程", "status": "planned"},
+                          {"anchorId": "fig-2-2-02", "type": "mermaid", "subtype": "mindmap", "purpose": "组织关系", "caption": "巡检组织关系", "status": "planned"}]),
                     leaf("2-3", "巡检周期", 3, "CR-002", 2, 8000,
                          [{"anchorId": "fig-2-3-01", "type": "terminal", "purpose": "巡检终端", "caption": "巡检终端示例", "status": "planned"},
                           {"anchorId": "fig-2-3-02", "type": "terminal", "purpose": "巡检记录", "caption": "巡检记录输出", "status": "planned"}]),
@@ -1262,8 +1317,8 @@ def _golden_document() -> dict[str, Any]:
                          [{"anchorId": "fig-3-1-01", "type": "table", "purpose": "响应分级", "caption": "应急响应分级", "status": "planned"},
                           {"anchorId": "fig-3-1-02", "type": "terminal", "purpose": "响应命令", "caption": "应急响应命令", "status": "planned"}]),
                     leaf("3-2", "重大故障处理", 2, "CR-003", 4, 10000,
-                         [{"anchorId": "fig-3-2-01", "type": "mermaid", "purpose": "故障流程", "caption": "重大故障处理流程", "status": "planned"},
-                          {"anchorId": "fig-3-2-02", "type": "mermaid", "purpose": "故障树", "caption": "故障定位路径", "status": "planned"}]),
+                         [{"anchorId": "fig-3-2-01", "type": "mermaid", "subtype": "flowchart", "purpose": "故障流程", "caption": "重大故障处理流程", "status": "planned"},
+                          {"anchorId": "fig-3-2-02", "type": "mermaid", "subtype": "mindmap", "purpose": "故障树", "caption": "故障定位路径", "status": "planned"}]),
                 ],
             },
         ],
@@ -1306,6 +1361,7 @@ def run_selftest() -> dict[str, Any]:
         block(lambda doc: doc["chapters"][0]["children"][0].__setitem__("wordTarget", 0), "word_target_below_floor")
         block(lambda doc: doc["chapters"][0]["children"][0]["figurePlan"].pop(), "figure_quota_mismatch")
         block(lambda doc: doc["chapters"][0]["children"][1]["figurePlan"][0].__setitem__("anchorId", "fig-9-9-01"), "figure_anchor_format")
+        block(lambda doc: doc["chapters"][0]["children"][1]["figurePlan"][1].pop("subtype"), "figure_subtype_invalid")
         block(lambda doc: doc["chapters"][0]["children"][0].__setitem__("dependsOn", ["3-2"]), "depends_on_order")
         block(lambda doc: doc["chapters"][0]["children"][0].__setitem__("id", "1-9"), "id_path_mismatch")
         block(lambda doc: doc["criterionIndex"][0].__setitem__("criterionId", "CR-999"), "criterion_ref_unknown")

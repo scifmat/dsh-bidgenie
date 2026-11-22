@@ -55,7 +55,7 @@ issue：`issueId(RV-<round>-<seq4>)/layer(script|coverage|graphic)/type/severity
 
 ## 分层与短路
 
-- A 脚本：结构、完整性、标题越级、字数、图表（table 只校题注/行列；**table 出现 BG:FIGURE 记 major `marker_format`（A 层拦截，与 bg-write 硬规则一致）**；mermaid/terminal 校标记↔figureIndex+png+源文件）、题注、引用、JSON、禁用内容、手工修改检测。
+- A 脚本：结构、完整性、标题越级、字数、图表（table 只校题注/行列；**table 出现 BG:FIGURE 记 major `marker_format`（A 层拦截，与 bg-write 硬规则一致）**；mermaid/terminal 校标记↔figureIndex+png+源文件）、**图表机检读取 render-manifest 的 layout（字号/宽高/行数）**、题注、引用、JSON、禁用内容、手工修改检测。
 - A blocker → 短路 B/C（只看仍未关闭的 blocker）；B 覆盖度语义（逐章 summary+criterionRefs，pass/weak/missing）；C 图文语义（脚本机检 + 语义判断）。
 - C 无资源/无图表 → 直接通过。
 

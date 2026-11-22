@@ -4598,7 +4598,7 @@ window.__ModuleLoader__.load({
                 h(
                   'label',
                   { key: key, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--bgp-fg2)' } },
-                  { table: '表\u3000格', mermaid: '流程图', terminal: '终端图' }[key],
+                  { table: '表\u3000格', mermaid: '示意图', terminal: '终端图' }[key],
                   h('input', {
                     className: 'bgp-input bgp-inline-input',
                     type: 'number',

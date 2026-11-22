@@ -14,6 +14,7 @@ description: BidGenie 技术方案优化（F6.4/F6.5）。当项目处于 optimi
 ## 范围
 
 - 只改技术正文与图表资源；不改 outline/不新增章节/不改配额/不改 package-meta。
+- 图表类问题先加载 `bg-figures`：只改布局/拆图/精简标签/删减终端行，不新增未规划的图，不编造数据。
 - 文风类修改按 `bg-writing-style` 执行，不复制规则。
 - 商务/报价内容不修改。
 

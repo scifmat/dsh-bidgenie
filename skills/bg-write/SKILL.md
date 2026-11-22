@@ -9,6 +9,7 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 
 - 只写技术正文（`chapters/**/*.md`、`resources/mermaid`、`resources/terminal`）；**不创建 `resources/network`、`resources/tables`**。
 - 执行大纲：按章写、按批合并、按规则自检；不重新设计结构、不改 outline.json、不改 completion。
+- **图表生成前加载 `bg-figures`**：按大纲的 `type/subtype/purpose` 写 `.mmd/.txt`，不重新选图型、不新增未规划的图；terminal 按大纲数量写，可一章多张但不得为凑数硬塞。
 - 商务/资格/报价内容不进正文；文风规则加载 `bg-writing-style`。
 
 ## 批次（4–6 章一批）
@@ -49,7 +50,7 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 3. 不编造事实；不承诺 package-meta 之外的人/设备/日期/品牌。
 4. 不自引用、不写敏感信息。
 5. 层级不越级；题注表上/图下、不带编号；table 不写 BG:FIGURE，mermaid/terminal 才写标记。
-6. 图表配额是下限、可多不可少；多出不返工；**渲染统一由主 Agent 执行**，子智能体只交 `.mmd/.txt` 源文件并清理临时预览产物。
+6. 图表按大纲规划生成（mermaid 按 `subtype`；terminal 可一章多张）；table/mermaid 配额是下限，terminal 是参考值，不为凑数新增图；**渲染统一由主 Agent 执行**，子智能体只交 `.mmd/.txt` 源文件并清理临时预览产物。
 7. 状态只由脚本写；T5 前置 `--verify-all` + check 通过。
 8. 单批 60 分钟（单章约 20 分钟）上限；超出分批/次日继续，状态可恢复。
 

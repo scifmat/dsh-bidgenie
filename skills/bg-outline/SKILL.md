@@ -17,8 +17,8 @@ description: BidGenie 技术方案大纲编写（F5-1）。当项目处于 outli
 2. 父级=文件夹、末级=`.md`；文件树与 JSON 严格一致（`--check-tree`）。
 3. 每个一级标题来自技术评审因素（唯一例外：招标明确要求章节，score=0 并在 writingNotes 记依据）。
 4. 每个末级必须有 `criterionRefs`（≥1）、`contentRequirements`（≥1，逐条可验收）、`wordTarget`。
-5. 字数 Σ=expectedWordCount（±1%）；图表规划数 ≥ `figureQuota`（table/mermaid/terminal，**下限、上不封顶、多出不返工**）；`figureQuota=0` 的类型（network）规划数必须为 0。T4 guard 与 `bg_outline_validate` 同为 `planned >= quota` 口径。
-6. 图表 type=table/mermaid/terminal；每末级 ≤2 个；超额标 `deferred`；`anchorId=fig-<chapterId>-<seq2>`；`caption` 纯题名（不带 ▼/▲）。
+5. 字数 Σ=expectedWordCount（±1%）；图表规划：table/mermaid 不低于 `figureQuota`（下限、多出不返工）；terminal 为**参考值**（0=不生成，>0 可少规划，不强制凑数）；`figureQuota=0` 的类型规划数必须为 0。T4 guard 与 `bg_outline_validate` 同口径。
+6. 图表 type=table/mermaid/terminal；mermaid 必须带 `subtype`（flowchart/sequence/gantt/state/er/timeline/mindmap/block/architecture/quadrant/pie/xychart）；每末级 table ≤2、mermaid ≤2、terminal ≤4；terminal 同一场景多组命令可拆多张，但不得为凑数硬塞；`anchorId=fig-<chapterId>-<seq2>`；`caption` 纯题名（不带 ▼/▲）。
 7. table 只规划为 Markdown 表格（不写 `BG:FIGURE`、不建 resources/tables）；补充表登记 `outline.supplementTables`；不创建 resources/network。
 8. 覆盖率 100%（每个 criterionId 至少 1 个末级覆盖）；无商务/报价章节；无模板化无关章节。
 
@@ -27,18 +27,18 @@ description: BidGenie 技术方案大纲编写（F5-1）。当项目处于 outli
 1. 读输入并确认字数/配额；抽技术评审因素 → `criterionIndex[]`（稳定 criterionId）。
 2. 拆章节树（按语义拆子项、分值拆分）；计算 scoreWeight/priority/dependsOn/relatedChapters。
 3. 字数分配（share→raw→floor/clamp→取整百→尾差）；写 `wordTarget` + basis。
-4. 图表规划与补充表登记。
-5. 自检：覆盖率/层级/字段/配额（≥）/依赖/路径。
+4. **图表规划（先加载 `bg-figures`）**：按内容意图选 `type`/`subtype`；terminal 只在适合的章节规划（可 0 或多张，不按配额平均分布，不硬凑）；每张图写清 `caption/purpose`；登记补充表。
+5. 自检：覆盖率/层级/字段/依赖/路径；table/mermaid ≥ 配额，terminal 按参考值（quota=0 时必须为 0）。
 6. 写 `chapters/_outline/outline.draft.json`（不写 outline.json、不建 chapters/**）。
 7. 校验：`bg_outline_validate.py --strict`；最多修 3 轮；通过后 `bg_outline_apply.py --materialize` → `--check-tree`。
-   - 旧项目把 `outline*.json` 放在包根也能直接 `--materialize`：脚本自动迁移到 `chapters/_outline/` 并在 `warnings` 告警（备份+幂等），不再报 `E_NOT_FOUND`；也可显式 `--migrate-storage`。
 8. T4：`bg_state.py check --to draft` → `transition --to draft`；post-check 后加载 `bg-write`。
 
 ## 汇报
 
-章节数/一级/末级、字数分配摘要、评分覆盖、图表规划（含 ≥配额与 quota=0 类型为 0）、T4 结果、迁移 warning（如有）、需用户确认项、产物绝对路径。
+章节数/一级/末级、字数分配摘要、评分覆盖、图表规划（table/mermaid/terminal 各多少；terminal 参考值与实际规划；quota=0 类型为 0）、T4 结果、需用户确认项、产物绝对路径。
 
 ## 参考
 
+- 图表选择/布局/终端场景：加载 `bg-figures` 技能
 - 字段/字数算法/命令/异常：`references/rules.md`（按需读）
 - 运行时路径见文末 Host 注入块。

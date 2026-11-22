@@ -33,6 +33,7 @@ SCHEMA_VERSION = "1.0"
 ISSUES_FILE = "reviews/issues.json"
 REPORT_FILE = "reviews/review-report.md"
 SUMMARY_FILE = "reviews/review-summary.json"
+RENDER_MANIFEST_FILE = "resources/render-manifest.json"
 ISSUE_ID_RE = re.compile(r"^RV-(\d+)-(\d{4})$")
 HEADING_RE = re.compile(r"^(#{1,7})\s+(.+?)\s*$")
 META_COMMENT_RE = re.compile(r"^<!--\s*BG:CHAPTER\b.*-->$")
@@ -227,6 +228,16 @@ def review_a_layer(
 ) -> dict[str, Any]:
     nodes = list(outline_validate.iter_preorder(outline.get("chapters") or []))
     leaves = [node for node in nodes if not (isinstance(node.get("children"), list) and node.get("children"))]
+    render_manifest: dict[str, Any] = {}
+    render_manifest_path = package_dir / RENDER_MANIFEST_FILE
+    if render_manifest_path.is_file():
+        try:
+            loaded_manifest = jsonio.read_json(render_manifest_path)
+            if isinstance(loaded_manifest, Mapping):
+                render_manifest = dict(loaded_manifest)
+        except errors.BgError:
+            render_manifest = {}
+    render_anchors = render_manifest.get("anchors") if isinstance(render_manifest.get("anchors"), Mapping) else {}
     chapter_rows: list[dict[str, Any]] = []
     table_rows: list[dict[str, Any]] = []
     figure_rows: list[dict[str, Any]] = []
@@ -379,7 +390,7 @@ def review_a_layer(
             anchor_id = str(plan.get("anchorId") or "")
             caption = str(plan.get("caption") or "")
             marker_found = bool(re.search(r"<!--\s*BG:FIGURE:" + re.escape(anchor_id) + r"\s*-->", text))
-            figure_row = {"chapterId": chapter_id, "anchorId": anchor_id, "type": figure_type, "marker": marker_found, "status": "planned", "detail": ""}
+            figure_row = {"chapterId": chapter_id, "anchorId": anchor_id, "type": figure_type, "subtype": plan.get("subtype"), "marker": marker_found, "status": "planned", "detail": ""}
             if figure_type == "table":
                 # bg-write 硬规则：table 只写 `▼表` 题注，不得写 BG:FIGURE 标记（P1-4 配套：A 层拦截）
                 if marker_found:
@@ -427,6 +438,30 @@ def review_a_layer(
                     collector.add("script", "figure_quality", "blocker", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"PNG 不合格：{detail}", suggestion="重新渲染/更换资源")
                 else:
                     figure_row["status"] = "produced"
+                    anchor_meta = render_anchors.get(anchor_id) if isinstance(render_anchors, Mapping) else None
+                    layout = anchor_meta.get("layout") if isinstance(anchor_meta, Mapping) else None
+                    if isinstance(layout, Mapping):
+                        figure_row["layout"] = {
+                            key: layout.get(key)
+                            for key in ("diagramType", "fontPtAtDisplay", "displayWidthCm", "aspectTall", "aspectWide", "lineCount", "maxColumns")
+                            if layout.get(key) is not None
+                        }
+                        for layout_warning in layout.get("warnings") or []:
+                            if not isinstance(layout_warning, Mapping):
+                                continue
+                            severity = str(layout_warning.get("severity") or "")
+                            if severity not in ("major", "minor"):
+                                continue
+                            collector.add(
+                                "script",
+                                "figure_quality",
+                                severity,
+                                chapter_id=chapter_id,
+                                file_path=file_path,
+                                anchor_id=anchor_id,
+                                evidence=f"图表机检：{layout_warning.get('message')}",
+                                suggestion="按 bg-figures 调整布局/拆图，或重渲染",
+                            )
             if source_path is not None and not source_path.is_file():
                 collector.add("script", "figure_missing", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"缺少源文件：resources/{figure_type}/{anchor_id}{suffix}", suggestion="补 .mmd/.txt 源文件")
             if figure_type == "network":
@@ -451,8 +486,18 @@ def review_a_layer(
     planned = {key: int((stats.get("figurePlanned") or {}).get(key) or 0) for key in outline_validate.FIGURE_TYPES}
     quota = package_meta.get("figureQuota") if isinstance(package_meta.get("figureQuota"), Mapping) else {}
     quota_norm = {key: int(quota.get(key) or 0) for key in outline_validate.FIGURE_TYPES}
-    if any(planned[key] < quota_norm[key] for key in outline_validate.FIGURE_TYPES):
-        collector.add("script", "figure_mismatch", "blocker", evidence=f"图表配额不足：stats.figurePlanned={planned} vs package-meta.figureQuota={quota_norm}（允许 ≥ 配额）", suggestion="按配额补齐 figurePlan 或回写 package-meta（经用户确认）")
+    hard_quota_short = any(
+        planned[key] < quota_norm[key] for key in outline_validate.FIGURE_TYPES if key != "terminal"
+    )
+    terminal_disabled_violation = quota_norm["terminal"] == 0 and planned["terminal"] > 0
+    if hard_quota_short or terminal_disabled_violation:
+        collector.add(
+            "script",
+            "figure_mismatch",
+            "blocker",
+            evidence=f"图表配额不足/禁用类型被规划：stats.figurePlanned={planned} vs package-meta.figureQuota={quota_norm}（table/mermaid 为下限；terminal=0 时不得规划）",
+            suggestion="按配额补齐 table/mermaid 的 figurePlan，或删除 terminal 规划/回写 package-meta（经用户确认）",
+        )
     produced = {key: 0 for key in outline_validate.FIGURE_TYPES}
     for row in figure_rows:
         if row.get("status") == "produced" and row.get("type") in produced:

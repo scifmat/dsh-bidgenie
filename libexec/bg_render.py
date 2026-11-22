@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -54,7 +55,7 @@ CROP_MAX_WIDTH = int(MAX_PHYSICAL_WIDTH_CM / 2.54 * TARGET_DPI)  # 751px
 CROP_MAX_HEIGHT = int(MAX_PHYSICAL_HEIGHT_CM / 2.54 * TARGET_DPI)  # 1166px
 CROP_WHITE_THRESHOLD = 245
 # R3：渲染/裁切参数版本；变更时必须使 manifest 缓存失效重渲染
-RENDER_PROFILE_VERSION = "m6.1-crop-dpi-a4safe-2"
+RENDER_PROFILE_VERSION = "m7.1-intrinsic-metrics-1"
 FIGURE_MARKER_RE = r"<!--\s*BG:FIGURE:{anchor}\s*-->"
 FENCE_RE = re.compile(r"```(?P<lang>[A-Za-z0-9_-]*)\s*\n(?P<code>.*?)\n```", re.DOTALL)
 MERMAID_LANGS = ("mermaid", "")
@@ -70,6 +71,26 @@ FONT_CANDIDATES_CJK = (
     "C:/Windows/Fonts/nsimsun.ttf",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
 )
+
+# 字号/布局机检阈值（plan v2.0）
+MERMAID_FONT_MIN_PT = 8.0
+MERMAID_FONT_MAJOR_PT = 6.5
+MERMAID_MAX_WIDTH_PX = 2000
+MERMAID_ASPECT_TALL = 3.0
+MERMAID_ASPECT_WIDE = 0.25
+# 终端图：16px 字号、42 列上限、22 行提示
+TERMINAL_FONT_PX = 16
+TERMINAL_LINE_HEIGHT = 24
+TERMINAL_COLUMNS = 42
+TERMINAL_MAX_LINES = 22
+TERMINAL_CHAR_WIDTH = 16
+TERMINAL_TITLE_HEIGHT = 44
+TERMINAL_PADDING_X = 28
+TERMINAL_PADDING_Y = 32
+PAGE_WIDTH_CM = 21.0
+PAGE_HEIGHT_CM = 29.7
+DEFAULT_PAGE_MARGIN_MM = {"top": 25.4, "bottom": 25.4, "left": 31.8, "right": 31.8}
+CAPTION_RESERVED_CM = 1.0
 
 
 class RenderFallback(RuntimeError):
@@ -180,32 +201,84 @@ def extract_code_block(
 # ---------------------------------------------------------------------------
 # Pillow 渲染/降级
 # ---------------------------------------------------------------------------
+def terminal_display_width(text: str) -> int:
+    """终端显示宽度：CJK/全角按 2 列，ASCII 按 1 列；tab 按 4 空格。"""
+    width = 0
+    for char in str(text):
+        if char == "\t":
+            width += 4
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F", "A") else 1
+    return width
+
+
+def wrap_terminal_lines(lines: Sequence[str]) -> tuple[list[str], dict[str, int]]:
+    """按 42 列上限折行；长输出不缩字号。返回 (折行后行, 指标)。"""
+    normalized: list[str] = []
+    tab_count = 0
+    for raw in lines:
+        text = str(raw).rstrip("\n")
+        tab_count += text.count("\t")
+        normalized.append(text.replace("\t", "    "))
+    wrapped: list[str] = []
+    wrapped_lines = 0
+    max_columns = 0
+    for text in normalized:
+        remaining = text
+        if not remaining:
+            wrapped.append("")
+            continue
+        while terminal_display_width(remaining) > TERMINAL_COLUMNS:
+            cut = 0
+            width = 0
+            for index, char in enumerate(remaining):
+                char_width = 4 if char == "\t" else (2 if unicodedata.east_asian_width(char) in ("W", "F", "A") else 1)
+                if width + char_width > TERMINAL_COLUMNS:
+                    break
+                width += char_width
+                cut = index + 1
+            cut = max(1, cut)
+            piece = remaining[:cut].rstrip()
+            wrapped.append(piece)
+            wrapped_lines += 1
+            max_columns = max(max_columns, terminal_display_width(piece))
+            remaining = remaining[cut:].lstrip()
+        wrapped.append(remaining)
+        max_columns = max(max_columns, terminal_display_width(remaining))
+    return wrapped, {
+        "tabCount": tab_count,
+        "wrappedLines": wrapped_lines,
+        "maxColumns": max_columns,
+    }
+
+
 def render_terminal_png(lines: Sequence[str], caption: str, output: Path) -> dict[str, Any]:
     from PIL import Image, ImageDraw
 
-    text_lines = [str(line).rstrip("\n") for line in lines] or ["(空终端输出)"]
-    char_width = 18
-    line_height = 30
-    max_chars = max(40, max((len(line) for line in text_lines), default=40))
-    width = min(3000, max(900, 64 + max_chars * char_width))
-    height = min(4000, max(300, 100 + len(text_lines) * line_height + 40))
+    text_lines, wrap_meta = wrap_terminal_lines(lines)
+    if not text_lines:
+        text_lines = ["(空终端输出)"]
+    width = TERMINAL_PADDING_X * 2 + TERMINAL_COLUMNS * TERMINAL_CHAR_WIDTH
+    height = TERMINAL_TITLE_HEIGHT + TERMINAL_PADDING_Y + len(text_lines) * TERMINAL_LINE_HEIGHT
     image = Image.new("RGB", (width, height), (30, 30, 30))
     draw = ImageDraw.Draw(image)
-    font_ascii = _font(18, cjk=False)
-    font_cjk = _font(18, cjk=True)
-    title_font = _font(20, cjk=True)
-    draw.rectangle([0, 0, width, 44], fill=(58, 58, 58))
+    font_ascii = _font(TERMINAL_FONT_PX, cjk=False)
+    font_cjk = _font(TERMINAL_FONT_PX, cjk=True)
+    title_font = _font(18, cjk=True)
+    draw.rectangle([0, 0, width, TERMINAL_TITLE_HEIGHT], fill=(58, 58, 58))
     for index, color in enumerate([(255, 95, 86), (255, 189, 46), (39, 201, 63)]):
         draw.ellipse([16 + index * 28, 14, 32 + index * 28, 30], fill=color)
-    draw.text((110, 11), f"终端 — {caption}", font=title_font, fill=(230, 230, 230))
+    draw.text(
+        (110, 11),
+        f"终端 — {str(caption)[:30]}",
+        font=title_font,
+        fill=(230, 230, 230),
+    )
     y = 64
     for line in text_lines:
         cjk = any(ord(char) > 127 for char in line)
-        draw.text((28, y), line, font=font_cjk if cjk else font_ascii, fill=(220, 220, 220))
-        y += line_height
-    if image.width > CROP_MAX_WIDTH or image.height > CROP_MAX_HEIGHT:
-        image.thumbnail((CROP_MAX_WIDTH, CROP_MAX_HEIGHT), Image.LANCZOS)
-    width, height = image.size
+        draw.text((TERMINAL_PADDING_X, y), line, font=font_cjk if cjk else font_ascii, fill=(220, 220, 220))
+        y += TERMINAL_LINE_HEIGHT
     output.parent.mkdir(parents=True, exist_ok=True)
     image.save(output, "PNG", dpi=(TARGET_DPI, TARGET_DPI))
     return {
@@ -213,6 +286,13 @@ def render_terminal_png(lines: Sequence[str], caption: str, output: Path) -> dic
         "height": height,
         "engine": "pillow",
         "lines": len(text_lines),
+        "lineCount": len(text_lines),
+        "fontPx": TERMINAL_FONT_PX,
+        "lineHeightPx": TERMINAL_LINE_HEIGHT,
+        "columns": TERMINAL_COLUMNS,
+        "maxColumns": wrap_meta["maxColumns"],
+        "wrappedLines": wrap_meta["wrappedLines"],
+        "tabCount": wrap_meta["tabCount"],
         "dpi": TARGET_DPI,
         "physicalWidthCm": round(width / TARGET_DPI * 2.54, 2),
         "physicalHeightCm": round(height / TARGET_DPI * 2.54, 2),
@@ -372,6 +452,200 @@ def crop_mermaid_png(
 
 
 # ---------------------------------------------------------------------------
+# 字号/布局机检
+# ---------------------------------------------------------------------------
+def resolve_page_content_cm(
+    workspace: Path,
+    project_dir: Path,
+    package_id: str,
+    package_meta: Mapping[str, Any],
+) -> tuple[float, float]:
+    """按项目/包导出样式解析 A4 正文可用区（cm）；失败时用保守默认值。"""
+    profile_id = str(package_meta.get("exportStyleProfile") or "official-tech")
+    margins = dict(DEFAULT_PAGE_MARGIN_MM)
+    try:
+        import bg_style_merge  # 局部导入，避免无样式环境时影响渲染主流程
+
+        merged = bg_style_merge.merge_profile(
+            profile_id,
+            workspace=workspace,
+            project_dir=project_dir,
+            package_id=package_id,
+        )
+        document = merged.get("document") if isinstance(merged, Mapping) and isinstance(merged.get("document"), Mapping) else merged
+        params = document.get("params") if isinstance(document, Mapping) else {}
+        configured = params.get("pageMarginMm") if isinstance(params, Mapping) else None
+        if isinstance(configured, Mapping):
+            for key in ("top", "bottom", "left", "right"):
+                value = configured.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    margins[key] = float(value)
+    except Exception:  # noqa: BLE001 - 样式缺失时回退默认页边距
+        pass
+    content_width = PAGE_WIDTH_CM - (margins["left"] + margins["right"]) / 10.0
+    content_height = PAGE_HEIGHT_CM - (margins["top"] + margins["bottom"]) / 10.0
+    return max(2.0, content_width), max(2.0, content_height)
+
+
+def display_size_cm(
+    png_width: int,
+    png_height: int,
+    content_width_cm: float,
+    content_height_cm: float,
+) -> tuple[float, float]:
+    """按 bg_export_docx.add_tech_figure 的规则估算图片最终显示尺寸（cm）。"""
+    aspect = (float(png_width) / float(png_height)) if png_height else 1.0
+    max_width = max(2.0, content_width_cm - 0.3)
+    max_height = max(1.2, content_height_cm - CAPTION_RESERVED_CM - 0.5)
+    height = max_height
+    width = height * aspect
+    if width > max_width:
+        width = max_width
+        height = width / aspect
+    if height < 1.2:
+        height = 1.2
+        width = min(max_width, height * aspect)
+    return width, height
+
+
+def mermaid_layout_check(
+    metrics: Mapping[str, Any],
+    *,
+    png_width: int,
+    png_height: int,
+    content_width_cm: float,
+    content_height_cm: float,
+) -> dict[str, Any]:
+    """根据 mermaid 渲染指标计算有效字号/宽高比，返回 manifest.layout 与 warnings。"""
+    warnings: list[dict[str, Any]] = []
+    view_width = float(metrics.get("intrinsicWidth") or 0)
+    view_height = float(metrics.get("intrinsicHeight") or 0)
+    if view_width <= 0 or view_height <= 0:
+        return {
+            "metricsMissing": True,
+            "warnings": [
+                {
+                    "code": "layout_metrics_missing",
+                    "severity": "minor",
+                    "message": "缺少 mermaid 布局指标，无法机检字号；请重渲染或由 C 层审图兜底",
+                }
+            ],
+        }
+    display_width, display_height = display_size_cm(png_width, png_height, content_width_cm, content_height_cm)
+    aspect_tall = view_height / view_width
+    aspect_wide = view_width / view_height
+    min_font = metrics.get("minFontPx")
+    font_pt: float | None = None
+    if isinstance(min_font, (int, float)) and not isinstance(min_font, bool) and min_font > 0:
+        font_pt = float(min_font) / view_width * display_width / 0.0352778
+        if font_pt < MERMAID_FONT_MAJOR_PT:
+            warnings.append(
+                {
+                    "code": "figure_font_too_small",
+                    "severity": "major",
+                    "message": f"按 A4 正文宽 {display_width:.2f}cm 换算有效字号约 {font_pt:.1f}pt（<{MERMAID_FONT_MAJOR_PT}pt），建议拆图/改 TB/精简节点",
+                }
+            )
+        elif font_pt < MERMAID_FONT_MIN_PT:
+            warnings.append(
+                {
+                    "code": "figure_font_small",
+                    "severity": "minor",
+                    "message": f"按 A4 正文宽 {display_width:.2f}cm 换算有效字号约 {font_pt:.1f}pt（<{MERMAID_FONT_MIN_PT}pt），建议改 TB/精简节点或拆图",
+                }
+            )
+    else:
+        warnings.append(
+            {
+                "code": "layout_font_unknown",
+                "severity": "minor",
+                "message": "未能读取 mermaid 最小字号，字号需由 C 层审图兜底",
+            }
+        )
+    if view_width > MERMAID_MAX_WIDTH_PX:
+        warnings.append(
+            {
+                "code": "figure_too_wide",
+                "severity": "major",
+                "message": f"图固有宽度 {view_width:.0f}px > {MERMAID_MAX_WIDTH_PX}px，按 A4 缩放后字会过小，必须拆图或改纵向",
+            }
+        )
+    if aspect_tall > MERMAID_ASPECT_TALL:
+        warnings.append(
+            {
+                "code": "figure_too_tall",
+                "severity": "minor",
+                "message": f"图高/宽={aspect_tall:.2f}，建议合并节点或改横向分支",
+            }
+        )
+    if aspect_wide > 4.0:
+        warnings.append(
+            {
+                "code": "figure_too_flat",
+                "severity": "minor",
+                "message": f"图宽/高={aspect_wide:.2f}，建议改 TB 或拆图",
+            }
+        )
+    return {
+        "diagramType": metrics.get("type") or "",
+        "viewBoxWidth": round(view_width, 2),
+        "viewBoxHeight": round(view_height, 2),
+        "minFontPx": round(float(min_font), 2) if isinstance(min_font, (int, float)) and not isinstance(min_font, bool) else None,
+        "fontPtAtDisplay": round(font_pt, 2) if font_pt is not None else None,
+        "displayWidthCm": round(display_width, 2),
+        "displayHeightCm": round(display_height, 2),
+        "aspectTall": round(aspect_tall, 3),
+        "aspectWide": round(aspect_wide, 3),
+        "nodeCount": metrics.get("nodeCount"),
+        "labelCount": metrics.get("labelCount"),
+        "maxLabelChars": metrics.get("maxLabelChars"),
+        "captureScale": metrics.get("captureScale"),
+        "warnings": warnings,
+    }
+
+
+def terminal_layout_check(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """终端图机检：行数/列宽/折行；折行本身可接受，但行数过多要提示拆图。"""
+    warnings: list[dict[str, Any]] = []
+    line_count = int(metrics.get("lineCount") or 0)
+    max_columns = int(metrics.get("maxColumns") or 0)
+    wrapped_lines = int(metrics.get("wrappedLines") or 0)
+    tab_count = int(metrics.get("tabCount") or 0)
+    if line_count > TERMINAL_MAX_LINES:
+        warnings.append(
+            {
+                "code": "terminal_too_many_lines",
+                "severity": "minor",
+                "message": f"终端图 {line_count} 行 > {TERMINAL_MAX_LINES} 行，建议删减输出或拆成两张图",
+            }
+        )
+    if wrapped_lines > 0:
+        warnings.append(
+            {
+                "code": "terminal_wrapped",
+                "severity": "info",
+                "message": f"{wrapped_lines} 行超过 {TERMINAL_COLUMNS} 列已自动折行；建议精简输出",
+            }
+        )
+    if tab_count > 0:
+        warnings.append(
+            {
+                "code": "terminal_tab",
+                "severity": "minor",
+                "message": "终端源码含 tab，已按 4 空格展开；建议直接用空格对齐",
+            }
+        )
+    return {
+        "lineCount": line_count,
+        "maxColumns": max_columns,
+        "wrappedLines": wrapped_lines,
+        "tabCount": tab_count,
+        "fontPx": metrics.get("fontPx"),
+        "warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 渲染
 # ---------------------------------------------------------------------------
 def render_mermaid_via_node(
@@ -441,6 +715,88 @@ def collect_figures(document: Mapping[str, Any]) -> list[dict[str, Any]]:
     return figures
 
 
+FLOWCHART_LR_RE = re.compile(r"(?m)^(\s*(?:flowchart|graph)\s+)(LR|RL)\b")
+
+
+def flowchart_source_to_tb(text: str) -> str:
+    """把 flowchart/graph 的 LR/RL 首行改为 TB；非流程图返回空串。"""
+    match = FLOWCHART_LR_RE.search(text)
+    if not match:
+        return ""
+    return text[: match.start()] + match.group(1) + "TB" + text[match.end() :]
+
+
+def metrics_font_ratio(metrics: Mapping[str, Any]) -> float:
+    try:
+        width = float(metrics.get("intrinsicWidth") or 0)
+        font = float(metrics.get("minFontPx") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return font / width if width > 0 else 0.0
+
+
+def should_try_auto_layout(metrics: Mapping[str, Any]) -> bool:
+    """宽流程图先尝试改 TB；只对 flowchart 生效，不改源文件。"""
+    if not isinstance(metrics, Mapping):
+        return False
+    diagram_type = str(metrics.get("type") or "")
+    if "flowchart" not in diagram_type:
+        return False
+    try:
+        width = float(metrics.get("intrinsicWidth") or 0)
+        height = float(metrics.get("intrinsicHeight") or 0)
+    except (TypeError, ValueError):
+        return False
+    return width > 1200 or (height > 0 and width / height > 4.0)
+
+
+MERMAID_TYPE_ALIASES = {
+    "flowchart": "flowchart",
+    "graph": "flowchart",
+    "sequenceDiagram": "sequence",
+    "gantt": "gantt",
+    "stateDiagram": "state",
+    "stateDiagram-v2": "state",
+    "erDiagram": "er",
+    "timeline": "timeline",
+    "mindmap": "mindmap",
+    "block": "block",
+    "block-beta": "block",
+    "architecture": "architecture",
+    "architecture-beta": "architecture",
+    "quadrantChart": "quadrant",
+    "pie": "pie",
+    "xychart": "xychart",
+    "xychart-beta": "xychart",
+}
+
+
+def mermaid_source_type(text: str) -> str:
+    """读取 mermaid 源文件首个有效行的图类型（跳过 frontmatter/%% 注释）。"""
+    lines = [line.rstrip("\n") for line in str(text).splitlines()]
+    index = 0
+    if lines and lines[0].strip() == "---":
+        index = 1
+        while index < len(lines) and lines[index].strip() != "---":
+            index += 1
+        index += 1
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped and not stripped.startswith("%%"):
+            token = stripped.split()[0]
+            return MERMAID_TYPE_ALIASES.get(token, token)
+        index += 1
+    return ""
+
+
+def subtype_mismatch_message(source_text: str, expected_subtype: str) -> str:
+    actual = mermaid_source_type(source_text)
+    expected = str(expected_subtype or "").strip()
+    if not actual or not expected or actual == expected:
+        return ""
+    return f"大纲 subtype={expected}，但 .mmd 首行类型为 {actual}；请改图源或回大纲修正 subtype"
+
+
 def render_resources(
     *,
     workspace: Path,
@@ -455,6 +811,9 @@ def render_resources(
 ) -> dict[str, Any]:
     workspace_path, project_dir_path, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
         workspace, project_dir, package_id
+    )
+    content_width_cm, content_height_cm = resolve_page_content_cm(
+        workspace_path, project_dir_path, target, package_meta
     )
     outline_path = outline_validate.outline_path(package_dir)
     if not outline_path.is_file():
@@ -494,6 +853,7 @@ def render_resources(
         item = {
             "anchorId": plan.get("anchorId"),
             "type": plan.get("type"),
+            "subtype": plan.get("subtype"),
             "chapterId": node.get("id"),
             "caption": plan.get("caption"),
             "status": status,
@@ -601,6 +961,7 @@ def render_resources(
             )
             continue
         render_meta: dict[str, Any] = {}
+        auto_layout: dict[str, Any] | None = None
         status = "produced"
         engine = ""
         fallback_reason = ""
@@ -614,6 +975,51 @@ def render_resources(
                 status = "produced"
                 if not crop:
                     write_png_dpi(png_path)
+                first_metrics = render_meta.get("metrics") if isinstance(render_meta.get("metrics"), Mapping) else {}
+                if first_metrics and should_try_auto_layout(first_metrics):
+                    auto_source = resource_dir / f".{anchor_id}.auto-layout.mmd"
+                    auto_png = resource_dir / f".{anchor_id}.auto-layout.png"
+                    try:
+                        candidate_text = flowchart_source_to_tb(source_path.read_text(encoding="utf-8"))
+                        if candidate_text:
+                            auto_source.write_text(candidate_text, encoding="utf-8", newline="\n")
+                            second_meta = render_mermaid_via_node(auto_source, auto_png, browser=browser)
+                            temp_residues.extend(second_meta.pop("tempResidue", []) or [])
+                            second_metrics = second_meta.get("metrics") if isinstance(second_meta.get("metrics"), Mapping) else {}
+                            auto_valid = False
+                            if crop:
+                                crop_mermaid_png(auto_png)
+                            if auto_png.is_file():
+                                auto_valid = bool(validate_png(auto_png).get("ok"))
+                            if (
+                                auto_valid
+                                and second_metrics
+                                and metrics_font_ratio(second_metrics) > metrics_font_ratio(first_metrics) * 1.05
+                            ):
+                                os.replace(auto_png, png_path)
+                                render_meta = second_meta
+                                first_metrics = second_metrics
+                                auto_layout = {
+                                    "from": "LR/RL",
+                                    "to": "TB",
+                                    "applied": True,
+                                    "reason": "宽流程图自动改纵向，提升有效字号",
+                                }
+                            else:
+                                auto_layout = {
+                                    "from": "LR/RL",
+                                    "to": "TB",
+                                    "applied": False,
+                                    "reason": "改 TB 后未通过尺寸校验或字号未改善，保留原布局",
+                                }
+                    except (RenderFallback, subprocess.TimeoutExpired, OSError) as exc:
+                        auto_layout = {"from": "LR/RL", "to": "TB", "applied": False, "reason": f"自动布局失败：{str(exc)[:160]}"}
+                    finally:
+                        for temp_path in (auto_source, auto_png):
+                            try:
+                                temp_path.unlink()
+                            except OSError:
+                                pass
             except (RenderFallback, subprocess.TimeoutExpired, OSError) as exc:
                 fallback_reason = str(exc)[:300]
                 if fallback != "pillow":
@@ -641,20 +1047,109 @@ def render_resources(
             render_meta = render_terminal_png(lines, str(plan.get("caption") or anchor_id), png_path)
             engine = "pillow"
             status = "produced"
+            for pattern in (r"\bTODO\b", r"\bxxx\b", r"待补充", r"示例命令"):
+                if re.search(pattern, text, re.IGNORECASE):
+                    warnings.append(
+                        {
+                            "anchorId": anchor_id,
+                            "code": "terminal_placeholder",
+                            "severity": "minor",
+                            "message": f"终端源码含占位词（{pattern}），请替换为真实命令/输出",
+                        }
+                    )
+                    break
         crop_info: dict[str, Any] | None = None
         # R2：Pillow fallback 占位图不做 bbox 裁切（不标记 cropped），仅浏览器 produced 图裁切
         if figure_type == "mermaid" and crop and status == "produced":
             crop_info = crop_mermaid_png(png_path)
         validation = validate_png(png_path)
         if not validation["ok"]:
-            failed.append(item_result(plan, node, "failed", reason=f"PNG 校验失败：{validation}"))
-            warnings.append({"anchorId": anchor_id, "code": "png_invalid", "message": f"PNG 不满足最小尺寸/非纯色：{validation}"})
+            invalid_reason = f"PNG 校验失败：{validation}"
+            if figure_type == "mermaid":
+                metrics = render_meta.get("metrics") if isinstance(render_meta.get("metrics"), Mapping) else {}
+                if metrics:
+                    invalid_layout = mermaid_layout_check(
+                        metrics,
+                        png_width=validation["width"],
+                        png_height=validation["height"],
+                        content_width_cm=content_width_cm,
+                        content_height_cm=content_height_cm,
+                    )
+                    for layout_warning in invalid_layout.get("warnings") or []:
+                        if layout_warning.get("severity") in ("major", "minor"):
+                            warnings.append(
+                                {
+                                    "anchorId": anchor_id,
+                                    "code": layout_warning.get("code"),
+                                    "severity": layout_warning.get("severity"),
+                                    "message": layout_warning.get("message"),
+                                }
+                            )
+                    if invalid_layout.get("warnings"):
+                        invalid_reason += "；" + str(invalid_layout["warnings"][0].get("message") or "")
+            failed.append(item_result(plan, node, "failed", reason=invalid_reason))
+            warnings.append({"anchorId": anchor_id, "code": "png_invalid", "message": invalid_reason})
             continue
+        layout: dict[str, Any] | None = None
+        if figure_type == "mermaid" and status == "produced":
+            metrics = render_meta.get("metrics") if isinstance(render_meta.get("metrics"), Mapping) else {}
+            layout = mermaid_layout_check(
+                metrics,
+                png_width=validation["width"],
+                png_height=validation["height"],
+                content_width_cm=content_width_cm,
+                content_height_cm=content_height_cm,
+            )
+        elif figure_type == "terminal":
+            layout = terminal_layout_check(render_meta)
+            try:
+                terminal_text = source_path.read_text(encoding="utf-8")
+            except OSError:
+                terminal_text = ""
+            for pattern in (r"\bTODO\b", r"\bxxx\b", r"待补充", r"示例命令"):
+                if terminal_text and re.search(pattern, terminal_text, re.IGNORECASE):
+                    layout.setdefault("warnings", []).append(
+                        {
+                            "code": "terminal_placeholder",
+                            "severity": "minor",
+                            "message": f"终端源码含占位词（{pattern}），请替换为真实命令/输出",
+                        }
+                    )
+                    break
+        if auto_layout:
+            if layout is None:
+                layout = {}
+            layout["autoLayout"] = auto_layout
+        if figure_type == "mermaid" and status == "produced":
+            try:
+                mismatch = subtype_mismatch_message(
+                    source_path.read_text(encoding="utf-8"),
+                    str(plan.get("subtype") or ""),
+                )
+            except OSError:
+                mismatch = ""
+            if mismatch:
+                if layout is None:
+                    layout = {}
+                layout.setdefault("warnings", []).append(
+                    {"code": "figure_subtype_mismatch", "severity": "major", "message": mismatch}
+                )
+        if layout:
+            for layout_warning in layout.get("warnings") or []:
+                warnings.append(
+                    {
+                        "anchorId": anchor_id,
+                        "code": layout_warning.get("code"),
+                        "severity": layout_warning.get("severity"),
+                        "message": layout_warning.get("message"),
+                    }
+                )
         png_sha = sha256_file(png_path)
         original_width = (crop_info or {}).get("originalWidth", validation["width"])
         original_height = (crop_info or {}).get("originalHeight", validation["height"])
         manifest_updates[anchor_id] = {
             "type": figure_type,
+            "subtype": plan.get("subtype"),
             "chapterId": node.get("id"),
             "sourcePath": rel(project_dir_path, source_path),
             "sourceSha256": source_sha,
@@ -673,6 +1168,7 @@ def render_resources(
             "dpi": validation.get("dpi"),
             "physicalWidthCm": validation.get("physicalWidthCm"),
             "physicalHeightCm": validation.get("physicalHeightCm"),
+            "layout": layout or {},
             "renderProfile": current_profile,
         }
         changed = True
@@ -691,6 +1187,7 @@ def render_resources(
             dpi=validation.get("dpi"),
             physicalWidthCm=validation.get("physicalWidthCm"),
             physicalHeightCm=validation.get("physicalHeightCm"),
+            layout=layout or {},
         )
         if fallback_reason:
             result["fallbackReason"] = fallback_reason
@@ -888,11 +1385,11 @@ def _build_selftest_project(base: Path) -> tuple[Path, Path, Path, dict[str, Any
     leaves = [node for node in outline_validate.iter_preorder(outline["chapters"]) if not node.get("children")]
     leaf = leaves[0]
     leaf["figurePlan"] = [
-        {"anchorId": "fig-1-1-01", "type": "mermaid", "purpose": "流程", "caption": "渲染流程", "status": "planned"},
+        {"anchorId": "fig-1-1-01", "type": "mermaid", "subtype": "flowchart", "purpose": "流程", "caption": "渲染流程", "status": "planned"},
         {"anchorId": "fig-1-1-02", "type": "terminal", "purpose": "命令", "caption": "巡检命令", "status": "planned"},
         {"anchorId": "fig-1-1-03", "type": "network", "purpose": "实景", "caption": "现场示意", "status": "planned"},
         {"anchorId": "fig-1-1-04", "type": "table", "purpose": "清单", "caption": "清单表", "status": "planned"},
-        {"anchorId": "fig-1-1-05", "type": "mermaid", "purpose": "并发测试", "caption": "并发渲染流程", "status": "planned"},
+        {"anchorId": "fig-1-1-05", "type": "mermaid", "subtype": "flowchart", "purpose": "并发测试", "caption": "并发渲染流程", "status": "planned"},
     ]
     leaf["insertAnchors"] = [
         {"anchorId": "fig-1-1-01", "positionHint": "章节末尾", "type": "mermaid"},

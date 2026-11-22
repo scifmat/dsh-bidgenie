@@ -33,11 +33,11 @@
 }
 ```
 
-- 7 项 = 字数、人员、设备、工期、表格/流程图/终端图配额；样式不作为提问项。
+- 7 项 = 字数、人员、设备、工期、表格/示意图（Mermaid）/终端图参考值；样式不作为提问项。
 - 工期字段语义分开：`servicePeriod`=合同履行期限/服务期（「1 年」「3 个月」）；`constructionPlan`=施工/供货/交付工期；`startDate`/`deliveryDate` 只写 YYYY-MM-DD 或空（不编造）。auto 映射来源记在 `extensions.autoFill.autoBasis.schedulePlan`。
 - 字数默认**动态**：`user-settings.defaultWordCountTier`（缺省 50000），提问卡显示实际值；与提取稿要求下限取大值，不写死 5 万
 - 样式默认：`styleProfiles.tech` → 兼容 `styleProfile` → `official-tech`（写 `exportStyleProfile`）。
-- 配额是下限、上不封顶；人员/设备/工期 guided 每包必须有答案或「用默认」。
+- 配额：table/mermaid 是下限、上不封顶；terminal 是参考值（0=不生成，少规划不报错）；人员/设备/工期 guided 每包必须有答案或「用默认」。
 - `qualificationGaps`/`qualificationGapsInfo`：仅 info 提示（`blocking=false`，每包 ≤5 条、`missingTokens` 整条短语），不阻断 F4/T3。
 
 ## T3 前置与迁移

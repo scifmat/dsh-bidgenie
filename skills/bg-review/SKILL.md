@@ -30,11 +30,11 @@ description: BidGenie 技术方案审查（F6）。当项目处于 review 阶段
 
 ## 三层与短路
 
-1. **A 脚本**：结构/完整性/标题越级/字数/图表标记与产物（table 只校题注与行列，**table 出现 `BG:FIGURE` 记 major（`marker_format`，A 层拦截）**；mermaid/terminal 校标记↔figureIndex+png+源文件；产出多于配额不算问题）/题注/引用/JSON/禁用内容/手工修改。
+1. **A 脚本**：结构/完整性/标题越级/字数/图表标记与产物（table 只校题注与行列，**table 出现 `BG:FIGURE` 记 major（`marker_format`，A 层拦截）**；mermaid/terminal 校标记↔figureIndex+png+源文件；产出多于配额不算问题）；图表机检读取 `render-manifest.json` 的 `layout`（字号/宽高/行数），**mermaid 有效字号 <8pt 记 minor、<6.5pt 或固有宽 >2000px 记 major**。/题注/引用/JSON/禁用内容/手工修改。
 2. **A blocker → 短路 B/C**；无 blocker 继续进行 B、C。短路只看**仍未关闭**（open/fixing）的 blocker，带入且已 verified 的历史 blocker 不短路。
 3. **B 覆盖度**：逐章 summary+criterionRefs，先判 pass/weak/missing；weak/missing 才读该章全文核实（引用 ≤200 字）。
-4. **C 图文**：脚本机检（png 尺寸/方差、.mmd 可解析、.txt 非空）+ 语义判断；无视觉能力时读源文件并标注未做视觉核验；无图表直接通过。
-5. **配额**：figureQuota 是最低要求、上不封顶；多于配额不报问题。
+4. **C 图文（保留审图）**：先加载 `bg-figures`；脚本机检（png 尺寸/方差、.mmd 可解析、.txt 非空、manifest 布局指标）+ **Agent 审图**（图型是否选对、图文是否契合、终端是否真实贴合、有无文字过小/遮挡/空泛）；无视觉能力时读源文件并标注未做视觉核验；无图表直接通过。**A 层机检不替代 C 层审图**。
+5. **配额**：table/mermaid 是最低要求、上不封顶；terminal 是参考值（0=不生成，少于参考不报问题）；多于参考不报问题。
 
 ## 轮次与台账
 
@@ -71,5 +71,6 @@ description: BidGenie 技术方案审查（F6）。当项目处于 review 阶段
 
 ## 参考
 
+- 图表类型/布局/终端场景：加载 `bg-figures` 技能
 - 命令、issue schema、异常：`references/cli.md`（按需读）
 - 运行时路径见文末 Host 注入块。

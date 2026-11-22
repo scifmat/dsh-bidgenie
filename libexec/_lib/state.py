@@ -872,26 +872,38 @@ def _outline_validator() -> Any:
 
 
 def _figure_quota_check(stats: Mapping[str, Any]) -> tuple[bool, dict[str, Any]]:
-    """T4 图表配额对账：planned >= quota（下限口径，与 bg_outline_validate 一致）。
+    """T4 图表配额对账：table/mermaid planned >= quota；terminal 配额是参考值。
 
-    - 配额是**下限**、上不封顶：planned 多于 quota 不算失败（多出不返工）；
-    - quota=0 的类型（如已移除的 network）planned 必须为 0，避免规划了禁用类型；
-    - 返回 (是否通过, 明细)，明细含缺口/超额类型与逐类型 planned/quota。
+    - table/mermaid：配额是**下限**、上不封顶；
+    - terminal：配额是参考值，planned 可少于参考（不强制凑数）；quota=0 时 planned 必须为 0；
+    - quota=0 的类型 planned 必须为 0，避免规划禁用类型；
+    - 返回 (是否通过, 明细)。
     """
     planned_raw = stats.get("figurePlanned") if isinstance(stats.get("figurePlanned"), Mapping) else {}
     quota_raw = stats.get("figureQuota") if isinstance(stats.get("figureQuota"), Mapping) else {}
     planned = {key: int(planned_raw.get(key) or 0) for key in FIGURE_TYPES}
     quota = {key: int(quota_raw.get(key) or 0) for key in FIGURE_TYPES}
-    deficits = {key: {"planned": planned[key], "quota": quota[key]} for key in FIGURE_TYPES if planned[key] < quota[key]}
+    deficits = {
+        key: {"planned": planned[key], "quota": quota[key]}
+        for key in FIGURE_TYPES
+        if key != "terminal" and planned[key] < quota[key]
+    }
     over_disabled = {key: planned[key] for key in FIGURE_TYPES if quota[key] == 0 and planned[key] > 0}
+    terminal_reference = {
+        "planned": planned["terminal"],
+        "reference": quota["terminal"],
+        "note": "terminal 配额为参考值，少于参考不报错",
+    } if quota["terminal"] > 0 and planned["terminal"] < quota["terminal"] else {}
     ok = bool(quota_raw) and not deficits and not over_disabled
     detail: dict[str, Any] = {
         "figurePlanned": planned,
         "figureQuota": quota,
-        "allowed": "planned >= quota（配额为下限；多出不返工）",
+        "allowed": "table/mermaid planned >= quota（下限）；terminal 为参考值；quota=0 时 planned=0",
     }
     if deficits:
         detail["deficits"] = deficits
+    if terminal_reference:
+        detail["terminalReference"] = terminal_reference
     if over_disabled:
         detail["overDisabledQuota"] = over_disabled
         detail["overDisabledHint"] = "quota=0 的图表类型不得规划；deferred 仍计入 figurePlanned，需删除或改为其它类型"
@@ -968,7 +980,7 @@ def guard_t4(ctx: TransitionContext) -> list[dict[str, Any]]:
     _check(
         checks,
         "figure_quota",
-        "图表规划数不低于 package-meta.figureQuota（配额是下限、上不封顶；quota=0 时 planned 必须为 0）",
+        "图表配额：table/mermaid 不低于 package-meta.figureQuota（下限）；terminal 为参考值；quota=0 时 planned 必须为 0",
         quota_ok,
         quota_detail,
     )

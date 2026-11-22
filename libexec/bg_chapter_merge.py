@@ -402,6 +402,7 @@ def sync_figure_index(outline: dict[str, Any], package_dir: Path, project_dir: P
                 {
                     "anchorId": anchor_id,
                     "type": figure_type,
+                    "subtype": plan.get("subtype"),
                     "chapterId": str(node.get("id") or ""),
                     "caption": str(plan.get("caption") or ""),
                     "status": plan_status,

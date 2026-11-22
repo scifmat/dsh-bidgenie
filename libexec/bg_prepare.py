@@ -1227,14 +1227,14 @@ def requirement_questions(summary: Mapping[str, Any], current_meta: Mapping[str,
         },
         {
             "id": "figureQuota.mermaid",
-            "label": "流程图数量",
-            "ask": "预计画多少个流程图（Mermaid）？默认 5。",
+            "label": "示意图数量",
+            "ask": "预计画多少张示意图（Mermaid：流程图/时序图/甘特图等）？默认 5。",
             "currentValue": (meta.get("figureQuota") or {}).get("mermaid"),
         },
         {
             "id": "figureQuota.terminal",
-            "label": "终端图数量",
-            "ask": "预计需要多少张模拟终端图？默认 5。",
+            "label": "终端图参考数量",
+            "ask": "预计需要多少张模拟终端图？参考值（0=不生成；实际按适合章节规划，可多张，不强制凑数）。默认 5。",
             "currentValue": (meta.get("figureQuota") or {}).get("terminal"),
         },
     ]
@@ -1449,7 +1449,7 @@ def build_package_meta(
         assumptions.append("figureQuota.network：联网配图功能已移除，网络图配额固定为 0（旧配置兼容忽略）")
     if not user_quota:
         assumptions.append(
-            "figureQuota：表 {} / 流程图 {} / 网络图 {} / 终端图 {}（默认值来自 user-settings，agent-default）".format(
+            "figureQuota：表 {} / 示意图 {} / 网络图 {} / 终端图参考 {}（默认值来自 user-settings，agent-default）".format(
                 quota["table"], quota["mermaid"], quota["network"], quota["terminal"]
             )
         )

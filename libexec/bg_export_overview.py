@@ -255,6 +255,7 @@ def aggregate(
         "measuredWordCount": measured_words if chapters_measured else "未记录",
         "wordCountWarnings": word_count_warnings,
         "figurePlanned": figure_planned,
+        "figureQuota": {key: value for key, value in figure_quota.items() if key != "network"},
         "networkRemoved": network_removed,
         "criterionCount": len(criteria),
         "criterionCovered": covered,
@@ -432,6 +433,11 @@ def render_markdown(aggregate_data: Mapping[str, Any]) -> str:
     lines.append(f"- 大纲：父级 {outline['parentCount']} 个，末级 {outline['leafCount']} 个；计划字数 {outline['plannedWordCount']}；实际字数 {outline['actualWordCount']}（{basis_label}）")
     lines.append(f"- 评分覆盖：criterion {outline['criterionCovered']}/{outline['criterionCount']}")
     lines.append(f"- 图表计划（不含已移除的网络配图）：{outline['figurePlanned']}" + (f"；旧数据 network 已移除 {outline['networkRemoved']} 张" if outline.get("networkRemoved") else ""))
+    figure_quota = outline.get("figureQuota") if isinstance(outline.get("figureQuota"), Mapping) else {}
+    terminal_reference = int(figure_quota.get("terminal") or 0)
+    if terminal_reference > 0:
+        terminal_planned = int((outline.get("figurePlanned") or {}).get("terminal") or 0)
+        lines.append(f"- 终端图：计划 {terminal_planned} 张（参考 {terminal_reference} 张；参考值不强制凑数，按适合章节规划）")
     lines.append(f"- 正文：done {body['doneCount']}，skipped {body['skippedCount']}，blocked {body['blockedCount']}，字数 {body['actualWordCount']}，图表产出 {body['figureProduced']}")
     lines.append("")
     lines.append("## 3. 阶段与状态迁移（state.history）")
