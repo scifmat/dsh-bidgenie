@@ -715,9 +715,13 @@ def merge_selected(
             }
         )
     chapter_word_diagnostics: list[dict[str, Any]] = []
+    special_skipped: list[str] = []
     for node in leaf_nodes(updated_outline):
         completion = node.get("completion") if isinstance(node.get("completion"), Mapping) else {}
         if str(completion.get("status") or "") != "done":
+            continue
+        if outline_validate.is_special_chapter(node):
+            special_skipped.append(str(node.get("id") or ""))
             continue
         target = int(node.get("wordTarget") or 0)
         measured = _chapter_body_word_count(package_dir, node)
@@ -747,6 +751,7 @@ def merge_selected(
         "underTargetCount": sum(1 for item in chapter_word_diagnostics if item["delta"] < 0),
         "chaptersOverTarget": chapters_over,
         "chaptersUnderTarget": chapters_under,
+        "specialSkipped": special_skipped,
     }
 
     idempotent = not merged

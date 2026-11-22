@@ -22,14 +22,14 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 | project_init | bg-init | 环境/项目初始化 → T1 |
 | info_extract | bg-extract | 九类提取 → T2 |
 | package_prepare | bg-prepare | 选包一次/逐包计划/全量 prepare → T3 |
-| outline | bg-outline | 大纲 → 校验/落盘 → T4 |
-| draft | bg-write | 4–6 章一批写作 → T5 |
-| review | bg-review | A/B/C 审查 → T6 优化 / T7 定稿 |
-| optimize | bg-optimize | 按章合并修复 → T8 回 review |
+| outline | bg-outline | 大纲（含特殊章节 handling）→ 校验/落盘 → T4 |
+| draft | bg-write | 4–6 章一批写作（特殊章节按模板）→ T5 |
+| review | bg-review | A/B/C 审查（特殊章节只审四项）→ T6 优化 / T7 定稿 |
+| optimize | bg-optimize | 按章合并修复（特殊章节只改文字）→ T8 回 review |
 | finalize / export | 主技能按 §3 F7 策略执行 | 锁定/导出/自检 → T10 |
 | aborted/异常 | bg-doctor（未注册时只读说明） |
 
-- 辅助：`bg-bidder`（投标人资料）、`bg-writing-style`（去 AI 味共享规则）、`bg-export-style`（自建导出样式）。
+- 辅助：`bg-bidder`（投标人资料）、`bg-writing-style`（去 AI 味共享规则）、`bg-export-style`（自建导出样式）、`bg-figures`（图表规划/审图）、`bg-special-chapters`（证书/检测报告/偏离表等特殊章节）。
 - 多包：`writingPackages` 只在 F4 一次确认（选项每包一项、可多选、禁组合/禁二次问）；每包按 F4→F7 串行走完，前包 completed 后 T13 切下一包，不重复问包。
 
 ## 2. 硬约束
@@ -61,7 +61,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 | F2→F3（T1） | 环境必需项通过/豁免；project/state 可解析；已登记；完整度已提示 | 迁移后 `bg_run_manifest.py --start`，加载 bg-extract |
 | F3→F4（T2） | extract_validate 通过；分包确定；project 字段回填；conversion-manifest 完整；完整度已提示（T2 guard 会自动 `--apply` 刷新 env-check，返回 `refreshed=true` 属正常，不是环境漂移） | check/transition package_prepare；加载 bg-prepare |
 | F4→F5（T3） | 全部 selected 已 prepare/verify；逐包人员/设备/工期有答案或默认；package-meta 齐全 | 首包（显式 --package writingPackages[0]）check/transition outline；加载 bg-outline |
-| F5-1→F5-2（T4） | outline_validate --strict、--check-tree 通过；配额 ≥ | check/transition draft；加载 bg-write |
+| F5-1→F5-2（T4） | outline_validate --strict、--check-tree 通过；配额 ≥；特殊章节 handling 完整且无图 | check/transition draft；加载 bg-write |
 | F5-2→F6（T5） | chapter_merge --verify-all；leaf 全 done/skipped | check/transition review；加载 bg-review |
 | F6→优化（T6） | openCount>0；issues 合法 | check/transition optimize；加载 bg-optimize |
 | 优化→审查（T8） | openCount==0；blocker/major 无 open/复开项（fixed 可，由下一轮审查 carry-forward 写 verified）；optimization.json 已生成 | check/transition review；下一轮 bg-review |
@@ -82,6 +82,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 | 4 | 正文按批/优化按章 | 正文 4–6 章一个子智能体；优化按章合并一批一个 | 每章一个 / 每 issue 一个 |
 | 5 | 图表配额：table/mermaid 是下限，terminal 是参考值 | 预设 5、实际 7 允许不返工；terminal 按适合章节规划 | 超 table/mermaid 配额要求删图；为凑数硬塞 terminal |
 | 6 | 沙箱失败提示切完全权限 | EPERM → 提示 danger-full-access/授权后重试 | 静默降级/伪造 png |
+| 7 | 特殊章节不写成普通方案 | 检测报告/偏离表写 handling + 三段模板，请用户补充 | 写成“我方已具备/已提供”、编造证书编号/检测结论 |
 
 ## 6. 环境修复入口
 

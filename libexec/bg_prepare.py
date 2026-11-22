@@ -1682,7 +1682,7 @@ def verify_prepared(workspace: Path, project_dir: Path, *, package_id: str | Non
     return payload
 
 
-#: P2-8：资质缺口关键词（只认资格/证书类硬项，正文性描述不算）
+#: P2-8：资格/证书要求提示关键词（只认资格/证书类硬项，正文性描述不算）
 QUALIFICATION_KEYWORDS = ("资质", "证书", "等级", "监理", "建造师", "安全许可", "认证", "许可证", "项目管理师", "职称")
 QUALIFICATION_CLAUSE_RE = re.compile(r"[，,；;。、]")
 QUALIFICATION_NOUN_RE = re.compile(
@@ -1694,6 +1694,9 @@ QUALIFICATION_MODAL_PREFIX_RE = re.compile(
 )
 QUALIFICATION_MAX_GAPS = 5
 QUALIFICATION_MAX_TOKEN_CHARS = 120
+#: 多包范围标记：第4包 / 第1—3包 / 第4、5包（用于资格提示按包过滤）
+PACKAGE_SCOPE_RE = re.compile(r"第\s*(\d+(?:\s*(?:[—\-~～至到、,，和及])\s*\d+)*)\s*包")
+PACKAGE_SCOPE_NEGATION_RE = re.compile(r"不适用于本包|本包未要求|本包未提及|本包不适用|不适用本包")
 #: 程序性/条件性文本（不是"要求投标人具备什么"），不计入缺口
 QUALIFICATION_NOISE_RE = re.compile(r"审查|由采购人|招标代理|按照招标文件|未提供|不符|评标|评审程序|材料清单")
 #: 过于泛化的词，不作为可缺口名词
@@ -1713,12 +1716,42 @@ def load_bidder_cert_text(workspace: Path, project: Mapping[str, Any]) -> tuple[
     return "", False
 
 
-def _qualification_clauses(text: str) -> list[str]:
-    """把资格类文本切成**完整短语**（按标点分句，不切碎），只保留含资格关键词+义务语的条目。"""
-    clauses: list[str] = []
+def _package_numbers(text: str) -> list[int]:
+    """从“第1包/第1—3包/第4、5包”文本提取包号（无标记返回空列表）。"""
+    numbers: list[int] = []
+    for match in PACKAGE_SCOPE_RE.finditer(str(text or "")):
+        for part in re.split(r"[、,，和及]", match.group(1)):
+            bounds = [item for item in re.split(r"[—\-~～至到]", part) if item.strip().isdigit()]
+            if len(bounds) == 2:
+                start, end = int(bounds[0]), int(bounds[1])
+                if start <= end:
+                    numbers.extend(range(start, end + 1))
+                else:
+                    numbers.extend((start, end))
+            elif len(bounds) == 1:
+                numbers.append(int(bounds[0]))
+    return sorted(set(numbers))
+
+
+def _target_package_number(package_id: str) -> int:
+    match = re.search(r"(\d+)$", str(package_id or ""))
+    return int(match.group(1)) if match else 0
+
+
+def _qualification_clauses(text: str) -> list[tuple[str, str]]:
+    """把资格类文本切成**完整短语**，并带上标题/表格行上下文（用于按包过滤）。
+
+    返回 `(clause, context)`；context 含当前标题与所在表格行，便于识别“第N包/不适用于本包”。
+    """
+    clauses: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    heading_context = ""
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            heading_context = stripped if _package_numbers(stripped) else ""
             continue
         if stripped.startswith("|"):
             # Markdown 表格行：单元格各自作为一个短语；跳过表头/分隔行
@@ -1726,8 +1759,10 @@ def _qualification_clauses(text: str) -> list[str]:
             if not cells or all(not cell or set(cell) <= set("-: ") for cell in cells):
                 continue
             candidates = cells
+            row_context = " ".join(cells)
         else:
             candidates = [stripped.lstrip("-*0123456789. ()").strip()]
+            row_context = ""
         for candidate in candidates:
             for clause in QUALIFICATION_CLAUSE_RE.split(candidate):
                 clause = re.sub(r"\s+", " ", clause).strip(" ：:；;，,、*·「」『』")
@@ -1739,8 +1774,10 @@ def _qualification_clauses(text: str) -> list[str]:
                     continue
                 if QUALIFICATION_NOISE_RE.search(clause):
                     continue
-                if clause not in clauses:
-                    clauses.append(clause)
+                if clause in seen:
+                    continue
+                seen.add(clause)
+                clauses.append((clause, " ".join(part for part in (heading_context, row_context, clause) if part)))
     return clauses
 
 
@@ -1760,13 +1797,15 @@ def _qualification_terms(clause: str) -> list[str]:
 
 
 def find_qualification_gaps(workspace: Path, project_dir: Path, project: Mapping[str, Any], package_id: str) -> list[dict[str, Any]]:
-    """F4 前提示资质缺口（P2-8 去噪）：只对 02/08/09 的资格硬项做比对，每包 ≤5 条 info。
+    """F4 前资格/证书要求提示（P2-8 去噪）：只对 02/08/09 的资格硬项做比对，每包 ≤5 条 info。
 
     - 按标点切出**完整短语**，missingTokens 就是整条短语（不再把中文切成 2–8 字碎片）；
     - 只取资格硬性项（资质/证书/等级/许可证/建造师/监理/认证等 + 具备/须/应/需/提供/持有）；
-    - 仅作 info 提示（blocking=false）：未匹配不代表缺资质，不阻断 F4/T3。
+    - **按包过滤**：有“第N包/第1—3包/第4、5包”且不含当前包 → 跳过；本包写“不适用于本包/本包未要求” → 跳过；
+    - 仅作 info 提示（blocking=false）：资格/证书要求属商务部分，供用户核对；技术方案不据此判定，不阻断 F4/T3。
     """
     cert_text, _cert_available = load_bidder_cert_text(workspace, project)
+    target_no = _target_package_number(package_id)
     sources = [project_dir / "extraction" / "common" / "02-Eligibility-Review.md"]
     sources.extend(
         project_dir / "extraction" / "packages" / package_id / name
@@ -1778,7 +1817,12 @@ def find_qualification_gaps(workspace: Path, project_dir: Path, project: Mapping
         if not path.is_file():
             continue
         source = paths.rel_posix(project_dir, path)
-        for clause in _qualification_clauses(path.read_text(encoding="utf-8-sig")):
+        for clause, context in _qualification_clauses(path.read_text(encoding="utf-8-sig")):
+            if PACKAGE_SCOPE_NEGATION_RE.search(context):
+                continue
+            package_numbers = _package_numbers(context)
+            if package_numbers and target_no not in package_numbers:
+                continue
             terms = _qualification_terms(clause)
             if not terms:
                 continue
@@ -1796,7 +1840,7 @@ def find_qualification_gaps(workspace: Path, project_dir: Path, project: Mapping
                     "missingTokens": [clause[:QUALIFICATION_MAX_TOKEN_CHARS]],
                     "severity": "info",
                     "blocking": False,
-                    "note": "info 不阻断 F4/T3；仅提示核对投标人资料",
+                    "note": "资格/证书要求提示（商务部分，供用户核对）；info 不阻断 F4/T3，技术方案不据此判定",
                 }
             )
             if len(gaps) >= QUALIFICATION_MAX_GAPS:
@@ -1968,7 +2012,8 @@ def prepare_project(
             "severity": "info",
             "blocking": False,
             "certDataAvailable": cert_available,
-            "note": "info 不阻断 F4/T3：仅提示核对投标人证书/资质资料；未匹配不代表缺资质",
+            "label": "资格/证书要求提示（商务部分，供用户核对）",
+            "note": "资格/证书要求属商务部分，仅供用户核对；info 不阻断 F4/T3，技术方案不据此判定、不要求 Agent 补材料",
         },
         "assumptions": (meta.get("extensions") or {}).get("assumptions") or [],
         "packageMetaBytes": meta_path.stat().st_size,

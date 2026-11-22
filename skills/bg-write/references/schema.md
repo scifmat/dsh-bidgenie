@@ -26,6 +26,7 @@
 - `summary`：200–400 **字符长度（`len(str)`，含标点）**，不是字数口径；两者不要混用。
 - 补充表：`tables[]` 登记本章所有 Markdown 表。属于 figurePlan 的“计划表”须带 `anchorId`（或 `caption` 与 figurePlan 完全一致，可加 `"plannedFigure": true`）；合并脚本只把**真正补充表**写入 `outline.supplementTables`（按 `anchorId`/题注去重），计划表不会重复登记成 `sup-*`。
 - 图/终端只写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`；**table 不写 `BG:FIGURE` 标记**（按 `▼表<表名>` 题注定位）。
+- **特殊章节**（节点带 `handling`）：正文按 `bg-special-chapters` 模板写“要求 + 处理方式 + 请用户补充”，`figures=[]`、`tables=[]`，不产 `.mmd/.txt`；审查免字数检查，不为凑字灌水。
 
 ## 批次派发示例
 
@@ -66,8 +67,8 @@
 | 子智能体失败/超时 | 单批 60 分钟（单章约 20 分钟）终止，失败章 blocked；重试 ≤2 次 |
 | 重试仍 blocked | 主 Agent 补上下文/问用户/确认 skipped（写 skipReason）；T5 前清零 |
 | 依赖环/缺失 | 停止正文，回大纲修复 |
-| 字数 <90% | 先重派并给扩写要点；仍不足如实记录留审查 |
-| 全包字数 >±10% | 按 `wordCountDiagnostics.chaptersOverTarget/UnderTarget` 定点精简/扩写，再 T5 |
+| 字数 <90% | 普通章先重派并给扩写要点；仍不足如实记录留审查。特殊章节按模板写够 150–250 字即可，不扩写凑数 |
+| 全包字数 >±10% | 按 `wordCountDiagnostics.chaptersOverTarget/UnderTarget` 定点精简/扩写，再 T5（特殊章节不在清单内） |
 | 子智能体留下临时 png/目录 | 交付前删除；渲染统一由主 Agent 执行 |
 | 标题越级 | 合并脚本报错 → 重写；连续 2 次记 blocker |
 | 图表渲染失败 | 保留源文件、`figures[].status="failed"`、记 issues |

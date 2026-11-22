@@ -29,7 +29,7 @@ const TEMPLATES_DIR = join(PLUGIN_ROOT, 'templates');
  * M2–M8 已注册技能白名单（CONTRACT §8.1 / §10.2 / M4–M8）：其余 `bg-*` 随里程碑补齐。
  * 扫描时忽略目录名不在白名单内的技能，避免半成品技能进入 catalog。
  */
-export const REGISTERED_SKILL_NAMES = Object.freeze(['bidgenie', 'bg-bidder', 'bg-init', 'bg-extract', 'bg-prepare', 'bg-outline', 'bg-write', 'bg-figures', 'bg-writing-style', 'bg-review', 'bg-optimize', 'bg-export-style']);
+export const REGISTERED_SKILL_NAMES = Object.freeze(['bidgenie', 'bg-bidder', 'bg-init', 'bg-extract', 'bg-prepare', 'bg-outline', 'bg-write', 'bg-figures', 'bg-special-chapters', 'bg-writing-style', 'bg-review', 'bg-optimize', 'bg-export-style']);
 
 /** Parse the tiny frontmatter subset the skill contract allows: `name` + `description`. */
 function parseFrontmatter(text) {

@@ -21,6 +21,7 @@
 ```
 
 - overview 基于最新 tech 导出报告；任一自检失败停止后续（不导出 overview、不进 T10）。
+- overview 自动统计特殊章节，并在“数据缺口”下生成“需用户提供的材料（特殊章节）”表；技术 docx 按大纲包含短章节，无需额外处理。
 - keyinfo 按需：`bg_export_docx.py --mode keyinfo ...`；自检 `bg_export_verify.py --mode keyinfo [--docx <path>] --report`（缺省读导出报告里的 docxPath/对应报告）。
 - verify 失败保留产物与报告，修复后重试一次。
 

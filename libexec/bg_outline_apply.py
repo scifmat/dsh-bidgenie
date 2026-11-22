@@ -4,7 +4,8 @@
 Agent 只写 `<packageDir>/chapters/_outline/outline.draft.json`；本脚本负责：
 1) 读取草稿（或 --input），调用 `bg_outline_validate` 校验；
 2) 计算全局 `seq`、`kind`、`dirPath`/`filePath`，按 F5.1.5 分配/校正 `wordTarget`
-   （floor=800、单章上限 min(8000, W/2)、Σ=W），回写 `wordTargetBasis`；
+   （普通章节 floor=800、单章上限 min(8000, W/2)、Σ=W；特殊章节固定 100–300 字、普通章节分摊剩余），
+   回写 `wordTargetBasis`；
 3) 汇总 `figureIndex`/`stats`（图表配额对账）、补 `completion` 默认值、重算 `coveredBy`；
 4) 备份旧 `outline.json` 后原子写；`--materialize` 建章节树/文件头；`--check-tree` 只读校验；
 5) 包根旧布局（M5.1 前）的 `outline*.json` 在 apply 时**自动迁移**到 `chapters/_outline/`
@@ -81,12 +82,21 @@ def _default_review_state() -> dict[str, Any]:
     return {"coverage": "unreviewed", "lastRound": 0, "issueIds": []}
 
 
-def _allocate_words(leaves: Sequence[dict[str, Any]], total: int) -> dict[str, list[Any]]:
-    """F5.1.5 字数分配：floor/max 保护、按 scoreWeight share、Σ==total（尾差到最大权重章）。"""
+def _allocate_words(
+    leaves: Sequence[dict[str, Any]],
+    total: int,
+    *,
+    max_word_total: int | None = None,
+) -> dict[str, list[Any]]:
+    """F5.1.5 字数分配：floor/max 保护、按 scoreWeight share、Σ==total（尾差到最大权重章）。
+
+    ``max_word_total`` 用于特殊章节场景：普通章节分摊剩余字数时，单章上限仍按全包总字数计算。
+    """
     if not leaves:
         raise errors.BgError(errors.E_SCHEMA_INVALID, "大纲没有末级章节，无法分配字数")
     floor = FLOOR_WORD
-    max_word = min(MAX_WORD, max(floor, int(total * 0.5)))
+    max_basis = int(max_word_total) if isinstance(max_word_total, int) and max_word_total > 0 else int(total)
+    max_word = min(MAX_WORD, max(floor, int(max_basis * 0.5)))
     if total < floor * len(leaves):
         raise errors.BgError(
             errors.E_SCHEMA_INVALID,
@@ -208,15 +218,44 @@ def normalize_outline(
     layout = outline_validate.compute_layout(doc)
     leaves = layout["leaves"]
     total = int(doc.get("totalWordTarget") or 0)
-    allocation = _allocate_words(leaves, total)
-    for leaf, word, share, weight in zip(leaves, allocation["targets"], allocation["shares"], allocation["weights"]):
+    special_leaves = [leaf for leaf in leaves if outline_validate.is_special_chapter(leaf)]
+    normal_leaves = [leaf for leaf in leaves if not outline_validate.is_special_chapter(leaf)]
+    special_total = 0
+    for leaf in special_leaves:
+        word = outline_validate.special_word_target(leaf.get("wordTarget"))
         leaf["wordTarget"] = int(word)
         leaf["wordTargetBasis"] = {
-            "formula": "W*share floor=800 step=100",
-            "share": share,
-            "weight": round(float(weight), 6),
+            "formula": "special 100-300 step=100",
+            "share": 0.0,
+            "weight": round(float(leaf.get("scoreWeight") or 0), 6),
             "adjusted": int(word),
         }
+        special_total += int(word)
+    remaining = total - special_total
+    if normal_leaves:
+        if remaining < FLOOR_WORD * len(normal_leaves):
+            raise errors.BgError(
+                errors.E_SCHEMA_INVALID,
+                f"总字数 {total} 扣除特殊章节 {special_total} 字后剩余 {remaining}，不足以覆盖 {len(normal_leaves)} 个普通末级章节的 floor={FLOOR_WORD}",
+                hint="减少章节、降低特殊章节字数（100–300）或提高 expectedWordCount",
+                detail={"totalWordTarget": total, "specialWordTotal": special_total, "remaining": remaining, "normalLeafCount": len(normal_leaves)},
+            )
+        allocation = _allocate_words(normal_leaves, remaining, max_word_total=total)
+        for leaf, word, share, weight in zip(normal_leaves, allocation["targets"], allocation["shares"], allocation["weights"]):
+            leaf["wordTarget"] = int(word)
+            leaf["wordTargetBasis"] = {
+                "formula": "W*share floor=800 step=100",
+                "share": share,
+                "weight": round(float(weight), 6),
+                "adjusted": int(word),
+            }
+    elif remaining != 0:
+        raise errors.BgError(
+            errors.E_SCHEMA_INVALID,
+            f"全部章节均为特殊章节，固定字数合计 {special_total} 与总字数 {total} 不一致",
+            hint="特殊章节固定 100–300 字；请增加普通技术章节，或调整 expectedWordCount 与大纲",
+            detail={"specialWordTotal": special_total, "totalWordTarget": total},
+        )
     for node in layout["nodes"]:
         node.setdefault("priority", "P1")
         node["completion"] = node.get("completion") if isinstance(node.get("completion"), Mapping) else _default_completion()
@@ -772,7 +811,12 @@ def run_selftest() -> dict[str, Any]:
             raise AssertionError(f"字数合计不正确：{stats['plannedWordTotal']}")
         if outline["figureIndex"] and len(outline["figureIndex"]) != sum(outline["stats"]["figureQuota"].values()):
             raise AssertionError("figureIndex 数量与配额不符")
-        if any(node["kind"] == "leaf" and node["wordTarget"] < FLOOR_WORD for node in outline_validate.iter_preorder(outline["chapters"])):
+        if any(
+            node["kind"] == "leaf"
+            and not outline_validate.is_special_chapter(node)
+            and node["wordTarget"] < FLOOR_WORD
+            for node in outline_validate.iter_preorder(outline["chapters"])
+        ):
             raise AssertionError("有末级章节 wordTarget < floor")
         seqs = [node["seq"] for node in outline_validate.iter_preorder(outline["chapters"])]
         if seqs != list(range(1, len(seqs) + 1)):

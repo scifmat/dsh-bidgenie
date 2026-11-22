@@ -51,6 +51,16 @@ SENSITIVE_PATTERNS = (
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[邮箱已脱敏]"),
     (re.compile(r"(?:银行卡|银行账号|卡号|账号)\s*[:：]?\s*\d{12,}"), "银行卡/账号：[已脱敏]"),
 )
+MATERIAL_TYPE_LABELS = {
+    "certificate": "证书/证明",
+    "performance": "业绩/验收材料",
+    "personnel": "人员证书/劳动关系",
+    "test_report": "检测/检验报告",
+    "product_literature": "彩页/软著/专利/授权",
+    "deviation_table": "技术偏离表/参数响应",
+    "commitment": "承诺函/声明函",
+    "sample": "样品/演示/现场考察",
+}
 
 
 def sanitize_text(value: Any) -> str:
@@ -200,6 +210,37 @@ def aggregate(
     nodes = list(outline_validate.iter_preorder(outline.get("chapters") or []))
     leaves = [node for node in nodes if not (isinstance(node.get("children"), list) and node.get("children"))]
     parents = [node for node in nodes if isinstance(node.get("children"), list) and node.get("children")]
+    special_chapters: list[dict[str, Any]] = []
+    special_materials: list[dict[str, Any]] = []
+    for leaf in leaves:
+        if not outline_validate.is_special_chapter(leaf):
+            continue
+        handling = leaf.get("handling") if isinstance(leaf.get("handling"), Mapping) else {}
+        material_type = str(handling.get("materialType") or "")
+        material_label = MATERIAL_TYPE_LABELS.get(material_type, material_type or "未记录")
+        requirements = [item for item in handling.get("requirements") or [] if isinstance(item, Mapping)]
+        user_action = sanitize_text(handling.get("userAction") or "")
+        special_chapters.append(
+            {
+                "chapterId": str(leaf.get("id") or ""),
+                "title": sanitize_text(leaf.get("title") or ""),
+                "materialType": sanitize_text(material_type),
+                "materialLabel": material_label,
+                "requirementCount": len(requirements),
+                "userAction": user_action,
+            }
+        )
+        for requirement in requirements:
+            special_materials.append(
+                {
+                    "chapterId": str(leaf.get("id") or ""),
+                    "title": sanitize_text(leaf.get("title") or ""),
+                    "materialLabel": material_label,
+                    "requirement": sanitize_text(requirement.get("text") or ""),
+                    "sourceRef": sanitize_text(requirement.get("sourceRef") or ""),
+                    "userAction": user_action,
+                }
+            )
     stats = outline.get("stats") if isinstance(outline.get("stats"), Mapping) else {}
     criteria = [item for item in outline.get("criterionIndex") or [] if isinstance(item, Mapping)]
     covered = 0
@@ -259,6 +300,8 @@ def aggregate(
         "networkRemoved": network_removed,
         "criterionCount": len(criteria),
         "criterionCovered": covered,
+        "specialChapterCount": len(special_chapters),
+        "specialMaterialCount": len(special_materials),
     }
     completions = [node.get("completion") for node in leaves if isinstance(node.get("completion"), Mapping)]
     reported_word_total = sum(int(item.get("wordCount") or 0) for item in completions)
@@ -360,6 +403,8 @@ def aggregate(
         "userAnswers": user_answers[:50],
         "outline": outline_summary,
         "body": body_summary,
+        "specialChapters": special_chapters,
+        "specialMaterials": special_materials,
         "history": state_lib.history_transitions(state.get("history") or []),
         "historyEvents": state_lib.history_events(state.get("history") or []),
         "completedStages": [item for item in state.get("completedStages") or [] if isinstance(item, Mapping)],
@@ -392,7 +437,7 @@ def render_markdown(aggregate_data: Mapping[str, Any]) -> str:
     else:
         lines.append("- 投标人完整度：未记录")
     gaps = basic.get("qualificationGaps") if isinstance(basic.get("qualificationGaps"), list) else []
-    lines.append(f"- 资质缺口提示：{len(gaps)} 项" if gaps else "- 资质缺口提示：无记录")
+    lines.append(f"- 资格/证书要求提示（商务部分，供用户核对）：{len(gaps)} 项" if gaps else "- 资格/证书要求提示（商务部分，供用户核对）：无记录")
     lines.append(f"- 包：{basic['packageId']} / {basic['packageName']}（共 {basic['packageCount']} 包）")
     lines.append(f"- 当前阶段：{STAGE_LABELS.get(str(basic['currentStage']), basic['currentStage'])}（{basic['currentStage']}），revision={basic['revision']}")
     lines.append(f"- 审查轮次：{basic['reviewLoop'].get('round', '未记录')}/{basic['reviewLoop'].get('maxRounds', '未记录')}；锁定：{'是' if basic['locks'].get('draftLocked') else '否'}")
@@ -439,6 +484,10 @@ def render_markdown(aggregate_data: Mapping[str, Any]) -> str:
         terminal_planned = int((outline.get("figurePlanned") or {}).get("terminal") or 0)
         lines.append(f"- 终端图：计划 {terminal_planned} 张（参考 {terminal_reference} 张；参考值不强制凑数，按适合章节规划）")
     lines.append(f"- 正文：done {body['doneCount']}，skipped {body['skippedCount']}，blocked {body['blockedCount']}，字数 {body['actualWordCount']}，图表产出 {body['figureProduced']}")
+    special_count = int(outline.get("specialChapterCount") or 0)
+    special_material_count = int(outline.get("specialMaterialCount") or 0)
+    if special_count:
+        lines.append(f"- 特殊章节：{special_count} 个；待用户提供材料 {special_material_count} 项（明细见第 7 节）")
     lines.append("")
     lines.append("## 3. 阶段与状态迁移（state.history）")
     lines.append("")
@@ -532,6 +581,19 @@ def render_markdown(aggregate_data: Mapping[str, Any]) -> str:
     if aggregate_data["conversion"].get("conversionFiles") in (0, "未记录"):
         missing.append("转换文件清单")
     lines.append("；".join(missing) if missing else "无（本概览所需字段均已记录）")
+    materials = aggregate_data.get("specialMaterials") or []
+    if materials:
+        lines.append("")
+        lines.append(f"### 需用户提供的材料（特殊章节，共 {len(materials)} 项）")
+        lines.append("")
+        lines.append("| 章节 | 材料 | 要求 | 来源 | 处理方式 |")
+        lines.append("|---|---|---|---|---|")
+        for item in materials:
+            lines.append(
+                f"| {item.get('chapterId')} {str(item.get('title') or '').replace('|', '/')} | {item.get('materialLabel') or '-'} |"
+                f" {str(item.get('requirement') or '').replace('|', '/')[:120]} | {str(item.get('sourceRef') or '').replace('|', '/')[:80]} |"
+                f" {str(item.get('userAction') or '-').replace('|', '/')[:80]} |"
+            )
     lines.extend(["", "---", "", "> 本文件为工作概览，不并入技术方案正文；如发现内容与业务事实不符，请以项目原始记录为准。"])
     return "\n".join(lines) + "\n"
 
@@ -683,6 +745,8 @@ def export_overview(
             "userAnswers": len(aggregate_data["userAnswers"]),
             "actualWordCount": aggregate_data["outline"].get("actualWordCount"),
             "wordCountBasis": aggregate_data["outline"].get("actualWordCountBasis"),
+            "specialChapters": aggregate_data["outline"].get("specialChapterCount"),
+            "specialMaterials": aggregate_data["outline"].get("specialMaterialCount"),
         },
         "wordCount": {
             "actual": aggregate_data["outline"].get("actualWordCount"),
@@ -777,8 +841,41 @@ def _build_selftest_project(base: Path) -> tuple[Path, Path, Path, int]:
         "valueSource": {"expectedWordCount": "user"},
     }
     jsonio.write_json_atomic(package_dir / "package-meta.json", package_meta)
+    golden = copy.deepcopy(outline_validate._golden_document())  # noqa: SLF001 - 自检复用 golden 夹具
+    chapter3 = golden["chapters"][2]
+    chapter3["scoreWeight"] = 10
+    chapter3["children"].append(
+        {
+            "id": "3-3",
+            "title": "技术、服务偏离表",
+            "level": 2,
+            "kind": "leaf",
+            "order": 3,
+            "criterionRefs": [{"criterionId": "CR-003", "factor": "应急处理", "itemText": "技术评审因素三", "score": 2, "sourceRef": "…"}],
+            "scoreWeight": 2,
+            "contentRequirements": ["特殊处理：要求 + 处理方式 + 请用户补充"],
+            "wordTarget": 200,
+            "priority": "P1",
+            "dependsOn": [],
+            "relatedChapters": [],
+            "figurePlan": [],
+            "insertAnchors": [],
+            "writingNotes": [],
+            "handling": {
+                "mode": "user_material",
+                "materialType": "deviation_table",
+                "requirements": [
+                    {
+                        "text": "按招标文件第六章格式填写《技术、服务偏离表》",
+                        "sourceRef": "extraction/packages/package-1/04-Compilation-Requirements.md#响应文件格式",
+                    }
+                ],
+                "userAction": "请用户按第六章格式填写偏离表，并确认偏离项",
+            },
+        }
+    )
     outline = outline_apply.normalize_outline(
-        copy.deepcopy(outline_validate._golden_document()),  # noqa: SLF001 - 自检复用 golden 夹具
+        golden,
         package_meta=package_meta,
         project_name="概览自检项目",
         package_id="package-1",
@@ -788,7 +885,17 @@ def _build_selftest_project(base: Path) -> tuple[Path, Path, Path, int]:
         if isinstance(node.get("children"), list) and node.get("children"):
             continue
         level = int(node.get("level") or 2)
-        markdown = f"{'#' * level} {node.get('title')}\n\n{_SELFTEST_BODY}\n"
+        if outline_validate.is_special_chapter(node):
+            markdown = (
+                f"{'#' * level} {node.get('title')}\n\n"
+                "### 特殊处理说明\n"
+                "本项为招标文件要求的《技术、服务偏离表》。按招标要求需填写偏离项，具体内容需用户确认。\n\n"
+                "**招标要求**\n- 按第六章格式填写《技术、服务偏离表》。\n\n"
+                "**处理方式**\n本项所需材料需由用户提供并核对，方案不代为承诺、不编造。\n\n"
+                "**请用户补充**\n- 偏离表：请用户填写。\n- 确认事项：请用户确认偏离项。\n"
+            )
+        else:
+            markdown = f"{'#' * level} {node.get('title')}\n\n{_SELFTEST_BODY}\n"
         chapter_path = package_dir / str(node.get("filePath"))
         chapter_path.parent.mkdir(parents=True, exist_ok=True)
         chapter_path.write_text(markdown, encoding="utf-8", newline="\n")
@@ -833,6 +940,11 @@ def run_selftest() -> dict[str, Any]:
             raise AssertionError(f"stats 与审查口径不一致时未给 warning：{result.get('warnings')}")
         if not all(section in markdown for section in ("输入摘要", "大纲与正文", "阶段与状态迁移", "审查与优化", "导出信息", "AI 参与说明", "数据缺口")):
             raise AssertionError("概览 md 缺少必备栏目")
+        if "特殊章节：1 个；待用户提供材料 1 项" not in markdown or "需用户提供的材料（特殊章节，共 1 项）" not in markdown:
+            raise AssertionError(f"概览 md 未写特殊章节材料清单：{markdown[-1200:]}")
+        if "技术、服务偏离表" not in markdown or "请用户按第六章格式填写偏离表" not in markdown:
+            raise AssertionError("概览 md 特殊章节材料明细缺失")
+        checks.append("overview_special_chapters")
         checks.append("overview_sections")
         checks.append("overview_wordcount_review_basis")
         return {"ok": True, "selftest": {"script": "bg_export_overview.py", "checks": checks}}

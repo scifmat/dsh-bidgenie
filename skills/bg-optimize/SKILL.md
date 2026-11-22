@@ -15,8 +15,9 @@ description: BidGenie 技术方案优化（F6.4/F6.5）。当项目处于 optimi
 
 - 只改技术正文与图表资源；不改 outline/不新增章节/不改配额/不改 package-meta。
 - 图表类问题先加载 `bg-figures`：只改布局/拆图/精简标签/删减终端行，不新增未规划的图，不编造数据。
+- **特殊章节（节点带 `handling`）先加载 `bg-special-chapters`**：只改文字表达；不扩写、不补材料、不新增图、不改 handling。
 - 文风类修改按 `bg-writing-style` 执行，不复制规则。
-- 商务/报价内容不修改。
+- 商务/报价内容不修改；特殊章节只改文字表达，不补材料。
 
 ## 进入
 
@@ -49,7 +50,7 @@ description: BidGenie 技术方案优化（F6.4/F6.5）。当项目处于 optimi
 2. 统一口径要留记录（issue note + round 快照）。
 3. 锁定态禁止写正文（`E_LOCKED`）。
 4. 状态只由脚本写；T8 前置 open 清零 + check 通过。
-5. 文风引用 `bg-writing-style`；不承诺 package-meta 之外的人/设备/日期。
+5. 文风引用 `bg-writing-style`；不承诺 package-meta 之外的人/设备/日期。“特殊章节”不扩写、不补材料、不新增图。
 6. 渲染只由主 Agent 执行；子智能体不产 png、不留临时文件。
 
 ## 汇报

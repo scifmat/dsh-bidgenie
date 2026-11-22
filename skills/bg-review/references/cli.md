@@ -48,6 +48,13 @@ issue：`issueId(RV-<round>-<seq4>)/layer(script|coverage|graphic)/type/severity
 带入条目额外：`carriedFrom/lastRound/recheck{round,at,previousStatus,result,note,resolvedStatus?,resolvedAt?}`——`result` 是带入时点复检结论，`resolvedStatus` 是后续 `close` 写的复核结论（当前状态以 `status` 为准）。
 状态：`open → fixing → fixed → verified`；允许 `open → wontfix`（需 userConfirmed）；verified 只能由下一轮审查/复审写入（A 层脚本复检自动写 / B/C 复审 `close --review` 写）。
 
+## 特殊章节（handling）
+
+- 大纲末级带 `handling{mode:"user_material",materialType,requirements[],userAction}` 的章节，正文按 `bg-special-chapters` 模板写。
+- A 层脚本：`wordCheck=skipped`，`judgement=special`；报告“特殊章节（免字数检查）”，不检查图表；只要求文件存在、正文 ≥50 字符、章节 done。
+- B/C 层审前读 `handling`，只审四项：要求摘录准确、处理方式合理、请用户补充明确、没有编造；不因字数少/无证明材料/无图判问题。
+- `wordCountDiagnostics.specialSkipped` 列出跳过的特殊章节；全包字数仍按 `expectedWordCount ±10%` 判。
+
 ## 字数口径（P2-10）
 
 - 唯一实现 `_lib/text.py` 的 `count_body_words`（CJK 字符 + ASCII 词，剥离 HTML 注释与 Markdown 标题行）；审查/合并/导出/概览同口径。
@@ -55,8 +62,8 @@ issue：`issueId(RV-<round>-<seq4>)/layer(script|coverage|graphic)/type/severity
 
 ## 分层与短路
 
-- A 脚本：结构、完整性、标题越级、字数、图表（table 只校题注/行列；**table 出现 BG:FIGURE 记 major `marker_format`（A 层拦截，与 bg-write 硬规则一致）**；mermaid/terminal 校标记↔figureIndex+png+源文件）、**图表机检读取 render-manifest 的 layout（字号/宽高/行数）**、题注、引用、JSON、禁用内容、手工修改检测。
-- A blocker → 短路 B/C（只看仍未关闭的 blocker）；B 覆盖度语义（逐章 summary+criterionRefs，pass/weak/missing）；C 图文语义（脚本机检 + 语义判断）。
+- A 脚本：结构、完整性、标题越级、字数、图表（table 只校题注/行列；**table 出现 BG:FIGURE 记 major `marker_format`（A 层拦截，与 bg-write 硬规则一致）**；mermaid/terminal 校标记↔figureIndex+png+源文件）、**图表机检读取 render-manifest 的 layout（字号/宽高/行数）**、题注、引用、JSON、禁用内容、手工修改检测。**特殊章节免字数/图表检查**。
+- A blocker → 短路 B/C（只看仍未关闭的 blocker）；B 覆盖度语义（逐章 summary+criterionRefs，pass/weak/missing）；C 图文语义（脚本机检 + 语义判断）。特殊章节 B/C 只审四项。
 - C 无资源/无图表 → 直接通过。
 
 ## 通过判据（T7）

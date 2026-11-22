@@ -5,6 +5,7 @@
 - 读取 `<packageDir>/outline.json`（或 Agent 草稿 `outline.draft.json` / `--input`）；
 - 校验 schema、层级（parent≤4/leaf≤5、level=路径深度、id=路径）、结构、评审覆盖、
   contentRequirements、字数（≤±1%）、图表配额/anchorId、依赖（无环且 seq 更小）、路径；
+  特殊章节额外校验 `handling`（mode/materialType/requirements/userAction）、字数 100–300、无图；
 - `--check-tree` 校验 `chapters/**` 文件树与 outline 严格一致（materialize 后）；
 - `--strict` 把非 blocker 发现也视为失败；blocker 时退出码 4（E_VALIDATE_FAILED）；
 - `--report` 可写 `<packageDir>/outline-validation-report.json`（只读校验的报告例外）。
@@ -52,6 +53,20 @@ COMPLETION_STATUS = ("pending", "writing", "done", "skipped", "blocked")
 REVIEW_COVERAGE = ("unreviewed", "pass", "weak", "missing")
 FLOOR_WORD = 800
 MAX_WORD = 8000
+SPECIAL_WORD_MIN = 100
+SPECIAL_WORD_MAX = 300
+SPECIAL_WORD_DEFAULT = 200
+HANDLING_MODES: tuple[str, ...] = ("user_material",)
+MATERIAL_TYPES: tuple[str, ...] = (
+    "certificate",
+    "performance",
+    "personnel",
+    "test_report",
+    "product_literature",
+    "deviation_table",
+    "commitment",
+    "sample",
+)
 MAX_CHAPTERS = 500
 WORD_DELTA_TOL = 0.01
 PATH_MAX_LEN = 240
@@ -259,6 +274,21 @@ def iter_preorder(chapters: Sequence[Any]) -> list[dict[str, Any]]:
     return nodes
 
 
+def is_special_chapter(node: Mapping[str, Any]) -> bool:
+    """是否为特殊章节（handling.mode=user_material）。"""
+    handling = node.get("handling")
+    return isinstance(handling, Mapping) and handling.get("mode") == "user_material"
+
+
+def special_word_target(value: Any) -> int:
+    """特殊章节目标字数：100–300，缺省 200，按整百归一（100/200/300）。"""
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = max(SPECIAL_WORD_MIN, min(SPECIAL_WORD_MAX, value))
+    else:
+        value = SPECIAL_WORD_DEFAULT
+    return int((value + 50) // 100 * 100)
+
+
 def build_figure_index(document: Mapping[str, Any]) -> list[dict[str, Any]]:
     """从所有 figurePlan 汇总 figureIndex（章节先序）。"""
     result: list[dict[str, Any]] = []
@@ -404,6 +434,77 @@ def _validate_node_refs(
     return normalized
 
 
+def _validate_handling(
+    node: Mapping[str, Any],
+    pointer: str,
+    findings: list[dict[str, Any]],
+    *,
+    is_leaf: bool,
+) -> None:
+    """校验特殊章节 handling（只允许末级、mode 固定、材料要求带来源）。"""
+    handling = node.get("handling")
+    if handling is None:
+        return
+    if not is_leaf:
+        _add(findings, "handling_on_parent", "blocker", f"{pointer}/handling", "handling 只允许出现在末级章节")
+        return
+    if not isinstance(handling, Mapping):
+        _add(findings, "handling_invalid", "blocker", f"{pointer}/handling", "handling 必须是对象")
+        return
+    mode = handling.get("mode")
+    if mode not in HANDLING_MODES:
+        _add(
+            findings,
+            "handling_mode_invalid",
+            "blocker",
+            f"{pointer}/handling/mode",
+            f"handling.mode 必须为 {HANDLING_MODES} 之一（实际 {mode!r}）",
+        )
+    material_type = handling.get("materialType")
+    if material_type not in MATERIAL_TYPES:
+        _add(
+            findings,
+            "handling_material_type_invalid",
+            "blocker",
+            f"{pointer}/handling/materialType",
+            f"materialType 必须是 {MATERIAL_TYPES} 之一（实际 {material_type!r}）",
+        )
+    requirements = handling.get("requirements")
+    if not isinstance(requirements, list) or not requirements:
+        _add(
+            findings,
+            "handling_requirements_invalid",
+            "blocker",
+            f"{pointer}/handling/requirements",
+            "requirements 必须是非空数组（每条带原文 text 与来源 sourceRef）",
+        )
+    else:
+        for position, requirement in enumerate(requirements):
+            requirement_pointer = f"{pointer}/handling/requirements/{position}"
+            if not isinstance(requirement, Mapping):
+                _add(findings, "handling_requirement_invalid", "blocker", requirement_pointer, "requirements 元素必须是对象")
+                continue
+            for key in ("text", "sourceRef"):
+                value = requirement.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    _add(
+                        findings,
+                        f"handling_requirement_{key}_missing",
+                        "blocker",
+                        f"{requirement_pointer}/{key}",
+                        f"requirements.{key} 不能为空",
+                    )
+    user_action = handling.get("userAction")
+    if not isinstance(user_action, str) or not user_action.strip():
+        _add(
+            findings,
+            "handling_user_action_missing",
+            "blocker",
+            f"{pointer}/handling/userAction",
+            "userAction 不能为空（写清请用户补充/确认什么）",
+        )
+
+
 def _validate_figures(
     node: Mapping[str, Any],
     pointer: str,
@@ -414,6 +515,16 @@ def _validate_figures(
     is_leaf: bool,
 ) -> None:
     plans = node.get("figurePlan")
+    special = is_special_chapter(node)
+    if special and isinstance(plans, list) and plans:
+        _add(
+            findings,
+            "special_figure_plan_forbidden",
+            "blocker",
+            f"{pointer}/figurePlan",
+            "特殊章节不规划图；请删除 figurePlan（材料清单由 handling 生成）",
+        )
+        plans = None
     if plans is not None:
         if not isinstance(plans, list):
             _add(findings, "figure_plan_invalid", "blocker", f"{pointer}/figurePlan", "figurePlan 必须是数组")
@@ -489,6 +600,14 @@ def _validate_figures(
     if anchors is not None:
         if not isinstance(anchors, list):
             _add(findings, "insert_anchors_invalid", "blocker", f"{pointer}/insertAnchors", "insertAnchors 必须是数组")
+        elif anchors and special:
+            _add(
+                findings,
+                "special_insert_anchors_forbidden",
+                "blocker",
+                f"{pointer}/insertAnchors",
+                "特殊章节不规划图，insertAnchors 必须为空",
+            )
         elif anchors and not is_leaf:
             _add(findings, "insert_anchors_on_parent", "blocker", f"{pointer}/insertAnchors", "插入锚点只允许出现在末级章节")
 
@@ -585,7 +704,20 @@ def _validate_node(
                     _add(findings, "content_requirement_invalid", "blocker", f"{pointer}/contentRequirements/{index}", "写作要求不能为空字符串")
         if require_layout:
             word_target = node.get("wordTarget")
-            if not _is_int(word_target) or value_lt(word_target, FLOOR_WORD):
+            if is_special_chapter(node):
+                if (
+                    not _is_int(word_target)
+                    or word_target < SPECIAL_WORD_MIN
+                    or word_target > SPECIAL_WORD_MAX
+                ):
+                    _add(
+                        findings,
+                        "special_word_target_invalid",
+                        "blocker",
+                        f"{pointer}/wordTarget",
+                        f"特殊章节 wordTarget 必须在 {SPECIAL_WORD_MIN}–{SPECIAL_WORD_MAX} 之间（实际 {word_target!r}）",
+                    )
+            elif not _is_int(word_target) or value_lt(word_target, FLOOR_WORD):
                 _add(findings, "word_target_below_floor", "blocker", f"{pointer}/wordTarget", f"wordTarget 必须 ≥{FLOOR_WORD}（实际 {word_target!r}）")
             elif word_target > max_word:
                 _add(
@@ -598,6 +730,7 @@ def _validate_node(
     else:
         if node.get("wordTarget") not in (0, None) and node.get("wordTarget") != 0:
             _add(findings, "parent_word_target_nonzero", "blocker", f"{pointer}/wordTarget", "父级 wordTarget 必须为 0")
+    _validate_handling(node, pointer, findings, is_leaf=is_leaf)
     _validate_figures(node, pointer, anchor_seen, figure_counts, findings, is_leaf=is_leaf)
     if "completion" in node:
         completion = node.get("completion")
@@ -1083,7 +1216,7 @@ def validate_tree_files(document: Mapping[str, Any], package_dir: Path) -> list[
 def build_parser() -> argparse.ArgumentParser:
     parser = errors.CliParser(
         prog="bg_outline_validate.py",
-        description="BidGenie F5-1 大纲校验：schema/层级/结构/覆盖率/字数/图表/依赖/路径/文件树（只读）",
+        description="BidGenie F5-1 大纲校验：schema/层级/结构/覆盖率/字数/特殊章节/图表/依赖/路径/文件树（只读）",
     )
     errors.add_common_args(parser)
     parser.add_argument("--workspace", help="工作区根绝对路径")
@@ -1365,6 +1498,85 @@ def run_selftest() -> dict[str, Any]:
         block(lambda doc: doc["chapters"][0]["children"][0].__setitem__("dependsOn", ["3-2"]), "depends_on_order")
         block(lambda doc: doc["chapters"][0]["children"][0].__setitem__("id", "1-9"), "id_path_mismatch")
         block(lambda doc: doc["criterionIndex"][0].__setitem__("criterionId", "CR-999"), "criterion_ref_unknown")
+
+        # 特殊章节：100–300 字、无图、handling 必填；普通章节分摊剩余字数且 Σ 不变
+        if [special_word_target(value) for value in (100, 150, 250, 500, None)] != [100, 200, 300, 300, 200]:
+            raise AssertionError("特殊章节字数归一不正确")
+        special_doc = copy.deepcopy(_golden_document())
+        chapter3 = special_doc["chapters"][2]
+        chapter3["scoreWeight"] = 10
+        chapter3["children"].append(
+            {
+                "id": "3-3",
+                "title": "技术、服务偏离表",
+                "level": 2,
+                "kind": "leaf",
+                "order": 3,
+                "criterionRefs": [
+                    {
+                        "criterionId": "CR-003",
+                        "factor": "应急处理",
+                        "itemText": "技术评审因素三",
+                        "score": 2,
+                        "sourceRef": "extraction/packages/package-1/07-Evaluation-Criteria.md#技术评分标准",
+                    }
+                ],
+                "scoreWeight": 2,
+                "contentRequirements": ["特殊处理：要求 + 处理方式 + 请用户补充"],
+                "wordTarget": 200,
+                "priority": "P1",
+                "dependsOn": [],
+                "relatedChapters": [],
+                "figurePlan": [],
+                "insertAnchors": [],
+                "writingNotes": [],
+                "handling": {
+                    "mode": "user_material",
+                    "materialType": "deviation_table",
+                    "requirements": [
+                        {
+                            "text": "按招标文件第六章格式填写《技术、服务偏离表》",
+                            "sourceRef": "extraction/packages/package-1/04-Compilation-Requirements.md#响应文件格式",
+                        }
+                    ],
+                    "userAction": "请用户按第六章格式填写偏离表，并确认偏离项",
+                },
+            }
+        )
+        special = normalize_outline(special_doc, package_meta=package_meta)
+        special_result = validate_document(special, package_meta, require_layout=True)
+        if not special_result["valid"]:
+            raise AssertionError(f"特殊章节大纲校验失败：{special_result['blockers']}")
+        special_node = next(node for node in iter_preorder(special["chapters"]) if node.get("id") == "3-3")
+        special_sum = sum(
+            int(node.get("wordTarget") or 0)
+            for node in iter_preorder(special["chapters"])
+            if not (isinstance(node.get("children"), list) and node.get("children"))
+        )
+        if special_node.get("wordTarget") != 200 or special_node.get("figurePlan") != [] or special_sum != 50000:
+            raise AssertionError(f"特殊章节归一化不正确：word={special_node.get('wordTarget')} figures={special_node.get('figurePlan')} sum={special_sum}")
+        checks.append("special_chapter_valid")
+
+        def special_block(mutator: Any, expected_code: str) -> None:
+            document = copy.deepcopy(special)
+            target = next(node for node in iter_preorder(document["chapters"]) if node.get("id") == "3-3")
+            mutator(document, target)
+            result = validate_document(document, package_meta, require_layout=True)
+            codes = {item["code"] for item in result["blockers"]}
+            if expected_code not in codes:
+                raise AssertionError(f"特殊章节负例未命中 {expected_code}：{sorted(codes)}")
+
+        special_block(lambda doc, node: node.__setitem__("wordTarget", 500), "special_word_target_invalid")
+        special_block(
+            lambda doc, node: node.__setitem__(
+                "figurePlan",
+                [{"anchorId": "fig-3-3-01", "type": "table", "purpose": "对比", "caption": "偏离对比", "status": "planned"}],
+            ),
+            "special_figure_plan_forbidden",
+        )
+        special_block(lambda doc, node: node["handling"].pop("userAction"), "handling_user_action_missing")
+        special_block(lambda doc, node: doc["chapters"][2].__setitem__("handling", node.get("handling")), "handling_on_parent")
+        checks.append("special_chapter_negative")
 
         # 文件树：materialize 后通过，缺文件/内容不符失败
         from bg_outline_apply import materialize_tree

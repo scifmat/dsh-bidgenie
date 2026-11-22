@@ -5,7 +5,7 @@
 - 读取 `chapters/_outline/outline.json`、`chapters/**/*.md`、`chapters/_results/*.chapter-result.json`、
   `resources/**`、`package-meta.json`；
 - A 层检查：结构/文件树一致性、文档完整性、标题层级、字数（8.7.1 阈值）、图表标记/文件/题注/表格、
-  图表配额对账、引用完整性、JSON 合法性、禁用内容；
+  图表配额对账、引用完整性、JSON 合法性、禁用内容；特殊章节（handling）免字数/图表检查，只要求存在/非空/done；
 - 产出 `reviews/issues.json`（7.5 schema）、`reviews/rounds/round-<k>.issues.json`、
   `reviews/review-report.md`（含 criterionId×chapterId 覆盖率矩阵、字数/图表清单）；
 - A 层 blocker 时**短路** B/C（报告标记 skipped）；无 blocker 时标记 B/C 待语义审查（占位，不生成假问题）。
@@ -239,6 +239,7 @@ def review_a_layer(
             render_manifest = {}
     render_anchors = render_manifest.get("anchors") if isinstance(render_manifest.get("anchors"), Mapping) else {}
     chapter_rows: list[dict[str, Any]] = []
+    special_rows: list[dict[str, Any]] = []
     table_rows: list[dict[str, Any]] = []
     figure_rows: list[dict[str, Any]] = []
     word_total = 0
@@ -293,6 +294,18 @@ def review_a_layer(
         path = package_dir / file_path
         target_word = node.get("wordTarget")
         target_word = target_word if isinstance(target_word, int) else 0
+        special = outline_validate.is_special_chapter(node)
+        handling = node.get("handling") if isinstance(node.get("handling"), Mapping) else {}
+        if special:
+            special_rows.append(
+                {
+                    "chapterId": chapter_id,
+                    "title": str(node.get("title") or ""),
+                    "materialType": str(handling.get("materialType") or ""),
+                    "requirementCount": len(handling.get("requirements") or []) if isinstance(handling.get("requirements"), list) else 0,
+                    "userAction": str(handling.get("userAction") or ""),
+                }
+            )
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8-sig", errors="replace")
@@ -338,40 +351,59 @@ def review_a_layer(
             collector.add("script", "heading_level_mismatch", "blocker", chapter_id=chapter_id, file_path=file_path, evidence="缺少首行 Markdown 标题", suggestion="首行补 `#`×level + 标题")
         body = body_text(text)
         compact = re.sub(r"\s+", "", body)
-        if len(compact) < 200:
+        min_body = 50 if special else 200
+        if len(compact) < min_body:
             collector.add(
                 "script",
                 "empty_document",
                 "blocker",
                 chapter_id=chapter_id,
                 file_path=file_path,
-                evidence=f"正文长度 {len(compact)} 字符 < 200（空/占位文档）",
-                suggestion="按 contentRequirements 补写正文",
+                evidence=f"正文长度 {len(compact)} 字符 < {min_body}（空/占位文档）",
+                suggestion="按 bg-special-chapters 模板补「要求 + 处理方式 + 请用户补充」" if special else "按 contentRequirements 补写正文",
             )
         word_count = count_words(text)
         word_total += word_count
-        ratio = (word_count / target_word) if target_word else None
-        judgement = "pass"
-        if ratio is not None:
-            if ratio < 0.60:
-                judgement = "blocker_low"
-                collector.add("script", "word_count_low", "blocker", chapter_id=chapter_id, file_path=file_path, evidence=f"实际 {word_count} 字 / 目标 {target_word}（{ratio:.1%}）<60%", suggestion="扩写至目标 90–120%")
-            elif ratio < 0.90:
-                judgement = "major_low"
-                collector.add("script", "word_count_low", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"实际 {word_count} 字 / 目标 {target_word}（{ratio:.1%}）低于 90%", suggestion="扩写至目标 90–120%")
-            elif ratio <= 1.20:
-                judgement = "pass"
-            elif ratio <= 1.40:
-                judgement = "major_high"
-                collector.add("script", "word_count_high", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"实际 {word_count} 字 / 目标 {target_word}（{ratio:.1%}）高于 120%", suggestion="精简至目标 90–120%")
-            else:
-                judgement = "blocker_high"
-                collector.add("script", "word_count_high", "blocker", chapter_id=chapter_id, file_path=file_path, evidence=f"实际 {word_count} 字 / 目标 {target_word}（{ratio:.1%}）>140%", suggestion="精简至目标 90–120%")
-        chapter_rows.append({"chapterId": chapter_id, "filePath": file_path, "wordCount": word_count, "wordTarget": target_word, "ratio": ratio, "judgement": judgement})
+        if special:
+            ratio = None
+            judgement = "special"
+        else:
+            ratio = (word_count / target_word) if target_word else None
+            judgement = "pass"
+            if ratio is not None:
+                if ratio < 0.60:
+                    judgement = "blocker_low"
+                    collector.add("script", "word_count_low", "blocker", chapter_id=chapter_id, file_path=file_path, evidence=f"实际 {word_count} 字 / 目标 {target_word}（{ratio:.1%}）<60%", suggestion="扩写至目标 90–120%")
+                elif ratio < 0.90:
+                    judgement = "major_low"
+                    collector.add("script", "word_count_low", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"实际 {word_count} 字 / 目标 {target_word}（{ratio:.1%}）低于 90%", suggestion="扩写至目标 90–120%")
+                elif ratio <= 1.20:
+                    judgement = "pass"
+                elif ratio <= 1.40:
+                    judgement = "major_high"
+                    collector.add("script", "word_count_high", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"实际 {word_count} 字 / 目标 {target_word}（{ratio:.1%}）高于 120%", suggestion="精简至目标 90–120%")
+                else:
+                    judgement = "blocker_high"
+                    collector.add("script", "word_count_high", "blocker", chapter_id=chapter_id, file_path=file_path, evidence=f"实际 {word_count} 字 / 目标 {target_word}（{ratio:.1%}）>140%", suggestion="精简至目标 90–120%")
+        chapter_rows.append(
+            {
+                "chapterId": chapter_id,
+                "filePath": file_path,
+                "wordCount": word_count,
+                "wordTarget": target_word,
+                "ratio": ratio,
+                "judgement": judgement,
+                "special": special,
+                "wordCheck": "skipped" if special else "checked",
+            }
+        )
         for pattern, issue_type in FORBIDDEN_PATTERNS:
             match = re.search(pattern, text)
             if match:
                 collector.add("script", issue_type, "major", chapter_id=chapter_id, file_path=file_path, evidence=f"命中禁用内容「{match.group(0)[:40]}」", suggestion="删除占位/绝对路径/证明材料提示")
+        if special:
+            # 特殊章节不规划图、免图表检查；正文只写要求/处理方式/请用户补充。
+            continue
         # 表格题注（所有 GFM 表格）
         for table in markdown_tables(text):
             caption = table["caption"]
@@ -507,6 +539,7 @@ def review_a_layer(
         "nodes": nodes,
         "leaves": leaves,
         "chapterRows": chapter_rows,
+        "specialRows": special_rows,
         "tableRows": table_rows,
         "figureRows": figure_rows,
         "wordTotal": word_total,
@@ -662,8 +695,21 @@ def render_report(
     lines.append("|---|---|---|---|---|")
     for row in chapter_rows:
         ratio = f"{row['ratio']:.1%}" if row.get("ratio") is not None else "-"
-        lines.append(f"| {row.get('chapterId')} | {row.get('wordCount')} | {row.get('wordTarget')} | {ratio} | {row.get('judgement')} |")
+        judgement = "特殊章节（免字数检查）" if row.get("judgement") == "special" else row.get("judgement")
+        lines.append(f"| {row.get('chapterId')} | {row.get('wordCount')} | {row.get('wordTarget')} | {ratio} | {judgement} |")
     lines.append(f"\n全包实际 {result.get('wordTotal')} 字 / expectedWordCount {result.get('expectedWord')}。")
+    special_rows = result.get("specialRows") or []
+    if special_rows:
+        lines.append("")
+        lines.append(f"特殊章节（免字数检查）：{len(special_rows)} 个")
+        lines.append("")
+        lines.append("| 章节 | 材料类型 | 要求数 | 请用户处理 |")
+        lines.append("|---|---|---|---|")
+        for row in special_rows:
+            lines.append(
+                f"| {row.get('chapterId')} {str(row.get('title') or '').replace('|', '/')} | {row.get('materialType') or '-'} |"
+                f" {row.get('requirementCount', 0)} | {str(row.get('userAction') or '-').replace('|', '/')[:80]} |"
+            )
     lines.append("")
     lines.append("## 图表核对")
     lines.append("")
