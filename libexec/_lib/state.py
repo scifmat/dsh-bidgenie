@@ -2740,6 +2740,17 @@ def status_summary(workspace: Path, project_dir: Path) -> dict[str, Any]:
     """status 命令输出（Host 的 GET /projects/state 可直接透传）。"""
     state = load_state(project_dir)
     project = load_project(project_dir)
+    event_log_path = ""
+    event_log_count = 0
+    try:
+        from . import logging as event_log  # 延迟导入，避免 state <-> logging 循环依赖
+
+        path = event_log.events_path(workspace)
+        if path.is_file():
+            event_log_path = str(path)
+            event_log_count = sum(1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip())
+    except (OSError, ValueError):
+        pass
     return {
         "ok": True,
         "command": "state_status",
@@ -2761,7 +2772,11 @@ def status_summary(workspace: Path, project_dir: Path) -> dict[str, Any]:
         "allowedNext": allowed_next(state, project),
         "historyCount": len(state.get("history") or []),
         "transitionCount": len(history_transitions(state.get("history"))),
-        "eventCount": len(history_events(state.get("history"))),
+        # 事件日志只写 dsh/logs/events-*.jsonl，不在 state.history 中；明确命名避免
+        # 把“state 内事件数=0”误读成“没有任何事件”。
+        "stateEventCount": len(history_events(state.get("history"))),
+        "eventLogPath": event_log_path,
+        "eventLogCount": event_log_count,
         "updatedAt": state.get("updatedAt"),
         "updatedBy": state.get("updatedBy"),
         "workspace": str(workspace),

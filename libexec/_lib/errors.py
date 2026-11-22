@@ -152,6 +152,13 @@ def add_common_args(parser: argparse.ArgumentParser, *, subparser: bool = False)
         default=default_json,
         help="stdout 只输出单个 JSON 对象（人类日志走 stderr）",
     )
+    default_brief: Any = argparse.SUPPRESS if subparser else False
+    parser.add_argument(
+        "--brief",
+        action="store_true",
+        default=default_brief,
+        help="精简 --json 输出：逐页覆盖/守卫明细/插件哈希等大数组改为计数（明细仍在落盘文件）",
+    )
     default_timeout: Any = argparse.SUPPRESS if subparser else None
     parser.add_argument(
         "--timeout",
@@ -192,10 +199,77 @@ def _human_text(payload: Mapping[str, Any]) -> str:
     return " ".join(parts)
 
 
-def emit(payload: Mapping[str, Any], json_mode: bool) -> None:
+#: P1-1：--brief 模式下超过该长度的数组只保留头尾样本
+BRIEF_MAX_LIST = 12
+#: --brief 模式下超过该长度的字符串截断
+BRIEF_MAX_STRING = 2000
+
+
+def _brief_value(value: Any, path: str, notes: dict[str, Any]) -> Any:
+    """递归精简大 JSON；明细仍完整落盘，stdout 只给 agent 需要的摘要。"""
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            child_path = f"{path}.{key_text}" if path else key_text
+            if key_text == "pageCoverage" and isinstance(item, list):
+                result["pageCoverageCount"] = len(item)
+                notes[child_path] = {"count": len(item), "kept": 0}
+                continue
+            if key_text == "guard" and isinstance(item, Mapping) and isinstance(item.get("checks"), list):
+                checks = item["checks"]
+                failed = [
+                    str(check.get("id"))
+                    for check in checks
+                    if isinstance(check, Mapping) and check.get("pass") is False
+                ]
+                summarized = {key_: _brief_value(item[key_], f"{child_path}.{key_}", notes) for key_ in item if key_ != "checks"}
+                summarized["checksTotal"] = len(checks)
+                summarized["failedChecks"] = failed
+                result[key_text] = summarized
+                notes[child_path] = {"count": len(checks), "kept": len(failed)}
+                continue
+            if key_text == "plugin" and isinstance(item, Mapping) and isinstance(item.get("files"), list):
+                summarized = {key_: _brief_value(item[key_], f"{child_path}.{key_}", notes) for key_ in item if key_ != "files"}
+                summarized["fileCount"] = len(item.get("files") or [])
+                result[key_text] = summarized
+                notes[child_path] = {"count": len(item.get("files") or []), "kept": 0}
+                continue
+            # 页码清单/告警清单本身很小且排查必需，不做截断
+            if key_text in ("fallbackPages", "warnings", "reasons", "removed", "kept"):
+                result[key_text] = _brief_value(item, child_path, notes)
+                continue
+            if isinstance(item, list) and len(item) > BRIEF_MAX_LIST:
+                head = item[:3]
+                tail = item[-1:]
+                kept = [*head, *_brief_value(tail, f"{child_path}[]", notes)]
+                result[key_text] = kept
+                notes[child_path] = {"count": len(item), "kept": len(kept), "head": 3, "tail": 1}
+                continue
+            result[key_text] = _brief_value(item, child_path, notes)
+        return result
+    if isinstance(value, list):
+        return [_brief_value(item, f"{path}[]", notes) for item in value]
+    if isinstance(value, str) and len(value) > BRIEF_MAX_STRING:
+        notes[path] = {"count": len(value), "kept": BRIEF_MAX_STRING}
+        return value[:BRIEF_MAX_STRING] + "…（--brief 截断）"
+    return value
+
+
+def brief_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """返回 --brief 的精简 payload；不修改调用方对象。"""
+    notes: dict[str, Any] = {}
+    result = _brief_value(payload, "", notes)
+    if isinstance(result, dict) and notes:
+        result["briefInfo"] = {"enabled": True, "truncated": notes}
+    return result
+
+
+def emit(payload: Mapping[str, Any], json_mode: bool, brief_mode: bool = False) -> None:
     """按模式输出结果：--json 为单个 JSON 对象，否则人类可读一行/段。"""
     if json_mode:
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        output = brief_payload(payload) if brief_mode else payload
+        text = json.dumps(output, ensure_ascii=False, indent=2)
     else:
         text = _human_text(payload)
     sys.stdout.write(text + "\n")
@@ -270,6 +344,23 @@ def _log_script_error(
         pass
 
 
+def _force_utf8_streams() -> None:
+    """P1-2：脚本即使未加 ``-X utf8``，stdout/stderr 也按 UTF-8 输出。
+
+    Windows 默认区域编码（GBK/CP936）下，中文 hint 在重定向/捕获时会乱码；这里
+    在 CLI 入口统一改写输出流，保证 JSON 与人类可读文本都是 UTF-8。
+    """
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def run_cli(
     argv: Sequence[str] | None,
     *,
@@ -278,16 +369,18 @@ def run_cli(
     script_name: str = "",
 ) -> int:
     """标准 CLI 入口：解析参数 -> handler -> 统一输出 / 错误映射 / 退出码。"""
+    _force_utf8_streams()
     raw: list[str] = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in raw
     args: argparse.Namespace | None = None
     try:
         args = parser.parse_args(raw)
         json_mode = bool(getattr(args, "json", json_mode))
+        brief_mode = bool(getattr(args, "brief", False))
         result = handler(args)
         if "ok" not in result:
             result = {"ok": True, **result}
-        emit(result, json_mode)
+        emit(result, json_mode, brief_mode)
         return EXIT_OK if result.get("ok") else EXIT_GENERIC
     except BgError as exc:
         _log_script_error(args, exc, script_name, raw)

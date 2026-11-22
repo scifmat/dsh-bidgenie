@@ -7,6 +7,8 @@
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_review_script.py" --round <k> --package "package-<N>" --workspace "<ws>" --project "<projectDir>" --json
 # B/C 层问题合并（layer coverage|graphic）
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_review_issues.py" merge --round <k> --input "<issues-bc.json>" --layer coverage --package "package-<N>" --workspace "<ws>" --project "<projectDir>" --json
+# B 层本轮无新问题：显式写回末级章节 reviewState.coverage（默认只补 unreviewed，保留 weak/missing；--force 重置全部）
+"<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_review_issues.py" coverage --round <k> --default pass --package "package-<N>" --workspace "<ws>" --project "<projectDir>" --json
 # 台账摘要 / 4.6 判据 / 关闭问题
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_review_issues.py" status --package "package-<N>" --workspace "<ws>" --project "<projectDir>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_review_issues.py" verify --round <k> --package "package-<N>" --workspace "<ws>" --project "<projectDir>" --json
@@ -20,6 +22,25 @@
 - 顶层 `--check` 等价 `verify`；没有 `--summary`（用 `status` 子命令）。
 - `bg_review_script.py` 的 `--no-carry-forward`：不读上一轮台账（纯本轮重生成，仅修复/重跑特殊场景使用）。
 - `close --status`：fixing / fixed / verified / wontfix；`--review` 由复审方写 verified；`--user-confirmed` 用于 wontfix。
+- **B 层无新问题**：不要只 `merge` 一个 `issues: []`。`merge` 会把 layer 标 done，但不会凭空写 `outline.reviewState.coverage`；此时 `merge` 返回 `coverageHint`/`warnings`，`verify` 也会带 `coverageHint`。正确做法是再跑 `coverage --round <k> --default pass`（必要时 `--chapter <id>` 限定、`--force` 重置）。
+- `status` 的 `summary.blocker/major/minor` 是**全量历史计数**（含 verified），看“未关闭”用 `openBySeverity` / `summary.openCount`；`summaryScope` 固定为 `all`。
+- `--brief` 可加在任意子命令后：把 `pageCoverage`、guard checks、插件文件哈希等大数组折叠为计数；明细仍在落盘 JSON 中。
+
+## ISSUE_TYPES 完整枚举
+
+`bg_review_issues.py merge` 只接受以下 `type`（写错会 E_VALIDATE_FAILED）：
+
+| 层 | type |
+|---|---|
+| A 结构/完整性 | `missing_chapter` `extra_chapter` `empty_document` `heading_depth_exceeded` `heading_level_mismatch` |
+| A 字数 | `word_count_low` `word_count_high` `total_word_low` `total_word_high` |
+| B 覆盖度 | `coverage_gap` `weak_response` `missing_criterion` `criterion_mismatch` |
+| C 图表/表格 | `figure_missing` `figure_quality` `figure_mismatch` `caption_mismatch` `table_missing` `table_mismatch` |
+| 引用/格式/内容 | `citation_missing` `source_mismatch` `caption_format` `marker_format` `forbidden_content` `placeholder_left` |
+| 导出/运行 | `export_failed` `missing_figure_on_export` `toc_missing` `review_timeout` `script_error` |
+
+正例：`{"layer":"coverage","type":"coverage_gap","severity":"major","chapterId":"1-1","evidence":"评分项……未响应","suggestion":"补写……"}`。
+反例：`type:"coverage"`、`type:"missing"`、`type:"content_weak"` 都不在字典内。
 
 ## 轮次台账与 carry-forward（P1-3）
 

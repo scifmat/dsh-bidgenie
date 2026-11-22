@@ -11,6 +11,9 @@
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_workspace.py" init-project --workspace "<ws>" [--bidder <bidderId>] [--project-name "<名称>"] --json
 # 投标人
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_bidder.py" list|create|update|set-current|validate --workspace "<ws>" [...] --json
+# 项目列表 / 初始化后只读诊断（doctor 不写 state）
+"<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_state.py" projects --workspace "<ws>" --json
+"<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_state.py" doctor --workspace "<ws>" --project "<projectDir>" --json
 # T1
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_state.py" check --to info_extract --workspace "<ws>" --project "<projectDir>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_state.py" transition --to info_extract --workspace "<ws>" --project "<projectDir>" --json

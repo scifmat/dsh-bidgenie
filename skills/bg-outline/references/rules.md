@@ -24,6 +24,7 @@
 
 ```text
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_outline_validate.py" --strict --check-tree [--input "<outline.json>"] --workspace "<ws>" --project "<projectDir>" --json
+"<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_outline_apply.py" --init-draft [--force-draft] [--with-terminal] --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_outline_apply.py" --materialize --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_outline_apply.py" --check-tree --workspace "<ws>" --project "<projectDir>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_outline_apply.py" --migrate-storage --workspace "<ws>" --project "<projectDir>" --json

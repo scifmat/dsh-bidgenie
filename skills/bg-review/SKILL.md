@@ -47,7 +47,9 @@ description: BidGenie 技术方案审查（F6）。当项目处于 review 阶段
 ## 合并与报告
 
 - B/C 子智能体只交临时 JSON；`bg_review_issues.py merge --round <k> --layer coverage|graphic` 合并（脚本分配 issueId/去重/校验/快照）。
+- **B 层无新问题**：`merge` 传空 `issues: []` 不会写 `outline.reviewState.coverage`；看到 `coverageHint` 后跑 `bg_review_issues.py coverage --round <k> --default pass`（默认只补 unreviewed，保留 weak/missing）。
 - 复审 B/C 语义修复项：`bg_review_issues.py close --issue <RV-...> --status verified --review --note "<复检依据>"`；优化方不得自证。
+- `status.summary` 是全量历史计数（含 verified）；未关闭数看 `openBySeverity`/`summary.openCount`，不要因 `major:1` 误判未通过。
 
 ## 判定与迁移
 

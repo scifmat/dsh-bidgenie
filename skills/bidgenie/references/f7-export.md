@@ -24,6 +24,7 @@
 - overview 自动统计特殊章节，并在“数据缺口”下生成“需用户提供的材料（特殊章节）”表；技术 docx 按大纲包含短章节，无需额外处理。
 - keyinfo 按需：`bg_export_docx.py --mode keyinfo ...`；自检 `bg_export_verify.py --mode keyinfo [--docx <path>] --report`（缺省读导出报告里的 docxPath/对应报告）。
 - verify 失败保留产物与报告，修复后重试一次。
+- tech verify 会返回 `tocFieldPresent`；若招标文件要求目录而当前 docx 无 TOC 域，`warnings` 会提示“在 Word 中插入目录后定稿”。这是交付提示，不是导出失败；需要自动目录时由用户/后续版本在 Word 里插入目录域。
 
 ## run-manifest 生命周期
 

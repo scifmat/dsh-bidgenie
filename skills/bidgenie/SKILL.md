@@ -12,8 +12,9 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 - 合法指令：`[BidGenie] action=resume|new|export|extract ...`；自然语言意图：上传+开始→F2、继续/恢复→读状态、只提取→F3、准备写/开始写→F4、写大纲→F5-1、写正文→F5-2、审查/优化→F6、导出技术方案→F7（默认 tech+overview）、导出关键信息→F7 按需 keyinfo。
 - 面板不注入会话、不等待“开始”信号；意图歧义必须问清楚，不猜。
 - **先读 `interactionMode`**：已设置 guided/auto 就一句确认后继续，不问「自动还是逐步」；缺失/无法读取才问一次。
-- 定位：`bidgenie_paths` 取 workspace/pluginRoot/pythonExe/scriptsDir/templatesDir；workspace 必须是 DSH 已注册工作区；找不到项目读 `registry.json.projects[]` 让用户选，禁止编造路径。
-- 读状态：以 `bg_state.py status`（或 state.json）为准，按 `currentStage` 路由，不用“聊到哪”代替状态机。
+- 定位：`bidgenie_paths` 取 workspace/pluginRoot/pythonExe/scriptsDir/templatesDir；workspace 必须是 DSH 已注册工作区；找不到项目先 `bg_state.py projects --workspace <ws>` 列项目让用户选，禁止编造路径。
+- 读状态：以 `bg_state.py status --project <项目>`（或 state.json）为准，按 `currentStage` 路由，不用“聊到哪”代替状态机；status 必须带 `--project`，仅 `projects`/`doctor` 例外。
+- 命令统一用 `<pythonExe> -X utf8 <scriptsDir>/<脚本>.py ... --json`；大输出（convert/prepare/status/render）可加 `--brief` 折叠逐页/守卫/哈希明细。
 
 ## 1. 阶段 → 技能
 
@@ -27,7 +28,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 | review | bg-review | A/B/C 审查（特殊章节只审四项）→ T6 优化 / T7 定稿 |
 | optimize | bg-optimize | 按章合并修复（特殊章节只改文字）→ T8 回 review |
 | finalize / export | 主技能按 §3 F7 策略执行 | 锁定/导出/自检 → T10 |
-| aborted/异常 | bg-doctor（未注册时只读说明） |
+| aborted/异常 | 先跑 `bg_state.py doctor --project <项目>` 只读诊断（阶段/待做章节/stale 结果/issues/建议命令），再按结果路由或加载对应阶段技能 |
 
 - 辅助：`bg-bidder`（投标人资料）、`bg-writing-style`（去 AI 味共享规则）、`bg-export-style`（自建导出样式）、`bg-figures`（图表规划/审图）、`bg-special-chapters`（证书/检测报告/偏离表等特殊章节）。
 - 多包：`writingPackages` 只在 F4 一次确认（选项每包一项、可多选、禁组合/禁二次问）；每包按 F4→F7 串行走完，前包 completed 后 T13 切下一包，不重复问包。

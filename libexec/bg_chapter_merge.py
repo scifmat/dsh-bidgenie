@@ -647,24 +647,53 @@ def merge_selected(
     written = 0
     measured_chapters = 0
     measured_missing: list[str] = []
+    result_paths = {chapter_id: path for path, _document, _node, chapter_id in parsed}
+    stale_results: list[dict[str, Any]] = []
     for node in updated_nodes.values():
         completion = node.get("completion") if isinstance(node.get("completion"), Mapping) else {}
         if completion.get("status") != "done":
             continue
+        chapter_id = str(node.get("id") or "")
         reported = int(completion.get("wordCount") or 0)
         reported_total += reported
         measured = _chapter_body_word_count(package_dir, node)
         if measured is None:
-            measured_missing.append(str(node.get("id") or ""))
+            measured_missing.append(chapter_id)
             written += reported
             continue
         measured_chapters += 1
         written += measured
-        if measured > 0 and abs(reported - measured) / measured > 0.20:
+        result_path = result_paths.get(chapter_id)
+        file_path = node.get("filePath")
+        md_path = package_dir / str(file_path) if isinstance(file_path, str) and file_path else None
+        md_newer = bool(
+            result_path is not None
+            and md_path is not None
+            and md_path.is_file()
+            and result_path.is_file()
+            and md_path.stat().st_mtime > result_path.stat().st_mtime + 1.0
+        )
+        deviation_ratio = abs(reported - measured) / measured if measured > 0 else 0.0
+        # P2：优化阶段子代理改 md 后可能忘记回写 chapter-result.wordCount；即使未超过
+        # 20% 的硬告警阈值，也给 stale 明细，避免“表格里说已改、台账字数没变”无法发现。
+        if reported and (deviation_ratio > 0.05 or md_newer):
+            stale_results.append(
+                {
+                    "chapterId": chapter_id,
+                    "reportedWordCount": reported,
+                    "measuredWordCount": measured,
+                    "deltaPct": round((reported - measured) / measured * 100, 2) if measured > 0 else None,
+                    "mdNewerThanResult": md_newer,
+                    "resultPath": paths.rel_posix(project_dir, result_path) if result_path is not None else "",
+                    "mdPath": str(file_path or ""),
+                    "suggestion": "优化/重写章节后同步更新 chapter-result.wordCount（或重写 chapter-result）",
+                }
+            )
+        if measured > 0 and deviation_ratio > 0.20:
             word_count_warnings.append(
                 {
                     "code": "word_count_deviation",
-                    "chapterId": str(node.get("id") or ""),
+                    "chapterId": chapter_id,
                     "message": f"chapter-result.wordCount={reported} 与章节 md 审查口径 {measured} 偏差 >20%（stats 采用审查口径）",
                 }
             )
@@ -723,19 +752,21 @@ def merge_selected(
         if outline_validate.is_special_chapter(node):
             special_skipped.append(str(node.get("id") or ""))
             continue
-        target = int(node.get("wordTarget") or 0)
+        # 注意：不要复用外层 `target`（包 id），否则 payload/事件里的 package 会被
+        # 最后一个末级章节的 wordTarget（如 800）覆盖。此处用独立局部变量名。
+        chapter_word_target = int(node.get("wordTarget") or 0)
         measured = _chapter_body_word_count(package_dir, node)
-        if not target or measured is None:
+        if not chapter_word_target or measured is None:
             continue
-        delta = measured - target
+        delta = measured - chapter_word_target
         chapter_word_diagnostics.append(
             {
                 "chapterId": str(node.get("id") or ""),
                 "title": str(node.get("title") or ""),
-                "wordTarget": target,
+                "wordTarget": chapter_word_target,
                 "actual": measured,
                 "delta": delta,
-                "pct": round(delta / target * 100, 1),
+                "pct": round(delta / chapter_word_target * 100, 1),
             }
         )
     chapters_over = sorted((item for item in chapter_word_diagnostics if item["delta"] > 0), key=lambda item: item["delta"], reverse=True)[:10]
@@ -753,6 +784,42 @@ def merge_selected(
         "chaptersUnderTarget": chapters_under,
         "specialSkipped": special_skipped,
     }
+
+    # F5-2 批次台账：bg_write_brief 生成 _batch-state.json；合并后按章节 completion 更新状态，
+    # 进程重启后可直接看出哪些批次已完成/仍有 blocked。
+    batch_state_path = package_dir / "chapters" / "_batches" / "_batch-state.json"
+    batch_state: dict[str, Any] = {}
+    if batch_state_path.is_file():
+        try:
+            loaded_batch = jsonio.read_json(batch_state_path)
+        except errors.BgError:
+            loaded_batch = None
+        if isinstance(loaded_batch, dict):
+            batch_state = loaded_batch
+            chapter_status = {
+                str(node.get("id")): str((node.get("completion") or {}).get("status") or "pending")
+                for node in leaf_nodes(updated_outline)
+            }
+            changed_batch = False
+            for batch_no, batch_entry in (batch_state.get("batches") or {}).items():
+                if not isinstance(batch_entry, dict):
+                    continue
+                chapter_ids = [str(item) for item in batch_entry.get("chapterIds") or []]
+                statuses = [chapter_status.get(chapter_id, "pending") for chapter_id in chapter_ids]
+                if statuses and all(status in ("done", "skipped") for status in statuses):
+                    next_status = "merged"
+                elif any(status == "blocked" for status in statuses):
+                    next_status = "blocked"
+                elif any(status == "done" for status in statuses):
+                    next_status = "in_progress"
+                else:
+                    next_status = str(batch_entry.get("status") or "briefed")
+                if batch_entry.get("status") != next_status:
+                    batch_entry["status"] = next_status
+                    changed_batch = True
+            if changed_batch:
+                batch_state["updatedAt"] = paths.iso_now()
+                jsonio.write_json_atomic(batch_state_path, batch_state)
 
     idempotent = not merged
     # 除 completion 变化外，supplementTables 清理/字数口径复算也可能需要落盘；
@@ -803,6 +870,10 @@ def merge_selected(
         "supplementTableCount": len(updated_outline.get("supplementTables") or []),
         "supplementTablesDropped": {"plannedTableEntries": planned_table_skips, "duplicates": duplicate_supplements},
         "wordCountWarnings": word_count_warnings,
+        "staleResults": stale_results,
+        "staleResultCount": len(stale_results),
+        "batchStatePath": "chapters/_batches/_batch-state.json" if batch_state else "",
+        "batchState": batch_state.get("batches", {}) if batch_state else {},
         "wordCountDiagnostics": word_count_diagnostics,
         "currentStage": state.get("currentStage"),
         "revision": state.get("revision"),

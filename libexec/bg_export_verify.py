@@ -304,6 +304,15 @@ def verify_docx(
     checks["numbering"] = {"ok": numbering_ok, "detail": numbering_detail}
     if not numbering_ok:
         findings.append({"code": "heading_numbering_missing", "message": numbering_detail})
+    # P2：招标文件第六章常要求技术文件含目录；当前导出不内置 TOC 域，明确提示而非静默。
+    toc_present = False
+    try:
+        toc_present = any("TOC" in (node.text or "").upper() for node in document.element.xpath(".//w:instrText"))
+    except Exception:  # noqa: BLE001
+        toc_present = False
+    checks["tocFieldPresent"] = toc_present
+    if not toc_present:
+        warnings.append("tech docx 不含 Word 目录域；如招标文件要求目录，请在 Word 中插入目录（引用→目录）后定稿")
 
     expected_images = _produced_figure_count(package_dir, outline)
     actual_images = len(document.inline_shapes)

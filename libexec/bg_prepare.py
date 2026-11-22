@@ -1670,6 +1670,9 @@ def verify_prepared(workspace: Path, project_dir: Path, *, package_id: str | Non
         "materialsIndex": materials_index_status,
         "t3Check": t3,
         "verified": not missing and t3_ok and not invalid_index,
+        # P1-3：与其他 prepare 输出统一契约；单包时显式给 packageId。
+        "packageId": packages[0] if len(packages) == 1 else None,
+        "readyForT3": not missing and t3_ok and not invalid_index,
         "metaKeysChecked": list(PRD_META_KEYS),
     }
     if missing or not t3_ok or invalid_index:
@@ -1856,8 +1859,13 @@ def prepare_project(
     answers_path: Path | None = None,
     answers_document: Mapping[str, Any] | None = None,
     auto: bool = False,
+    switch_package: bool = True,
 ) -> dict[str, Any]:
-    """执行 F4 准备（幂等）：包目录 + package-meta + project 更新 + set-package + 事件 + T3 预检。"""
+    """执行 F4 准备（幂等）：包目录 + package-meta + project 更新 + set-package + 事件 + T3 预检。
+
+    ``switch_package=False`` 供 ``--all-selected`` 批量准备使用：中间包不写 set-package
+    事件，避免历史里出现“来回切包”；批量结束由调用方把当前包设回首包。
+    """
     state = state_lib.load_state(project_dir)
     project = state_lib.load_project(project_dir)
     if str(state.get("currentStage") or "") != "package_prepare":
@@ -1976,7 +1984,17 @@ def prepare_project(
     schema.raise_if_errors(schema.validate_project(updated_project), filename="project.json")
     jsonio.write_json_atomic(project_dir / "project.json", updated_project)
 
-    set_package_result = state_lib.set_package(workspace, project_dir, package=target)
+    if switch_package:
+        set_package_result = state_lib.set_package(workspace, project_dir, package=target)
+    else:
+        unchanged_state = state_lib.load_state(project_dir)
+        set_package_result = {
+            "revision": unchanged_state.get("revision"),
+            "changed": [],
+            "historyKind": "skipped",
+            "currentPackage": unchanged_state.get("currentPackage"),
+            "note": "F4 批量准备：中间包不切换当前包，避免历史出现来回切包",
+        }
     event_log.log_event(
         workspace,
         "package.prepared",
@@ -2029,6 +2047,7 @@ def prepare_project(
             "revision": set_package_result.get("revision"),
             "changed": set_package_result.get("changed") or [],
             "historyKind": set_package_result.get("historyKind") or "event",
+            "note": set_package_result.get("note", ""),
         },
         "t3Check": t3_check,
         "readyForT3": bool(t3_check.get("pass")),
@@ -2907,7 +2926,14 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         pending_packages: list[str] = []
         for index, package_id in enumerate(packages):
-            result = prepare_project(workspace, project_dir, package_id=package_id, answers_path=answers_path, auto=bool(getattr(args, "auto", False)))
+            result = prepare_project(
+                workspace,
+                project_dir,
+                package_id=package_id,
+                answers_path=answers_path,
+                auto=bool(getattr(args, "auto", False)),
+                switch_package=(index == 0),
+            )
             # P2-7：--all-selected 中间包 readyForT3=false 是正常顺序中间态（后续包尚未 prepare），
             # 显式标注 pendingReason，避免 Agent/用户误判 F4 失败；但只有“失败项都由其它包未 prepare
             # 引起”时才这样标注，本包自身仍有失败项时保持原样要求处理。
@@ -2969,6 +2995,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                     if pending_packages
                     else "全部选中包 prepare 完成，最终 readyForT3 以最后一包为准"
                 ),
+                "historyNote": "批量准备只在首包切换一次 currentPackage；中间包不再写 set-package 事件，历史里的切包记录不代表来回切换。",
             },
             "t3Check": last.get("t3Check"),
             "results": results,

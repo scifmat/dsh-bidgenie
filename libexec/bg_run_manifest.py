@@ -552,6 +552,7 @@ def finalize_run(*, workspace: Path, project_dir: Path, out_path: Path) -> dict[
         "driftDetail": drift,
         "manifestPath": str(out_path),
         "runManifestPath": str(run_file),
+        "markdownPath": str(md_path),
         "latest": latest,
         "latestPath": latest.get("path", ""),
         "manifest": manifest,

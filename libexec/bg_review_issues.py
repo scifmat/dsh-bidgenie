@@ -579,16 +579,30 @@ def evaluate_pass(document: Mapping[str, Any], outline: Mapping[str, Any] | None
     if not coverage_ok:
         reasons.append(f"reviewState.coverage 非全部 pass/notApplicable：{coverage_gaps[:10]}")
     per_type = {key: summary[key] for key in ("blocker", "major", "minor")}
-    return {
+    open_by_severity = {
+        "blocker": len(blockers),
+        "major": len(majors_open),
+        "minor": len(minors_open),
+    }
+    result = {
         "pass": not reasons,
         "reasons": reasons,
         "summary": summary,
+        "summaryScope": "all",
+        "openBySeverity": open_by_severity,
         "layersRun": layers_run,
         "layersOk": layers_ok,
         "coverageOk": coverage_ok,
         "coverageGaps": coverage_gaps,
         "countsBySeverity": per_type,
     }
+    if not coverage_ok:
+        result["coverageHint"] = (
+            "B 层已合并但没有写回全部末级章节的 reviewState.coverage。若 B 层本轮无新问题，"
+            "运行 `bg_review_issues.py coverage --round <k> --default pass`（保留已有 weak/missing；"
+            "需要重置全部加 --force），或重新 merge 并在输入里带 coverageUpdates。"
+        )
+    return result
 
 
 def refresh_report_stats(package_dir: Path, document: Mapping[str, Any]) -> bool:
@@ -698,6 +712,21 @@ def merge_issues(
     if outline_path.is_file():
         outline = jsonio.read_json(outline_path)
     leaves = [str(node.get("id")) for node in outline_validate.iter_preorder((outline or {}).get("chapters") or []) if not (isinstance(node.get("children"), list) and node.get("children"))]
+    coverage_hint = ""
+    if outline is not None and (incoming_layer or layer) == "coverage" and not coverage_updates:
+        pending_coverage = [
+            str(node.get("id"))
+            for node in outline_validate.iter_preorder(outline.get("chapters") or [])
+            if not (isinstance(node.get("children"), list) and node.get("children"))
+            and str((node.get("reviewState") or {}).get("coverage") or "unreviewed") in ("unreviewed", "weak", "missing")
+        ]
+        if pending_coverage:
+            coverage_hint = (
+                f"B 层已合并但没有 coverageUpdates，{len(pending_coverage)} 个末级章节仍未 pass/notApplicable"
+                f"（如 {pending_coverage[:5]}）。若本轮 B 层无新问题，运行 "
+                f"`bg_review_issues.py coverage --round {round_no} --default pass`；"
+                "否则在 merge 输入的 coverageUpdates 中逐章写回。"
+            )
     chapter_ids = set(leaves) if leaves else None
     existing = [item for item in document.get("issues") or [] if isinstance(item, Mapping)]
     existing_keys = {
@@ -824,11 +853,156 @@ def merge_issues(
         "layersRun": document["layersRun"],
         "summary": document["summary"],
         "coverageUpdated": coverage_updated,
+        "coverageHint": coverage_hint,
+        "warnings": [coverage_hint] if coverage_hint else [],
         "reportUpdated": report_updated,
         "layerStatus": document.get("layerStatus"),
         "pendingLayers": document.get("pendingLayers"),
         "issuesPath": ISSUES_REL,
         "snapshotPath": f"reviews/rounds/round-{round_no}.issues.json",
+        "currentStage": state.get("currentStage"),
+    }
+
+
+def _set_layer_done(document: dict[str, Any], layer_name: str) -> None:
+    """把 B/C 语义层标为 done，并同步 pendingLayers / layerStatus。"""
+    layers = list(document.get("layersRun") or [])
+    if layer_name not in layers:
+        layers.append(layer_name)
+    document["layersRun"] = [layer_name_ for layer_name_ in LAYERS if layer_name_ in layers]
+    layer_status = dict(document.get("layerStatus") or {}) if isinstance(document.get("layerStatus"), Mapping) else {}
+    layer_status.setdefault("script", "pass")
+    layer_status[layer_name] = "done"
+    for name in LAYERS:
+        layer_status.setdefault(name, "skipped")
+    document["layerStatus"] = layer_status
+    document["pendingLayers"] = [name for name in ("coverage", "graphic") if name not in document["layersRun"]]
+
+
+def apply_coverage_default(
+    *,
+    workspace: Path,
+    project_dir: Path,
+    package_id: str | None,
+    round_no: int | None,
+    default: str = "pass",
+    chapter_ids: Sequence[str] | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """P0-2：把“B 层本轮无新问题”写成显式 coverage 状态。
+
+    背景：``merge --layer coverage`` 若只传 ``issues: []``，历史实现只把 layer 标 done，
+    不会写 outline.reviewState.coverage，导致 ``verify`` 恒失败且 reasons 不提示缺写入路径。
+    本命令默认只补齐 unreviewed 的末级章节（``--default pass|notApplicable``），保留已有
+    weak/missing；``--force`` 才重置全部末级章节。
+    """
+    workspace_path, project_dir_path, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
+        workspace, project_dir, package_id
+    )
+    if default not in ("pass", "notApplicable"):
+        raise errors.BgError(errors.E_USAGE, "--default 只能是 pass 或 notApplicable")
+    document = load_issues(package_dir)
+    round_value = int(document.get("round") or 0)
+    if round_no is not None and round_value != round_no:
+        raise errors.BgError(
+            errors.E_GUARD_FAILED,
+            f"issues.json 轮次 {round_value} != --round {round_no}",
+            hint="先对当前轮跑 bg_review_script.py，或使用相同 --round",
+            detail={"documentRound": round_value, "requestedRound": round_no},
+        )
+    outline_path = outline_validate.outline_path(package_dir)
+    if not outline_path.is_file():
+        raise errors.BgError(
+            errors.E_NOT_FOUND,
+            "缺少 outline.json，无法写回章节覆盖度",
+            hint="先完成 F5-1 大纲落盘",
+            detail={"path": str(outline_path)},
+        )
+    outline = jsonio.read_json(outline_path)
+    leaves = [
+        node
+        for node in outline_validate.iter_preorder(outline.get("chapters") or [])
+        if not (isinstance(node.get("children"), list) and node.get("children"))
+    ]
+    valid_ids = {str(node.get("id")) for node in leaves}
+    requested = list(dict.fromkeys(str(item) for item in (chapter_ids or [])))
+    unknown = sorted(set(requested) - valid_ids)
+    if unknown:
+        raise errors.BgError(
+            errors.E_SCHEMA_INVALID,
+            f"章节不存在或不是末级：{unknown}",
+            detail={"chapterIds": unknown, "validChapterIds": sorted(valid_ids)[:50]},
+        )
+    selected = set(requested) if requested else valid_ids
+    updated: list[dict[str, Any]] = []
+    preserved: list[dict[str, Any]] = []
+    for node in leaves:
+        chapter_id = str(node.get("id"))
+        if chapter_id not in selected:
+            continue
+        review_state = dict(node.get("reviewState") or {})
+        current = str(review_state.get("coverage") or "unreviewed")
+        if not force and current in ("pass", "notApplicable"):
+            preserved.append({"chapterId": chapter_id, "coverage": current})
+            continue
+        if not force and current in ("weak", "missing"):
+            preserved.append({"chapterId": chapter_id, "coverage": current})
+            continue
+        review_state["coverage"] = default
+        review_state["lastRound"] = round_value
+        node["reviewState"] = review_state
+        updated.append({"chapterId": chapter_id, "coverage": default})
+    if updated:
+        stamp = paths.timestamp14()
+        backup = outline_path.parent / f"outline.json.bak-{stamp}"
+        suffix = 1
+        while backup.exists():
+            backup = outline_path.parent / f"outline.json.bak-{stamp}-{suffix}"
+            suffix += 1
+        import shutil as _shutil
+        _shutil.copy2(outline_path, backup)
+        jsonio.write_json_atomic(outline_path, outline)
+    _set_layer_done(document, "coverage")
+    write_issues(package_dir, document)
+    report_updated = refresh_report_stats(package_dir, document)
+    event_log.log_event(
+        workspace_path,
+        "review.coverage_default",
+        actor="script",
+        project=str(project_doc.get("projectId") or ""),
+        package=target,
+        detail={
+            "round": round_value,
+            "default": default,
+            "force": force,
+            "updatedCount": len(updated),
+            "preservedCount": len(preserved),
+        },
+    )
+    remaining = [
+        {"chapterId": str(node.get("id")), "coverage": str((node.get("reviewState") or {}).get("coverage") or "unreviewed")}
+        for node in leaves
+        if str((node.get("reviewState") or {}).get("coverage") or "unreviewed") in ("unreviewed", "weak", "missing")
+    ]
+    return {
+        "ok": True,
+        "command": "review_issues_coverage",
+        "projectId": project_doc.get("projectId"),
+        "packageId": target,
+        "round": round_value,
+        "default": default,
+        "force": force,
+        "coverageUpdated": updated,
+        "preserved": preserved,
+        "remainingGaps": remaining,
+        "coverageOk": not remaining,
+        "layersRun": document["layersRun"],
+        "layerStatus": document.get("layerStatus"),
+        "pendingLayers": document.get("pendingLayers"),
+        "reportUpdated": report_updated,
+        "verifyHint": "" if not remaining else "仍有 weak/missing 章节：先修正文，或对指定章节 merge coverageUpdates 后再 verify",
+        "issuesPath": ISSUES_REL,
+        "snapshotPath": f"reviews/rounds/round-{round_value}.issues.json",
         "currentStage": state.get("currentStage"),
     }
 
@@ -1041,9 +1215,12 @@ def verify_issues(
         "layersOk": result["layersOk"],
         "coverageOk": result["coverageOk"],
         "coverageGaps": result["coverageGaps"][:20],
+        "coverageHint": result.get("coverageHint", ""),
         "summary": result["summary"],
+        "summaryScope": "all",
+        "openBySeverity": result["openBySeverity"],
         "notConverged": bool(result.get("notConverged")),
-        "hint": result.get("hint", ""),
+        "hint": result.get("hint") or result.get("coverageHint", ""),
     }
 
 
@@ -1066,9 +1243,14 @@ def status_issues(
     issues = [item for item in document.get("issues") or [] if isinstance(item, Mapping)]
     by_status: dict[str, int] = {}
     by_severity: dict[str, int] = {}
+    open_by_severity = {"blocker": 0, "major": 0, "minor": 0}
     for issue in issues:
         by_status[str(issue.get("status"))] = by_status.get(str(issue.get("status")), 0) + 1
         by_severity[str(issue.get("severity"))] = by_severity.get(str(issue.get("severity")), 0) + 1
+        severity = str(issue.get("severity") or "")
+        status = str(issue.get("status") or "open")
+        if severity in open_by_severity and status in OPEN_STATUSES:
+            open_by_severity[severity] += 1
     return {
         "ok": True,
         "command": "review_issues_status",
@@ -1080,6 +1262,8 @@ def status_issues(
         "round": document.get("round"),
         "layersRun": document.get("layersRun") or [],
         "summary": recalc_summary(issues),
+        "summaryScope": "all",
+        "openBySeverity": open_by_severity,
         "byStatus": by_status,
         "bySeverity": by_severity,
         "open": [issue.get("issueId") for issue in issues if str(issue.get("status")) in OPEN_STATUSES],
@@ -1273,6 +1457,15 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--round", type=int, required=True)
     merge.add_argument("--input", required=True)
     merge.add_argument("--layer", choices=("coverage", "graphic"))
+    coverage = sub.add_parser("coverage", help="B 层无新问题时写回章节覆盖度（默认只补 unreviewed）")
+    errors.add_common_args(coverage, subparser=True)
+    coverage.add_argument("--workspace", default=argparse.SUPPRESS)
+    coverage.add_argument("--project", default=argparse.SUPPRESS)
+    coverage.add_argument("--package", default=argparse.SUPPRESS)
+    coverage.add_argument("--round", type=int)
+    coverage.add_argument("--default", choices=("pass", "notApplicable"), default="pass")
+    coverage.add_argument("--chapter", action="append", dest="chapters", help="只处理指定末级章节（可重复）")
+    coverage.add_argument("--force", action="store_true", help="重置全部末级章节（包括已有 weak/missing）")
     close = sub.add_parser("close", help="关闭/流转问题状态")
     errors.add_common_args(close, subparser=True)
     close.add_argument("--workspace", default=argparse.SUPPRESS)
@@ -1324,6 +1517,16 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             input_path=args.input,
             layer=args.layer,
         )
+    if command == "coverage":
+        return apply_coverage_default(
+            workspace=workspace,
+            project_dir=project_dir,
+            package_id=getattr(args, "package", None),
+            round_no=args.round,
+            default=str(getattr(args, "default", "pass")),
+            chapter_ids=getattr(args, "chapters", None),
+            force=bool(getattr(args, "force", False)),
+        )
     if command == "close":
         return close_issue(
             workspace=workspace,
@@ -1347,7 +1550,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             round_no=int(args.round),
             dry_run=bool(args.dry_run),
         )
-    raise errors.BgError(errors.E_USAGE, "缺少子命令：merge / close / verify / status / carry-forward", hint="使用 --help 查看用法")
+    raise errors.BgError(errors.E_USAGE, "缺少子命令：merge / coverage / close / verify / status / carry-forward", hint="使用 --help 查看用法")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

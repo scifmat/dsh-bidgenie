@@ -663,6 +663,341 @@ def apply_outline(
     return payload
 
 
+# ---------------------------------------------------------------------------
+# P1-4：从提取稿生成大纲骨架（--init-draft）
+# ---------------------------------------------------------------------------
+TECH_CRITERIA_SECTION = "技术评分标准"
+SCORE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*分\s*\|\s*(.*?)\s*\|\s*$")
+NUMBERED_ITEM_RE = re.compile(r"(?:^|[；;])\s*(\d+)[.、]\s*(.+?)(?=；|;|。|$)")
+ITEM_SCORE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*分")
+
+
+def _read_extraction_text(project_dir: Path, package_id: str, filename: str) -> str:
+    path = project_dir / "extraction" / "packages" / package_id / filename
+    if not path.is_file():
+        raise errors.BgError(
+            errors.E_NOT_FOUND,
+            f"缺少提取稿：extraction/packages/{package_id}/{filename}",
+            hint="先完成 F3 提取并通过 bg_extract_validate.py 校验",
+            detail={"path": str(path)},
+        )
+    return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def parse_technical_criteria(text: str, package_id: str) -> list[dict[str, Any]]:
+    """解析 07-Evaluation-Criteria.md 的「技术评分标准」表。"""
+    rows: list[dict[str, Any]] = []
+    in_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_section = TECH_CRITERIA_SECTION in stripped
+            continue
+        if not in_section or not stripped.startswith("|"):
+            continue
+        if re.match(r"^\|[\s:|-]+\|$", stripped):
+            continue
+        match = SCORE_ROW_RE.match(stripped)
+        if not match:
+            continue
+        factor = match.group(1).strip()
+        if factor in ("评审因素", "评分因素") or not factor:
+            continue
+        rows.append(
+            {
+                "criterionId": f"CR-{len(rows) + 1:02d}",
+                "factor": factor,
+                "score": float(match.group(2)),
+                "clause": match.group(3).strip(),
+                "sourceRef": f"extraction/packages/{package_id}/07-Evaluation-Criteria.md#技术评分标准",
+            }
+        )
+    if not rows:
+        raise errors.BgError(
+            errors.E_VALIDATE_FAILED,
+            "未从技术评分标准中解析到评审因素",
+            hint="检查 extraction/packages/<pkg>/07-Evaluation-Criteria.md 是否有「## 技术评分标准」表格；可手工写 outline.draft.json",
+            detail={"file": "07-Evaluation-Criteria.md"},
+        )
+    for row in rows:
+        row["itemText"] = f"{row['factor']}（{row['score']:g} 分）"
+    return rows
+
+
+def _split_criteria_items(clause: str) -> list[dict[str, Any]]:
+    """从评分标准里拆 1. 2. 3. 分项；保留分项尾部“X 分”。"""
+    items: list[dict[str, Any]] = []
+    for _number, raw in NUMBERED_ITEM_RE.findall(clause):
+        text = re.sub(r"\s+", " ", raw).strip(" 。；;，,")
+        if not text:
+            continue
+        score_match = list(ITEM_SCORE_RE.finditer(text))
+        score = float(score_match[-1].group(1)) if score_match else None
+        title = re.sub(r"[，,]\s*\d+(?:\.\d+)?\s*分.*$", "", text)
+        title = re.sub(r"^[（(][^）)]*[）)]\s*", "", title)
+        title = title.strip(" 。；;，,")
+        if len(title) > 30:
+            title = title[:30].rstrip("，,。；; ")
+        items.append({"title": title or "响应方案", "detail": text, "score": score})
+    return items
+
+
+def _clean_title(text: str) -> str:
+    title = re.sub(r"\s+", " ", str(text or "")).strip(" 。；;，,")
+    return title[:40] or "响应方案"
+
+
+def build_outline_draft(
+    *,
+    project_dir: Path,
+    package_id: str,
+    package_meta: Mapping[str, Any],
+    project: Mapping[str, Any],
+    with_terminal: bool = False,
+) -> dict[str, Any]:
+    """从 07 技术评分标准 + package-meta 生成可编辑的大纲骨架。"""
+    criteria_text = _read_extraction_text(project_dir, package_id, "07-Evaluation-Criteria.md")
+    criteria = parse_technical_criteria(criteria_text, package_id)
+    total_words = int(package_meta.get("expectedWordCount") or 20000)
+    total_score = sum(float(item["score"]) for item in criteria) or 1.0
+    project_name = str(project.get("projectName") or "投标项目")
+    package_name = str(package_meta.get("packageName") or package_id)
+    quota = package_meta.get("figureQuota") if isinstance(package_meta.get("figureQuota"), Mapping) else {}
+    table_quota = max(0, int(quota.get("table") or 0))
+    mermaid_quota = max(0, int(quota.get("mermaid") or 0))
+    terminal_quota = max(0, int(quota.get("terminal") or 0)) if with_terminal else 0
+
+    parent_nodes: list[dict[str, Any]] = []
+    leaf_specs: list[dict[str, Any]] = []
+    for crit_index, criterion in enumerate(criteria, start=1):
+        items = _split_criteria_items(str(criterion.get("clause") or ""))
+        # 分项分值缺失时按“评分因素总分 / 分项数”等分
+        explicit_scores = [item.get("score") for item in items if item.get("score")]
+        if not items:
+            items = [{"title": _clean_title(criterion["factor"] + "响应方案"), "detail": criterion["clause"], "score": None}]
+        if len(explicit_scores) != len(items) or abs(sum(explicit_scores) - float(criterion["score"])) > 0.01:
+            equal = float(criterion["score"]) / len(items)
+            for item in items:
+                item["score"] = round(equal, 2)
+        parent_id = str(crit_index)
+        children: list[dict[str, Any]] = []
+        for item_index, item in enumerate(items, start=1):
+            leaf_id = f"{parent_id}-{item_index}"
+            weight = float(item.get("score") or 1.0)
+            word = max(FLOOR_WORD, int(round(total_words * weight / total_score / 100.0) * 100))
+            children.append(
+                {
+                    "id": leaf_id,
+                    "title": _clean_title(item["title"]),
+                    "level": 2,
+                    "kind": "leaf",
+                    "order": item_index,
+                    "criterionRefs": [
+                        {
+                            "criterionId": criterion["criterionId"],
+                            "factor": criterion["factor"],
+                            "itemText": str(item.get("detail") or criterion["itemText"])[:300],
+                            "score": round(weight, 2),
+                            "sourceRef": criterion["sourceRef"],
+                        }
+                    ],
+                    "scoreWeight": round(weight, 2),
+                    "contentRequirements": [
+                        f"响应「{criterion['factor']}」：{str(item.get('detail') or criterion['clause'])[:160]}",
+                        f"按本包实际给出可执行方法、频次/时限、责任岗位与验收标准；事实以提取稿为准，不编造",
+                        "不整段照抄招标文件；不写商务报价、证明材料、无关承诺",
+                    ],
+                    "wordTarget": word,
+                    "priority": "P0" if weight >= 10 else "P1",
+                    "dependsOn": [],
+                    "relatedChapters": [],
+                    "figurePlan": [],
+                    "insertAnchors": [],
+                    "writingNotes": [],
+                    "completion": _default_completion(),
+                    "reviewState": {"coverage": "unreviewed", "lastRound": 0, "issueIds": []},
+                    "extensions": {},
+                }
+            )
+            leaf_specs.append(children[-1])
+        # 父级 scoreWeight 必须严格等于子节点之和；等分产生的 0.01 误差由最后一个
+        # 子节点吸收，避免 validate 报 parent_score_mismatch。
+        weights = [float(child["scoreWeight"]) for child in children]
+        diff = round(float(criterion["score"]) - sum(weights), 2)
+        if diff and weights:
+            weights[-1] = round(weights[-1] + diff, 2)
+        for child, weight_value in zip(children, weights):
+            child["scoreWeight"] = round(weight_value, 2)
+            if child.get("criterionRefs"):
+                child["criterionRefs"][0]["score"] = round(weight_value, 2)
+        parent_nodes.append(
+            {
+                "id": parent_id,
+                "title": _clean_title(criterion["factor"]),
+                "level": 1,
+                "kind": "parent",
+                "order": crit_index,
+                "criterionRefs": [
+                    {
+                        "criterionId": criterion["criterionId"],
+                        "factor": criterion["factor"],
+                        "itemText": criterion["itemText"],
+                        "score": round(float(criterion["score"]), 2),
+                        "sourceRef": criterion["sourceRef"],
+                    }
+                ],
+                "scoreWeight": round(sum(weights), 2),
+                "priority": "P0" if float(criterion["score"]) >= 10 else "P1",
+                "contentRequirements": [],
+                "completion": _default_completion(),
+                "children": children,
+                "extensions": {},
+            }
+        )
+
+    # 单章上限 8000 时，叶子太少会导致 Σ 无法达到 expectedWordCount（例如 50000/6 被
+    # 截成 48000）。此时拆分分值最大的叶子，保持父级分值不变。
+    leaf_specs = [child for parent in parent_nodes for child in parent.get("children") or []]
+    min_leaves = (total_words + MAX_WORD - 1) // MAX_WORD
+    while len(leaf_specs) < min_leaves:
+        candidates = [
+            (parent, [child for child in parent.get("children") or [] if float(child.get("scoreWeight") or 0) >= 2])
+            for parent in parent_nodes
+        ]
+        candidates = [(parent, children) for parent, children in candidates if children]
+        if not candidates:
+            break
+        candidate_parent, splittable = max(candidates, key=lambda item: len(item[1]))
+        source = max(splittable, key=lambda child: float(child.get("scoreWeight") or 0))
+        siblings = list(candidate_parent.get("children") or [])
+        source_index = siblings.index(source)
+        half = round(float(source.get("scoreWeight") or 0) / 2, 2)
+        first_title = f"{source.get('title')}（一）"
+        second_title = f"{source.get('title')}（二）"
+        first = copy.deepcopy(source)
+        second = copy.deepcopy(source)
+        first["title"], second["title"] = first_title, second_title
+        for item in (first, second):
+            item["scoreWeight"] = half
+            if item.get("criterionRefs"):
+                item["criterionRefs"][0]["score"] = half
+        candidate_parent["children"] = siblings[:source_index] + [first, second] + siblings[source_index + 1 :]
+        for index, child in enumerate(candidate_parent["children"], start=1):
+            child["order"] = index
+            child["id"] = f"{candidate_parent['id']}-{index}"
+        leaf_specs = [child for parent in parent_nodes for child in parent.get("children") or []]
+
+    # 图表配额预填：table 优先；mermaid 顺延；terminal 仅在 --with-terminal 时预填。
+    def add_figure(plan_type: str, count: int, subtype: str | None = None) -> None:
+        for offset in range(count):
+            if not leaf_specs:
+                return
+            leaf = leaf_specs[offset % len(leaf_specs)]
+            plan = {
+                "anchorId": f"fig-{leaf['id']}-{len(leaf['figurePlan']) + 1:02d}",
+                "type": plan_type,
+                "purpose": f"用{'表格' if plan_type == 'table' else '图'}集中呈现「{leaf['title']}」的关键信息，支撑正文可读性",
+                "caption": f"{leaf['title']}{'要点表' if plan_type == 'table' else '流程' if plan_type == 'mermaid' else '示例'}",
+                "status": "planned",
+            }
+            if subtype:
+                plan["subtype"] = subtype
+            leaf["figurePlan"].append(plan)
+            leaf["insertAnchors"].append({"anchorId": plan["anchorId"], "positionHint": "本章关键说明段落之后", "type": plan_type})
+
+    add_figure("table", min(table_quota, len(leaf_specs)))
+    add_figure("mermaid", min(mermaid_quota, len(leaf_specs)), "flowchart")
+    add_figure("terminal", min(terminal_quota, len(leaf_specs)))
+
+    draft = {
+        "schemaVersion": SCHEMA_VERSION,
+        "packageId": package_id,
+        "title": f"{project_name}（{package_name}）技术方案",
+        "generatedAt": paths.iso_now(),
+        "totalWordTarget": total_words,
+        "criterionIndex": [
+            {
+                "criterionId": item["criterionId"],
+                "factor": item["factor"],
+                "itemText": item["itemText"],
+                "score": round(float(item["score"]), 2),
+                "sourceRef": item["sourceRef"],
+                "coveredBy": [],
+            }
+            for item in criteria
+        ],
+        "chapters": parent_nodes,
+        "extensions": {
+            "generatedBy": "bg_outline_apply.py --init-draft",
+            "generatedAt": paths.iso_now(),
+            "needsAgentReview": True,
+            "figurePrefill": {"table": table_quota, "mermaid": mermaid_quota, "terminal": terminal_quota},
+            "note": "骨架仅按技术评分因素与分项生成；写作前请 Agent 按 06/09 补充事实、重难点、特殊章节 handling，并检查标题/分项是否贴合本包。",
+        },
+    }
+    # 先按同一套归一化规则分配精确字数/重算 coveredBy，避免生成后再 --strict 才发现
+    # 父级分值和、字数 Σ、criterion coveredBy 等基础错误。
+    return normalize_outline(draft, package_meta=package_meta, project_name=project_name, package_id=package_id)
+
+
+def init_outline_draft(
+    *,
+    workspace: Path,
+    project_dir: Path,
+    package_id: str | None,
+    force: bool = False,
+    with_terminal: bool = False,
+) -> dict[str, Any]:
+    workspace_path, project_dir_path, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
+        workspace, project_dir, package_id
+    )
+    target_draft = draft_path(package_dir)
+    if target_draft.exists() and not force:
+        raise errors.BgError(
+            errors.E_GUARD_FAILED,
+            f"大纲草稿已存在：{paths.rel_posix(package_dir, target_draft)}",
+            hint="确认要重新生成时加 --force-draft（会覆盖现有草稿；apply 的备份不覆盖 draft）",
+            detail={"path": paths.rel_posix(project_dir_path, target_draft)},
+        )
+    draft = build_outline_draft(
+        project_dir=project_dir_path,
+        package_id=target,
+        package_meta=package_meta,
+        project=project_doc,
+        with_terminal=with_terminal,
+    )
+    outline_dir(package_dir, create=True)
+    jsonio.write_json_atomic(target_draft, draft)
+    validation = outline_validate.validate_document(draft, package_meta, require_layout=False)
+    event_log_event(
+        workspace_path,
+        "outline.draft_initialized",
+        project=str(project_doc.get("projectId") or ""),
+        package=target,
+        detail={
+            "criterionCount": len(draft.get("criterionIndex") or []),
+            "parentCount": len(draft.get("chapters") or []),
+            "leafCount": sum(1 for _node in outline_validate.iter_preorder(draft.get("chapters") or []) if not (isinstance(_node.get("children"), list) and _node.get("children"))),
+            "valid": bool(validation.get("valid")),
+        },
+    )
+    return {
+        "ok": True,
+        "command": "outline_init_draft",
+        "projectId": project_doc.get("projectId"),
+        "packageId": target,
+        "draftPath": paths.rel_posix(project_dir_path, target_draft),
+        "criterionCount": len(draft.get("criterionIndex") or []),
+        "parentCount": len(draft.get("chapters") or []),
+        "leafCount": validation.get("summary", {}).get("leafCount") or sum(
+            1 for _node in outline_validate.iter_preorder(draft.get("chapters") or []) if not (isinstance(_node.get("children"), list) and _node.get("children"))
+        ),
+        "validation": validation,
+        "note": draft["extensions"]["note"],
+        "next": "Agent 编辑 outline.draft.json（补充事实/重难点/特殊章节）后，运行 --strict 校验 → --materialize → T4",
+    }
+
+
 def event_log_event(workspace: Path, name: str, *, project: str, package: str, detail: Mapping[str, Any]) -> None:
     """写事件日志（logging 白名单已在 _lib/logging.py 注册）。"""
     from _lib import logging as event_log
@@ -683,6 +1018,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project", help="项目目录（绝对/相对）或 projectId（配合 --workspace）")
     parser.add_argument("--package", help="目标包 package-<N>（缺省 state.currentPackage / packagesToWrite 首个）")
     parser.add_argument("--input", help="指定草稿文件（缺省 <packageDir>/chapters/_outline/outline.draft.json；包根旧布局文件在缺省路径下会自动迁移）")
+    parser.add_argument("--init-draft", action="store_true", help="P1-4：从 07 技术评分标准 + package-meta 生成 outline.draft.json 骨架")
+    parser.add_argument("--force-draft", action="store_true", help="--init-draft 时覆盖已有 outline.draft.json")
+    parser.add_argument("--with-terminal", action="store_true", help="--init-draft 时按 terminal 配额预填终端图（默认不预填）")
     parser.add_argument("--materialize", action="store_true", help="按 outline 创建 chapters 文件夹/末级 .md（已存在不覆盖，除非 --force）")
     parser.add_argument("--force", action="store_true", help="materialize 时覆盖已存在章节文件")
     parser.add_argument("--check-tree", action="store_true", help="只读校验 chapters/** 与 outline.json 一致（materialize 后）")
@@ -718,6 +1056,14 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
     if not args.project:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
+    if getattr(args, "init_draft", False):
+        return init_outline_draft(
+            workspace=workspace,
+            project_dir=project_dir,
+            package_id=args.package,
+            force=bool(getattr(args, "force_draft", False)),
+            with_terminal=bool(getattr(args, "with_terminal", False)),
+        )
     if getattr(args, "cleanup", False):
         return cleanup_outline(workspace=workspace, project_dir=project_dir, package_id=args.package, keep=max(1, int(getattr(args, "keep", 5) or 5)))
     if getattr(args, "migrate_storage", False):

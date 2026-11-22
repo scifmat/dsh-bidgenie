@@ -28,7 +28,19 @@
 - 图/终端只写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`；**table 不写 `BG:FIGURE` 标记**（按 `▼表<表名>` 题注定位）。
 - **特殊章节**（节点带 `handling`）：正文按 `bg-special-chapters` 模板写“要求 + 处理方式 + 请用户补充”，`figures=[]`、`tables=[]`，不产 `.mmd/.txt`；审查免字数检查，不为凑字灌水。
 
-## 批次派发示例
+## 批次任务书生成（P1-5）
+
+```text
+# 生成第 1 批（写 chapters/_batches/batch-1.json/.md + _batch-state.json）
+"<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_write_brief.py" --batch 1 --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
+# 一次生成全部批次 / 只预览不落盘
+"<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_write_brief.py" --all --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
+"<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_write_brief.py" --batch 1 --no-write --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
+```
+
+生成器按 `dependsOn` 分波次切批（批内无硬依赖），自动带 `projectFacts`、`criterionRefs`、`contentRequirements`、`figurePlan`、`dependencySummaries`、`constraints`；子智能体直接读 `batch-<k>.md`，不再由主 Agent 手写批次 JSON。批次台账 `_batch-state.json` 记录 `chapterIds/status/briefed`，续跑时先看它。
+
+## 批次派发示例（生成器输出的结构）
 
 ```json
 {

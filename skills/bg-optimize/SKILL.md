@@ -31,6 +31,8 @@ description: BidGenie 技术方案优化（F6.4/F6.5）。当项目处于 optimi
 4. 允许统一口径（响应时限、自设指标、模板化开头），但必须记录统一前后与涉及章节，不静默、不扩范围。
 5. **字数类问题按诊断定点修**：先看 `bg_chapter_merge.py` 输出的 `wordCountDiagnostics.chaptersOverTarget/UnderTarget`（或 review 的逐章字数），只改超出目标最多的章节；不要整包重写。
 6. **优化子智能体不渲染 png**：只改章节 md、`.mmd`、`.txt` 源文件；不要运行 `bg_render.py`，也不要在包内/临时目录留下预览 png。需要预览时由主 Agent 在全部修复后统一渲染一次，并清理临时产物。
+7. **改完 md 必须同步 chapter-result.wordCount**：否则 merge 的 `staleResults` 会列出“md 已改但 result 字数未回写”；先 `bg_state.py doctor` 看 stale 清单，再逐章补写 chapter-result 后合并。
+8. **中断恢复**：优先 `send_message` 唤醒原优化子代理（保留已读章节/问题上下文），原会话不可用再按 `_batch-state.json`/issues 重派。
 
 ## M6 遗留专项
 
