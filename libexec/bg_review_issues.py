@@ -1243,14 +1243,11 @@ def status_issues(
     issues = [item for item in document.get("issues") or [] if isinstance(item, Mapping)]
     by_status: dict[str, int] = {}
     by_severity: dict[str, int] = {}
-    open_by_severity = {"blocker": 0, "major": 0, "minor": 0}
     for issue in issues:
         by_status[str(issue.get("status"))] = by_status.get(str(issue.get("status")), 0) + 1
         by_severity[str(issue.get("severity"))] = by_severity.get(str(issue.get("severity")), 0) + 1
-        severity = str(issue.get("severity") or "")
-        status = str(issue.get("status") or "open")
-        if severity in open_by_severity and status in OPEN_STATUSES:
-            open_by_severity[severity] += 1
+    # 与 verify 同一口径：blocker/major 的 fixed 仍算未关闭（必须 verified），minor 的 fixed 可放行。
+    open_by_severity = evaluate_pass(document, outline=None)["openBySeverity"]
     return {
         "ok": True,
         "command": "review_issues_status",
