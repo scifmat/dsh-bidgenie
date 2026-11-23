@@ -78,38 +78,47 @@ foreach ($dir in $runtimeDirs) {
     }
 }
 
-if ($diff.Count -eq 0) {
+$hasContentDiff = $diff.Count -gt 0
+if (-not $hasContentDiff) {
     Write-Ok '运行时代码已与发布仓库一致，无差异。'
-    exit 0
-}
+    if (-not ($Commit -or $Push)) { exit 0 }
+    # 内容已同步但仍有 tools/docs 等发布独有文件或上次同步未提交的变更：
+    # 继续走 git 提交流程，避免 -Commit 被“无内容差异”提前吞掉。
+    Write-Warn '运行时代码无差异，但指定了 -Commit/-Push：继续检查发布仓库 git 变更。'
+} else {
+    Write-Step "差异（$($diff.Count) 项）"
+    $diff | Select-Object -First 60 | ForEach-Object { Write-Host "  $_" }
+    if ($diff.Count -gt 60) { Write-Host "  ... 其余 $($diff.Count - 60) 项" }
 
-Write-Step "差异（$($diff.Count) 项）"
-$diff | Select-Object -First 60 | ForEach-Object { Write-Host "  $_" }
-if ($diff.Count -gt 60) { Write-Host "  ... 其余 $($diff.Count - 60) 项" }
+    if ($Check) {
+        Write-Warn '仅检查模式：未写入。'
+        exit 0
+    }
 
-if ($Check) {
-    Write-Warn '仅检查模式：未写入。'
-    exit 0
+    Write-Step '同步运行时代码（保留发布仓库独有文件）'
+    foreach ($file in $runtimeFiles) {
+        Copy-Item (Join-Path $DevPlugin $file) (Join-Path $Repo $file) -Force
+    }
+    # 用 robocopy 只增量复制运行目录；不清理目标中的 README/封面/tools 等发布独有文件。
+    foreach ($dir in $runtimeDirs) {
+        $s = Join-Path $DevPlugin $dir
+        $r = Join-Path $Repo $dir
+        if (-not (Test-Path $s)) { continue }
+        $null = robocopy $s $r /E /XD __pycache__ .pytest_cache .mypy_cache /XF *.pyc *.pyo *.bak *.tmp *.lock /NFL /NDL /NJH /NJS
+    }
+    Write-Ok '运行时代码已同步。'
 }
-
-Write-Step '同步运行时代码（保留发布仓库独有文件）'
-foreach ($file in $runtimeFiles) {
-    Copy-Item (Join-Path $DevPlugin $file) (Join-Path $Repo $file) -Force
-}
-# 用 robocopy 只增量复制运行目录；不清理目标中的 README/封面/tools 等发布独有文件。
-foreach ($dir in $runtimeDirs) {
-    $s = Join-Path $DevPlugin $dir
-    $r = Join-Path $Repo $dir
-    if (-not (Test-Path $s)) { continue }
-    $null = robocopy $s $r /E /XD __pycache__ .pytest_cache .mypy_cache /XF *.pyc *.pyo *.bak *.tmp *.lock /NFL /NDL /NJH /NJS
-}
-Write-Ok '运行时代码已同步。'
 
 if ($Commit -or $Push) {
     Push-Location $Repo
     try {
+        $status = git status --porcelain
+        if (-not $status) {
+            Write-Ok '发布仓库工作区干净，无需提交。'
+            exit 0
+        }
         Write-Step '发布仓库差异'
-        git status --short
+        $status
         git add -A
         if ($Commit) {
             git commit -m $Message
