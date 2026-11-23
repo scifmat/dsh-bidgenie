@@ -603,7 +603,14 @@ def validate_file(
             _blocker("section_missing", report_path, "H2", f"缺少 expectedSections：{missing}")
         )
     expected_normalized = {normalize_title(section) for section in expected_sections}
-    extra = [section for section in found_sections if normalize_title(section) not in expected_normalized]
+    # P2-5：`需用户确认` 是提取模板允许的附加章节（转换不可辨/矛盾时记录），
+    # 不应作为 section_extra warning 污染校验结果；其他非预期章节仍提示。
+    optional_normalized = {normalize_title("需用户确认")}
+    extra = [
+        section
+        for section in found_sections
+        if normalize_title(section) not in expected_normalized and normalize_title(section) not in optional_normalized
+    ]
     if extra and expected_sections:
         # expectedSections=[]（如 09）表示模板不限定章节，自然分节不算异常
         result["extraSections"] = extra

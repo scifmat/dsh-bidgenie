@@ -1806,10 +1806,15 @@ def _completed_packages(project: Mapping[str, Any], state: Mapping[str, Any]) ->
     for package, entry in _package_progress(project).items():
         if isinstance(entry, Mapping) and str(entry.get("status") or "") == "completed":
             completed.add(package)
+    history_completed: set[str] = set()
     for entry in history_transitions(state.get("history")):
         if str(entry.get("to") or "") == "completed" and str(entry.get("scope") or "").startswith("package-"):
-            completed.add(str(entry["scope"]))
-    if state.get("currentStage") == "completed" and str(state.get("currentPackage") or ""):
+            history_completed.add(str(entry["scope"]))
+    completed |= history_completed
+    # P1-2：currentStage=completed 且 currentPackage 存在时，旧实现无条件把当前包算作已完成；
+    # 但用户可能已先 set-package 到下一包，导致 T13 把“下一包”误判为已完成而失败。
+    # 仅在没有 completed 历史（旧状态/手工状态）时才按 currentPackage 兜底。
+    if state.get("currentStage") == "completed" and str(state.get("currentPackage") or "") and not history_completed:
         completed.add(str(state["currentPackage"]))
     return completed
 
@@ -1823,17 +1828,36 @@ def _first_unprepared_package(project_dir: Path, project: Mapping[str, Any]) -> 
     return selected[0] if selected else DEFAULT_PACKAGE
 
 
-def _next_writing_package(project: Mapping[str, Any], state: Mapping[str, Any]) -> tuple[str | None, list[str], str]:
+def _t13_progress(project: Mapping[str, Any], state: Mapping[str, Any]) -> tuple[str | None, list[str], str, str, bool]:
+    """T13 推进上下文：``(下一包, selected, current, effectiveCurrent, recovered)``。
+
+    P1-2：若用户已先 `set-package` 到下一包（current 未完成、紧邻的前一包已完成），
+    T13 仍按“上一已完成包 → current”推进，并标记 recovered=True；guard 会输出提示，
+    effect 用 effectiveCurrent 记录前包锁信息。
+    """
     selected = _writing_packages(project)
     current = str(state.get("currentPackage") or "")
-    if not selected or current not in selected:
-        return None, selected, current
-    index = selected.index(current)
+    completed = _completed_packages(project, state)
+    effective = current
+    recovered = False
+    if current in selected and current not in completed:
+        index = selected.index(current)
+        if index > 0 and selected[index - 1] in completed:
+            effective = selected[index - 1]
+            recovered = True
+    if not selected or effective not in selected:
+        return None, selected, current, effective, recovered
+    index = selected.index(effective)
     if index + 1 >= len(selected):
-        return None, selected, current
+        return None, selected, current, effective, recovered
     nxt = selected[index + 1]
-    if nxt in _completed_packages(project, state):
-        return None, selected, current
+    if nxt in completed:
+        return None, selected, current, effective, recovered
+    return nxt, selected, current, effective, recovered
+
+
+def _next_writing_package(project: Mapping[str, Any], state: Mapping[str, Any]) -> tuple[str | None, list[str], str]:
+    nxt, selected, current, _effective, _recovered = _t13_progress(project, state)
     return nxt, selected, current
 
 
@@ -1859,24 +1883,38 @@ def _update_project_progress(
 def guard_t13(ctx: TransitionContext) -> list[dict[str, Any]]:
     """T13 completed→package_prepare：存在下一个已选撰写包，顺序推进、不跳包/不重复。"""
     checks: list[dict[str, Any]] = [_pending_input_check(ctx.state)]
-    selected = _writing_packages(ctx.project)
-    current = str(ctx.state.get("currentPackage") or "")
-    nxt, _, _ = _next_writing_package(ctx.project, ctx.state)
+    nxt, selected, current, effective, recovered = _t13_progress(ctx.project, ctx.state)
+    completed = _completed_packages(ctx.project, ctx.state)
     _check(checks, "writing_packages", "writingPackages/packagesToWrite 非空", bool(selected), {"selected": selected})
     _check(checks, "current_selected", "当前包属于 selected", bool(current) and current in selected, {"current": current, "selected": selected})
     if current in selected:
-        index = selected.index(current)
+        index = selected.index(effective)
         expected = selected[index + 1] if index + 1 < len(selected) else None
-        _check(checks, "next_package", "存在下一个未完成撰写包", bool(nxt), {"next": nxt, "expected": expected})
+        _check(
+            checks,
+            "next_package",
+            "存在下一个未完成撰写包",
+            bool(nxt),
+            {"next": nxt, "expected": expected, "effectiveCurrent": effective},
+        )
         _check(checks, "sequential", "下一包紧跟当前包（不可跳包/重复）", nxt == expected, {"next": nxt, "expected": expected})
-        _check(checks, "current_completed", "当前包已完成", current in _completed_packages(ctx.project, ctx.state), {"current": current})
+        _check(checks, "current_completed", "当前包已完成", effective in completed, {"current": current, "effectiveCurrent": effective})
+        if recovered:
+            _check(
+                checks,
+                "pre_switched_auto_recover",
+                "currentPackage 已提前切到下一包，T13 按上一已完成包自动识别",
+                True,
+                {"current": current, "effectiveCurrent": effective},
+            )
     return checks
 
 
 def effect_t13(ctx: TransitionContext, state: dict[str, Any]) -> None:
-    nxt, selected, current = _next_writing_package(ctx.project, state)
+    nxt, selected, current, effective, recovered = _t13_progress(ctx.project, state)
     if not nxt:
         raise BgError(E_GUARD_FAILED, "没有下一个撰写包，不能执行 T13")
+    previous = effective
     # 前一包已定稿锁定；切下一包前释放项目级 draftLocked（前一包 .locked/_frozen 文件保留）
     locks = dict(state.get("locks") or {})
     if locks.get("draftLocked") is True:
@@ -1885,19 +1923,24 @@ def effect_t13(ctx: TransitionContext, state: dict[str, Any]) -> None:
             "lockReason": locks.get("lockReason"),
             "manifestPath": locks.get("manifestPath"),
             "rootHash": locks.get("rootHash"),
-            "package": current,
+            "package": previous,
         }
         locks["draftLocked"] = False
         locks["lockedAt"] = None
         locks["lockReason"] = ""
         locks["previousLock"] = previous_lock
     state["locks"] = locks
-    _update_project_progress(ctx, state, status="package_prepared", package=current, package_status="completed")
+    _update_project_progress(ctx, state, status="package_prepared", package=previous, package_status="completed")
     _update_project_progress(ctx, state, status="package_prepared", package=nxt, package_status="package_prepare")
     state["currentStage"] = "package_prepare"
     state["currentScope"] = nxt
     state["currentPackage"] = nxt
     state.pop("completedAt", None)
+    if recovered:
+        # 可追溯：记录一次事件，不额外写 history transition
+        extensions = dict(state.get("extensions") or {})
+        extensions["t13PreSwitchRecovered"] = {"at": paths.iso_now(), "from": current, "effectiveCurrent": previous, "to": nxt}
+        state["extensions"] = extensions
 
 
 def _guard_pending_milestone(milestone: str) -> Callable[[TransitionContext], list[dict[str, Any]]]:
@@ -2374,14 +2417,21 @@ def perform_transition(
     )
     guard = evaluate_guard(context)
     if not guard["pass"]:
+        hint = "按 guard.checks 中的失败项修复后重试（check 命令可只读预检）"
+        if transition.id == "T13":
+            hint = (
+                "T13 必须在上一包 completed 且 currentPackage 仍为上一包时执行；"
+                "若已提前 set-package 到下一包，请先 set-package 回上一包再执行 T13（新版会自动识别提前切包）"
+            )
         raise BgError(
             E_GUARD_FAILED,
             f"迁移前置条件不满足：{current_stage} → {to_stage}",
-            hint="按 guard.checks 中的失败项修复后重试（check 命令可只读预检）",
+            hint=hint,
             detail={
                 "current": current_stage,
                 "to": to_stage,
                 "transitionId": transition.id,
+                "currentPackage": state.get("currentPackage"),
                 "guard": guard,
                 "allowedNext": allowed_next(state, project),
             },
@@ -2511,6 +2561,7 @@ def check_transition(
         transition=transition,
     )
     guard = evaluate_guard(context)
+    next_writing, _selected, _current, effective, recovered = _t13_progress(project, state)
     return {
         "ok": True,
         "command": "state_check",
@@ -2518,6 +2569,10 @@ def check_transition(
         "from": state.get("currentStage"),
         "to": to_stage,
         "scope": state.get("currentScope"),
+        "currentPackage": state.get("currentPackage"),
+        "nextWritingPackage": next_writing,
+        "t13EffectiveCurrent": effective if transition.id == "T13" else None,
+        "t13PreSwitchRecovered": recovered if transition.id == "T13" else False,
         "pass": guard["pass"],
         "guard": guard,
         "effects": transition.effects_note,

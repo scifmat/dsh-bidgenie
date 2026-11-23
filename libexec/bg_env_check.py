@@ -41,7 +41,7 @@ _PLUGIN_ROOT = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import deps, errors, jsonio, logging as event_log, paths  # noqa: E402
+from _lib import deps, errors, jsonio, logging as event_log, paths, runtime as runtime_env  # noqa: E402
 
 CHECKLIST_PATH = _SCRIPT_DIR / "checklist.json"
 ENV_CHECK_SCHEMA_VERSION = "1.0"
@@ -596,21 +596,35 @@ def check_external_converters(ctx: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def check_browser_renderer(ctx: Mapping[str, Any]) -> dict[str, Any]:
-    """browser_renderer：Chrome/Edge + 内置 mermaid.min.js。"""
+    """browser_renderer：Chrome/Edge + 内置 mermaid.min.js + node。
+
+    P0-2（2026-11-23 干净 VM）：打包版 DSH 的 node 不在 PATH，旧实现只查浏览器，
+    导致 env-check 假通过、交付全占位图。node 发现顺序与 `bg_render.py` 共用
+    `_lib.runtime`（BG_NODE → PATH → DSH 运行时解释器兄弟目录）。
+    """
     item = ctx["item"]
     config = item.get("config") or {}
     browser = _find_browser(item)
     asset_rel = str(config.get("mermaidAsset") or "assets/mermaid/mermaid.min.js")
     asset_path = _PLUGIN_ROOT / asset_rel
+    node_path, node_source = runtime_env.find_node()
     problems: list[str] = []
     if browser is None:
         problems.append("未检测到 Chrome/Edge")
     if not asset_path.is_file():
         problems.append(f"缺少 {asset_rel}")
-    detail = {"browser": str(browser) if browser else "", "mermaidAsset": asset_rel, "problems": problems}
+    if node_path is None:
+        problems.append("未检测到 node（mermaid 会降级为 Pillow 占位图）")
+    detail = {
+        "browser": str(browser) if browser else "",
+        "mermaidAsset": asset_rel,
+        "node": str(node_path) if node_path else "",
+        "nodeSource": node_source,
+        "problems": problems,
+    }
     if problems:
         return _result(STATUS_FAILED, "；".join(problems), detail)
-    return _result(STATUS_PASSED, f"{browser} + {asset_rel}", detail)
+    return _result(STATUS_PASSED, f"{browser} + {asset_rel} + node({node_source})", detail)
 
 
 def check_workspace_writable(ctx: Mapping[str, Any]) -> dict[str, Any]:

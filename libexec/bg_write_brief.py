@@ -52,31 +52,39 @@ def _dependency_ids(node: Mapping[str, Any]) -> list[str]:
     return [str(item) for item in node.get("dependsOn") or [] if str(item)]
 
 
+def _seq_key(node: Mapping[str, Any]) -> tuple[int, int, str]:
+    """按大纲先序 seq 排序；草稿/旧大纲没有 seq 时退回 order。"""
+    seq = node.get("seq")
+    if isinstance(seq, int) and not isinstance(seq, bool):
+        return (0, seq, str(node.get("id") or ""))
+    order = node.get("order")
+    if isinstance(order, int) and not isinstance(order, bool):
+        return (1, order, str(node.get("id") or ""))
+    return (2, 0, str(node.get("id") or ""))
+
+
 def plan_batches(leaves: Sequence[Mapping[str, Any]], batch_size: int = DEFAULT_BATCH_SIZE) -> list[list[dict[str, Any]]]:
-    """按 dependsOn 分波次切批；批内无硬依赖，批间按前批完成推进。"""
+    """按大纲顺序（seq）连续切批，批内按 priority 排序。
+
+    P2-6（2026-11-23 冒烟）：旧实现按 dependsOn 分波次，第一批会跨章跳到
+    `1-1/6-1/7-1/9-1`，写作连续性差。dependsOn 在连续 batch 中自然满足
+    （依赖只指向更早章节），批内仍按 seq 顺序书写即可。尾批不足 4 时并入前批。
+    """
     size = max(1, int(batch_size))
     pending = [dict(node) for node in leaves if _completion_status(node) not in ("done", "skipped")]
-    completed = {str(node.get("id")) for node in leaves if _completion_status(node) in ("done", "skipped")}
-    batches: list[list[dict[str, Any]]] = []
-    while pending:
-        ready = [
-            node
-            for node in pending
-            if all(dep in completed for dep in _dependency_ids(node))
-        ]
-        if not ready:
-            # 依赖环/大纲错误：不静默死循环，按原始顺序切一批，交给 Agent/审查发现
-            ready = list(pending)
-        batch = ready[:size]
-        batches.append(batch)
-        batch_ids = {str(node.get("id")) for node in batch}
-        pending = [node for node in pending if str(node.get("id")) not in batch_ids]
-        completed.update(batch_ids)
-    # 尾批不足 4 时尽量并入前一批（仍不超过 6）
+    pending.sort(key=_seq_key)
+    batches = [pending[index : index + size] for index in range(0, len(pending), size)]
+    # 尾批过小时并入前一批；仍不超过 size
     if len(batches) >= 2 and len(batches[-1]) < 4 and len(batches[-2]) + len(batches[-1]) <= size:
         batches[-2].extend(batches[-1])
         batches.pop()
+    for batch in batches:
+        batch.sort(key=lambda node: (_prio_rank(node), _seq_key(node)))
     return batches
+
+
+def _prio_rank(node: Mapping[str, Any]) -> int:
+    return {"P0": 0, "P1": 1, "P2": 2}.get(str(node.get("priority") or "P1"), 9)
 
 
 def _project_facts(project: Mapping[str, Any], package_meta: Mapping[str, Any]) -> dict[str, Any]:
@@ -128,10 +136,13 @@ def build_batch_payload(
                 "chapterId": chapter_id,
                 "title": node.get("title") or "",
                 "level": node.get("level"),
+                "seq": node.get("seq"),
                 "filePath": node.get("filePath") or "",
                 "wordTarget": node.get("wordTarget") or 0,
                 "priority": node.get("priority") or "",
                 "scoreWeight": node.get("scoreWeight") or 0,
+                "dependsOn": _dependency_ids(node),
+                "maxBodyHeadingLevel": (int(node.get("level") or 1) + 1),
                 "criterionRefs": node.get("criterionRefs") or [],
                 "contentRequirements": node.get("contentRequirements") or [],
                 "figurePlan": node.get("figurePlan") or [],
@@ -158,12 +169,15 @@ def build_batch_payload(
             "noSensitive": True,
             "noBusinessMaterial": True,
             "writeOnlyCurrentBatch": True,
+            # P2-8：A 层按 outline.level+1 判 heading_depth_exceeded，任务书必须显式约束
+            "maxBodyHeadingLevel": "outline.level + 1（末级 level=2 时正文只能用 ###，禁止 ####）",
         },
         "writingRules": [
             "加载 bg-writing-style；正文不写跨章引用（如“详见第 3 章”）。",
             "图表按 figurePlan 生成；table 不写 BG:FIGURE，mermaid/terminal 才写标记。",
             "特殊章节 handling 不为空时按 bg-special-chapters 模板写，不产图/表。",
             "只写本章 md 与 resources 源文件；不改 outline.json，不渲染 png。",
+            "正文小节标题最多下探到章节层级+1（末级 level=2 时只用 ###，不要 ####/#####）。",
         ],
     }
 
@@ -192,6 +206,7 @@ def render_batch_markdown(payload: Mapping[str, Any]) -> str:
                 f"- 文件：`{chapter.get('filePath') or ''}`",
                 f"- 目标字数：{chapter.get('wordTarget') or 0}（审查口径，目标区间 90%–120%）",
                 f"- 优先级/分值：{chapter.get('priority') or '-'} / {chapter.get('scoreWeight') or 0}",
+                f"- 正文标题上限：`{'#' * int(chapter.get('maxBodyHeadingLevel') or 3)}`（不要写更深层级）",
                 "- 评审因素：",
             ]
         )
@@ -245,7 +260,7 @@ def _batch_state_path(package_dir: Path) -> Path:
     return package_dir / BATCH_STATE
 
 
-def update_batch_state(package_dir: Path, payload: Mapping[str, Any]) -> bool:
+def update_batch_state(package_dir: Path, payload: Mapping[str, Any], *, configured_batch_size: int | None = None) -> bool:
     path = _batch_state_path(package_dir)
     document: dict[str, Any] = {}
     if path.is_file():
@@ -261,12 +276,15 @@ def update_batch_state(package_dir: Path, payload: Mapping[str, Any]) -> bool:
         "generatedAt": paths.iso_now(),
         "batchSize": payload.get("batchSize"),
     }
+    # P2-7：台账批大小必须回写本次实际配置，不能永远写 DEFAULT_BATCH_SIZE。
+    batch_size = int(configured_batch_size or payload.get("batchSize") or DEFAULT_BATCH_SIZE)
     document.update(
         {
             "schemaVersion": "1.0",
             "packageId": payload.get("packageId"),
             "updatedAt": paths.iso_now(),
-            "batchSize": DEFAULT_BATCH_SIZE,
+            "batchSize": batch_size,
+            "batchSizes": {str(key): value.get("batchSize") for key, value in batches.items() if isinstance(value, Mapping)},
             "batches": batches,
             "lastBatch": payload.get("batch"),
             "nextBatch": min(int(payload.get("batch") or 1) + 1, int(payload.get("totalBatches") or 1) + 1),
@@ -329,7 +347,7 @@ def generate_briefs(
             jsonio.write_json_atomic(json_path, payload)
             md_path.write_text(render_batch_markdown(payload), encoding="utf-8", newline="\n")
             written.extend([paths.rel_posix(project_dir_path, json_path), paths.rel_posix(project_dir_path, md_path)])
-            update_batch_state(package_dir, payload)
+            update_batch_state(package_dir, payload, configured_batch_size=batch_size)
     try:
         event_log.log_event(
             workspace_path,
@@ -349,6 +367,7 @@ def generate_briefs(
         "totalLeaves": len(leaves),
         "totalBatches": len(batches),
         "batchSize": batch_size,
+        "batchSizes": [payload.get("batchSize") for payload in payloads],
         "batchStatePath": BATCH_STATE,
         "written": written,
         "batches": payloads,
@@ -410,12 +429,14 @@ def run_selftest() -> dict[str, Any]:
     batches = plan_batches(leaves, 4)
     if [len(batch) for batch in batches] != [4, 1]:
         raise AssertionError(f"批次切分不正确：{[len(batch) for batch in batches]}")
-    checks.append("plan_batches")
-    first = batches[0]
-    first_ids = {node["id"] for node in first}
-    if any(dep in first_ids for node in first for dep in node.get("dependsOn") or []):
-        raise AssertionError("批内出现硬依赖")
-    checks.append("batch_no_internal_dependency")
+    if [node["id"] for node in batches[0]] != ["1-1", "1-2", "1-3", "1-4"]:
+        raise AssertionError(f"批次未按大纲顺序连续切分：{[node['id'] for node in batches[0]]}")
+    checks.append("plan_batches_seq_contiguous")
+    shuffled = [leaves[2], leaves[0], leaves[4], leaves[1], leaves[3]]
+    shuffled_batches = plan_batches(shuffled, 2)
+    if [node["id"] for batch in shuffled_batches for node in batch] != ["1-1", "1-2", "1-3", "1-4", "1-5"]:
+        raise AssertionError(f"批次未按 seq 排序：{[[node['id'] for node in batch] for batch in shuffled_batches]}")
+    checks.append("plan_batches_sorts_by_seq")
     payload = build_batch_payload(
         project={"projectName": "自检项目", "projectNo": "T-1"},
         package_meta={"packageId": "package-1", "packageName": "一包", "expectedWordCount": 5000, "figureQuota": {"table": 1, "mermaid": 1}},
@@ -436,6 +457,12 @@ def run_selftest() -> dict[str, Any]:
         state_doc = json.loads(state_path.read_text(encoding="utf-8"))
         if state_doc.get("batches", {}).get("1", {}).get("status") != "briefed":
             raise AssertionError("批次台账未写入")
+        if state_doc.get("batchSize") != 4:
+            raise AssertionError(f"批次台账 batchSize 未回写实际值：{state_doc.get('batchSize')}")
+        update_batch_state(package_dir, payload, configured_batch_size=5)
+        state_doc = json.loads(state_path.read_text(encoding="utf-8"))
+        if state_doc.get("batchSize") != 5:
+            raise AssertionError(f"批次台账 batchSize 未按 --batch-size 回写：{state_doc.get('batchSize')}")
         checks.append("batch_state")
     return {"ok": True, "selftest": {"script": "bg_write_brief.py", "checks": checks}}
 

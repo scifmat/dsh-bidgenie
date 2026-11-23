@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import re
 import sys
+import tempfile
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -219,6 +220,49 @@ def load_inputs(
     return target, package_dir, outline, package_meta, state, project_doc
 
 
+def collect_chapter_tree(package_dir: Path, chapters_dir: Path) -> tuple[set[str], set[str]]:
+    """收集章节树中应参与对账的目录/文件（排除元数据目录）。
+
+    P0-1（2026-11-23 冒烟）：`bg_write_brief.py` 会写 `chapters/_batches/`；旧实现只排除
+    `_outline/_results/_frozen/resources`，导致 F6 必现 12 条 `extra_chapter` blocker。
+    约定：章节树中以 `_` 开头的目录一律视为元数据目录（`_outline/_results/_frozen/_batches`），
+    不做章节对账；`resources` 为历史遗留章节内资源目录，继续跳过。
+    """
+    actual_files: set[str] = set()
+    actual_dirs: set[str] = set()
+    if not chapters_dir.is_dir():
+        return actual_dirs, actual_files
+    for entry in sorted(chapters_dir.rglob("*")):
+        rel = entry.relative_to(package_dir).as_posix()
+        parts = entry.relative_to(chapters_dir).parts
+        if any(part.startswith("_") for part in parts) or "resources" in parts:
+            continue
+        if entry.name.startswith(".") or entry.name.endswith(".lock"):
+            continue
+        if entry.is_dir():
+            actual_dirs.add(rel.rstrip("/"))
+        elif entry.is_file():
+            actual_files.add(rel)
+    return actual_dirs, actual_files
+
+
+def mermaid_fallback_reason(anchor_meta: Any) -> str:
+    """渲染清单中 mermaid 图是否降级为 Pillow 占位图；是则返回原因。
+
+    P0-2：node 缺失时 `bg_render.py` 会静默写占位 PNG（status=fallback、
+    engine=pillow-fallback）。A 层必须把它升级为 blocker，避免用户拿到全占位图
+    方案还以为审查通过。terminal 图正常就是 Pillow 绘制，不在本函数范围。
+    """
+    if not isinstance(anchor_meta, Mapping):
+        return ""
+    status = str(anchor_meta.get("status") or "")
+    engine = str(anchor_meta.get("engine") or "")
+    if status != "fallback" and engine != "pillow-fallback":
+        return ""
+    reason = str(anchor_meta.get("fallbackReason") or "").strip()
+    return reason or "node/浏览器不可用"
+
+
 def review_a_layer(
     *,
     package_dir: Path,
@@ -248,17 +292,7 @@ def review_a_layer(
     actual_dirs: set[str] = set()
     chapters_dir = package_dir / "chapters"
     if chapters_dir.is_dir():
-        for entry in sorted(chapters_dir.rglob("*")):
-            rel = entry.relative_to(package_dir).as_posix()
-            parts = entry.relative_to(chapters_dir).parts
-            if any(part in ("_outline", "_results", "_frozen", "resources") for part in parts):
-                continue
-            if entry.name.startswith(".") or entry.name.endswith(".lock"):
-                continue
-            if entry.is_dir():
-                actual_dirs.add(rel.rstrip("/"))
-            elif entry.is_file():
-                actual_files.add(rel)
+        actual_dirs, actual_files = collect_chapter_tree(package_dir, chapters_dir)
     expected_dirs: set[str] = set()
     expected_files: dict[str, dict[str, Any]] = {}
     for node in nodes:
@@ -345,7 +379,7 @@ def review_a_layer(
                         chapter_id=chapter_id,
                         file_path=file_path,
                         evidence=f"第 {heading['line']} 行标题深度 {heading['level']} > 基准{base_level}+1",
-                        suggestion="正文只允许相对章节层级下探 1 级",
+                        suggestion=f"正文只允许相对章节层级下探 1 级（本章 level={base_level}，最多 {'#' * (base_level + 1)}）",
                     )
         else:
             collector.add("script", "heading_level_mismatch", "blocker", chapter_id=chapter_id, file_path=file_path, evidence="缺少首行 Markdown 标题", suggestion="首行补 `#`×level + 标题")
@@ -459,6 +493,22 @@ def review_a_layer(
                     collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"标记下一行缺少「▲图」题注：{next_line[:60]}", suggestion="标记下一行写独立 `▲图<题名>`（不带编号）")
                 elif re.match(r"^▲图\d", next_line):
                     collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"图题带编号：{next_line[:60]}", suggestion="题注不带编号")
+            anchor_meta = render_anchors.get(anchor_id) if isinstance(render_anchors, Mapping) else None
+            render_fallback = ""
+            if figure_type == "mermaid":
+                render_fallback = mermaid_fallback_reason(anchor_meta)
+                if render_fallback:
+                    figure_row["status"] = "fallback"
+                    collector.add(
+                        "script",
+                        "figure_render_fallback",
+                        "blocker",
+                        chapter_id=chapter_id,
+                        file_path=file_path,
+                        anchor_id=anchor_id,
+                        evidence=f"mermaid 图渲染降级为占位图：{render_fallback}",
+                        suggestion="按 env-check 的 browser_renderer 修复 node/浏览器后，用 bg_render.py --force --anchor <anchorId> 重渲染",
+                    )
             if not png_path.is_file():
                 figure_row["status"] = "missing"
                 collector.add("script", "figure_missing", "blocker", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"缺少资源文件：resources/{figure_type}/{anchor_id}.png", suggestion="运行 bg_render.py 生成 PNG")
@@ -469,8 +519,7 @@ def review_a_layer(
                     figure_row["status"] = "invalid"
                     collector.add("script", "figure_quality", "blocker", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"PNG 不合格：{detail}", suggestion="重新渲染/更换资源")
                 else:
-                    figure_row["status"] = "produced"
-                    anchor_meta = render_anchors.get(anchor_id) if isinstance(render_anchors, Mapping) else None
+                    figure_row["status"] = "fallback" if render_fallback else "produced"
                     layout = anchor_meta.get("layout") if isinstance(anchor_meta, Mapping) else None
                     if isinstance(layout, Mapping):
                         figure_row["layout"] = {
@@ -847,6 +896,29 @@ def run_selftest() -> dict[str, Any]:
     if sorted_ids[0] != "RV-1-0001" or sorted_ids[-1] != "RV-1-0003":
         raise AssertionError(f"跨轮排序不正确：{sorted_ids}")
     checks.append("carry_forward")
+    # P0-1：chapters/_batches 等元数据目录不得参与章节树对账
+    with tempfile.TemporaryDirectory(prefix="bidgenie-review-tree-") as tmp:
+        package_dir = Path(tmp)
+        chapters_dir = package_dir / "chapters"
+        (chapters_dir / "1-项目理解").mkdir(parents=True)
+        (chapters_dir / "1-项目理解" / "1-1-现状.md").write_text("# 现状\n", encoding="utf-8")
+        for meta_dir in ("_outline", "_results", "_frozen", "_batches"):
+            (chapters_dir / meta_dir).mkdir()
+            (chapters_dir / meta_dir / f"{meta_dir.strip('_')}.json").write_text("{}", encoding="utf-8")
+        actual_dirs, actual_files = collect_chapter_tree(package_dir, chapters_dir)
+        if any("_batches" in item or "_outline" in item or "_results" in item for item in actual_dirs | actual_files):
+            raise AssertionError(f"元数据目录未排除：dirs={actual_dirs} files={actual_files}")
+        if "chapters/1-项目理解" not in actual_dirs or "chapters/1-项目理解/1-1-现状.md" not in actual_files:
+            raise AssertionError(f"正常章节树被误排除：dirs={actual_dirs} files={actual_files}")
+    checks.append("chapter_tree_ignores_metadata")
+    # P0-2：mermaid fallback 必须是 blocker；terminal 的 pillow 引擎不得误报
+    if not mermaid_fallback_reason({"status": "fallback", "engine": "pillow-fallback", "fallbackReason": "node 不可用"}):
+        raise AssertionError("mermaid fallback 未识别")
+    if mermaid_fallback_reason({"status": "produced", "engine": "msedge.exe"}):
+        raise AssertionError("正常 mermaid 被误判 fallback")
+    if mermaid_fallback_reason({"status": "produced", "engine": "pillow"}):
+        raise AssertionError("terminal 的 pillow 引擎被误判 fallback")
+    checks.append("render_fallback_detection")
     return {"ok": True, "selftest": {"script": "bg_review_script.py", "checks": checks}}
 
 

@@ -39,7 +39,7 @@ description: BidGenie 撰写前准备（F4）。当项目处于 package_prepare 
    - `--all-selected` 的中间包 `readyForT3=false` 是顺序中间态：结果带 `pendingReason="sequence-in-progress"`、汇总 `pendingPackages`/`summary.note`；**以汇总 `readyForT3`（最后一包）为准**，不要误判 F4 失败。批量准备只在首包切换一次 currentPackage（`summary.historyNote`），中间包不再写 set-package 事件，历史里不会被误读成来回切包。
    - `--verify` 与 prepare 输出同契约：`{ok,packageId,verified,readyForT3,packageTree,t3Check}`；单包时 `packageId` 为 `package-<N>`。
 2. 全部通过、且 guided 逐包人员/设备/工期有答案或默认后，对 `writingPackages[0]` **显式** `transition --to outline --package "<writingPackages[0]>"`（T3，不依赖 currentPackage）。
-3. T13 回来后下一包只 `--verify` + `set-package` + 显式 T3，不重复 prepare/提问。
+3. T13 会**自动把 currentPackage 切到下一包**：严格顺序是「先 `transition --to package_prepare`（T13）→ 再 `--verify` → 再显式 T3」；**T13 前不要 `set-package`**。若误先切了包，新版 T13 会按上一已完成包自动识别并在 guard 里提示。
 4. T3 失败：全部 selected `--verify` 出缺包清单，补齐 prepare 后重试，不强行迁移。
 5. post-check 断言 `currentStage=="outline"` 且 `currentScope=="<writingPackages[0]>"`；不成立报 `E_STATE_CORRUPT`。
 

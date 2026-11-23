@@ -8,5 +8,6 @@
 - logging.py 事件日志 append-only JSONL 与敏感值掩码
 - state.py   状态机唯一写者（迁移表/guard/effects/history/revision/registry 镜像）
 - deps.py    插件自有依赖目录 plugin/pylibs 的 sys.path / DLL 路径挂载
+- runtime.py DSH 运行时外部命令发现（node：BG_NODE → PATH → 运行时解释器兄弟目录）
 - text.py    统一字数口径（CJK 字符 + ASCII 词），审查/合并/导出/概览共用
 """

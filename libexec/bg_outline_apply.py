@@ -667,9 +667,15 @@ def apply_outline(
 # P1-4：从提取稿生成大纲骨架（--init-draft）
 # ---------------------------------------------------------------------------
 TECH_CRITERIA_SECTION = "技术评分标准"
-SCORE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*分\s*\|\s*(.*?)\s*\|\s*$")
+# P1-1：提取稿分值列可能是 `15` 或 `15分`（两者 bg_extract_validate 都接受）；这里不再强求「分」。
+SCORE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*分?\s*\|\s*(.*?)\s*\|\s*$")
 NUMBERED_ITEM_RE = re.compile(r"(?:^|[；;])\s*(\d+)[.、]\s*(.+?)(?=；|;|。|$)")
 ITEM_SCORE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*分")
+# P2-3：评分标准常用 ①②③ 分项；旧实现只拆 `1.`/`1、`，导致每个评分因素只有 1 个泛化末级。
+CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+CIRCLED_ITEM_RE = re.compile(rf"([{CIRCLED_NUMBERS}])\s*(.*?)(?=(?:[{CIRCLED_NUMBERS}])|$)")
+# P2-1：评分表末尾「合计/小计/总分」不是评审因素，不能生成一级章节。
+TOTAL_FACTORS = {"合计", "小计", "总分", "分值合计", "评分合计", "评审因素", "评分因素"}
 
 
 def _read_extraction_text(project_dir: Path, package_id: str, filename: str) -> str:
@@ -701,7 +707,7 @@ def parse_technical_criteria(text: str, package_id: str) -> list[dict[str, Any]]
         if not match:
             continue
         factor = match.group(1).strip()
-        if factor in ("评审因素", "评分因素") or not factor:
+        if factor in TOTAL_FACTORS or not factor:
             continue
         rows.append(
             {
@@ -724,22 +730,75 @@ def parse_technical_criteria(text: str, package_id: str) -> list[dict[str, Any]]
     return rows
 
 
-def _split_criteria_items(clause: str) -> list[dict[str, Any]]:
-    """从评分标准里拆 1. 2. 3. 分项；保留分项尾部“X 分”。"""
+def _itemize_criteria(clause: str, pattern: re.Pattern[str]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for _number, raw in NUMBERED_ITEM_RE.findall(clause):
+    for match in pattern.finditer(clause):
+        raw = match.group(2)
         text = re.sub(r"\s+", " ", raw).strip(" 。；;，,")
         if not text:
             continue
-        score_match = list(ITEM_SCORE_RE.finditer(text))
-        score = float(score_match[-1].group(1)) if score_match else None
+        # 分项分值一般写在分项开头（如「…，10 分；评分标准：…」）。取第一个匹配，
+        # 避免把评分细则末尾的「得 0 分」当成该分项分值。
+        score_match = ITEM_SCORE_RE.search(text)
+        score = float(score_match.group(1)) if score_match else None
         title = re.sub(r"[，,]\s*\d+(?:\.\d+)?\s*分.*$", "", text)
+        title = re.sub(r"[。；;]\s*(?:评分标准|评分细则|根据投标人|根据投标文件|（1）).*$", "", title)
         title = re.sub(r"^[（(][^）)]*[）)]\s*", "", title)
         title = title.strip(" 。；;，,")
         if len(title) > 30:
             title = title[:30].rstrip("，,。；; ")
         items.append({"title": title or "响应方案", "detail": text, "score": score})
     return items
+
+
+def _split_criteria_items(clause: str) -> list[dict[str, Any]]:
+    """从评分标准里拆分项：优先 ①②③，其次 1./1、；保留分项内「X 分」。"""
+    items = _itemize_criteria(clause, CIRCLED_ITEM_RE)
+    if not items:
+        items = _itemize_criteria(clause, NUMBERED_ITEM_RE)
+    return items
+
+
+def _merge_items_to_cap(items: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+    """把过多分项按顺序合并到 cap 个末级，避免末级数 × floor 超过总字数。"""
+    if cap <= 0 or len(items) <= cap:
+        return items
+    chunk_size = (len(items) + cap - 1) // cap
+    merged: list[dict[str, Any]] = []
+    for start in range(0, len(items), chunk_size):
+        chunk = items[start : start + chunk_size]
+        if len(chunk) == 1:
+            merged.append(chunk[0])
+            continue
+        names = [str(item.get("title") or "") for item in chunk]
+        title = "、".join(names[:3])
+        if len(names) > 3:
+            title += f"等{len(names)}项"
+        scores = [item.get("score") for item in chunk if item.get("score") is not None]
+        merged.append(
+            {
+                "title": title or "响应方案",
+                "detail": "；".join(str(item.get("detail") or "") for item in chunk),
+                "score": float(sum(scores)) if scores else None,
+                "mergedCount": len(chunk),
+            }
+        )
+    return merged
+
+
+def _draft_title(project_name: str, package_name: str, package_id: str, package_no: int) -> str:
+    """生成大纲标题，避免 `项目名（项目名（package-1））` 这种重复嵌套。"""
+    base = str(project_name or "").strip() or "投标项目"
+    name = str(package_name or "").strip()
+    auto_name = f"{base}（{package_id}）"
+    if not name or name in (base, auto_name):
+        label = f"第{package_no}包" if package_no else package_id
+    elif name.startswith(base):
+        # packageName 已含项目名（旧自动值或用户自定义），不再重复拼接
+        return f"{name}技术方案"
+    else:
+        label = name
+    return f"{base}（{label}）技术方案"
 
 
 def _clean_title(text: str) -> str:
@@ -762,6 +821,16 @@ def build_outline_draft(
     total_score = sum(float(item["score"]) for item in criteria) or 1.0
     project_name = str(project.get("projectName") or "投标项目")
     package_name = str(package_meta.get("packageName") or package_id)
+    package_no = int(package_meta.get("packageNo") or 0)
+    if not package_no:
+        try:
+            package_no = int(str(package_id).split("-")[-1])
+        except (TypeError, ValueError):
+            package_no = 0
+    # P2-3：末级数受 floor 约束（20k/800=25）；按评分因素数量均分每父级 2–5 个末级，
+    # 再对 ①②③ 过多的因素按顺序合并，保证骨架既有分项又不会因 floor 校验失败。
+    max_leaves = max(1, total_words // FLOOR_WORD)
+    per_parent_cap = max(1, min(5, max_leaves // max(1, len(criteria))))
     quota = package_meta.get("figureQuota") if isinstance(package_meta.get("figureQuota"), Mapping) else {}
     table_quota = max(0, int(quota.get("table") or 0))
     mermaid_quota = max(0, int(quota.get("mermaid") or 0))
@@ -771,10 +840,11 @@ def build_outline_draft(
     leaf_specs: list[dict[str, Any]] = []
     for crit_index, criterion in enumerate(criteria, start=1):
         items = _split_criteria_items(str(criterion.get("clause") or ""))
+        items = _merge_items_to_cap(items, per_parent_cap)
         # 分项分值缺失时按“评分因素总分 / 分项数”等分
         explicit_scores = [item.get("score") for item in items if item.get("score")]
         if not items:
-            items = [{"title": _clean_title(criterion["factor"] + "响应方案"), "detail": criterion["clause"], "score": None}]
+            items = [{"title": _clean_title(criterion["factor"]), "detail": criterion["clause"], "score": None}]
         if len(explicit_scores) != len(items) or abs(sum(explicit_scores) - float(criterion["score"])) > 0.01:
             equal = float(criterion["score"]) / len(items)
             for item in items:
@@ -803,7 +873,7 @@ def build_outline_draft(
                     ],
                     "scoreWeight": round(weight, 2),
                     "contentRequirements": [
-                        f"响应「{criterion['factor']}」：{str(item.get('detail') or criterion['clause'])[:160]}",
+                        f"响应「{criterion['factor']}」：{str(item.get('detail') or criterion['clause'])[:300]}",
                         f"按本包实际给出可执行方法、频次/时限、责任岗位与验收标准；事实以提取稿为准，不编造",
                         "不整段照抄招标文件；不写商务报价、证明材料、无关承诺",
                     ],
@@ -912,7 +982,7 @@ def build_outline_draft(
     draft = {
         "schemaVersion": SCHEMA_VERSION,
         "packageId": package_id,
-        "title": f"{project_name}（{package_name}）技术方案",
+        "title": _draft_title(project_name, package_name, package_id, package_no),
         "generatedAt": paths.iso_now(),
         "totalWordTarget": total_words,
         "criterionIndex": [
@@ -1257,6 +1327,36 @@ def run_selftest() -> dict[str, Any]:
         if not migrated_new.get("superseded") or migrated_titles[0] != new_draft["chapters"][0]["title"]:
             raise AssertionError(f"较新包根草稿未被采用：{migrated_new} / {migrated_titles[:1]}")
         checks.append("migrate_prefers_newer_draft")
+        # P1-1/P2-1/P2-2/P2-3：--init-draft 骨架
+        extraction_dir = project_dir / "extraction" / "packages" / "package-1"
+        extraction_dir.mkdir(parents=True, exist_ok=True)
+        (extraction_dir / "07-Evaluation-Criteria.md").write_text(
+            "# 评分标准\n\n## 技术评分标准\n\n"
+            "| 评审因素 | 分值 | 评分标准 |\n|---|---|---|\n"
+            "| 项目理解 | 30 | 要求：①现状分析，10 分；②重难点，10 分；③解决方案，10 分。 |\n"
+            "| 维护方案 | 20 | ①巡查；②底数；③故障；④应急；⑤档案。每项得 4 分。 |\n"
+            "| 合计 | 50分 | 与技术总分一致 |\n",
+            encoding="utf-8",
+        )
+        init_meta = dict(package_meta)
+        init_meta["packageName"] = "M5 大纲自检项目（package-1）"
+        init_draft = build_outline_draft(
+            project_dir=project_dir,
+            package_id="package-1",
+            package_meta=init_meta,
+            project={"projectName": "M5 大纲自检项目"},
+        )
+        parent_titles = [str(node.get("title") or "") for node in init_draft.get("chapters") or []]
+        leaf_total = sum(len(node.get("children") or []) for node in init_draft.get("chapters") or [])
+        if parent_titles != ["项目理解", "维护方案"]:
+            raise AssertionError(f"init-draft 评审因素解析不正确（合计应跳过）：{parent_titles}")
+        if init_draft.get("title") != "M5 大纲自检项目（第1包）技术方案":
+            raise AssertionError(f"init-draft 标题嵌套未修复：{init_draft.get('title')}")
+        if [len(node.get("children") or []) for node in init_draft["chapters"]] != [3, 5]:
+            raise AssertionError(f"init-draft ①②③ 分项未拆成末级：{[len(node.get('children') or []) for node in init_draft['chapters']]}")
+        if int(init_draft.get("stats", {}).get("plannedWordTotal") or 0) != 50000:
+            raise AssertionError(f"init-draft 字数合计不正确：{init_draft.get('stats')}")
+        checks.append("init_draft_split_title_and_total")
         return {"ok": True, "selftest": {"script": "bg_outline_apply.py", "checks": checks}}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

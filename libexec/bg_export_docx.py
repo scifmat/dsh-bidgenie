@@ -136,7 +136,9 @@ _PUBLIC_LABEL_RE = re.compile(
     r"(项目编号|采购计划备案号|标段编号|项目名称|采购人|采购单位|代理机构|联系人|电话|邮箱|地址|联系方式)"
 )
 #: 过滤 JSON 片段/绝对路径（避免机器信息进入人读文档）
-_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\[^\\\s]|/Users/|/home/|/mnt/)")
+# P3-2：URL 里的 `https://` 会被旧的 `[A-Za-z]:[\\/]` 误判为盘符路径，整段丢弃；
+# 这里要求盘符/Unix 路径前不是字母数字或 URL 标点，避免误伤公开网址。
+_ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9+.\-])(?:[A-Za-z]:[\\/]|\\\\[^\\\s]|/Users/|/home/|/mnt/)")
 _STYLE_LEVEL_KEYS = ("h1", "h2", "h3", "h4", "h5", "h6")
 
 
@@ -215,19 +217,27 @@ def strip_heading_numbering(title: str) -> str:
     return text.strip()
 
 
-def _sanitize_inline(text: str, counter: dict[str, int], *, context: str = "") -> str:
+def _sanitize_inline(text: str, counter: dict[str, Any], *, context: str = "") -> str:
     """防御性清洗：丢弃 JSON/绝对路径片段；仅按隐私上下文掩码身份证/银行卡/个人证件号。
 
     公开标识（项目编号/备案号/名称/采购人/代理机构/联系人/公开电话/邮箱/地址）一律不掩码；
     无隐私标签的 16–19 位纯数字（如项目编号）也不掩码，避免误伤。
+
+    P3-2：丢弃时记录 `droppedSamples`（最多 20 条），导出结果可核对“到底丢了什么”。
     """
     match = _ABS_PATH_RE.search(text)
     if match:
         counter["dropped"] += 1
+        samples = counter.setdefault("droppedSamples", [])
+        if isinstance(samples, list) and len(samples) < 20:
+            samples.append({"reason": "absolutePath", "preview": str(text).strip()[:160]})
         return ""
     stripped = text.strip()
     if stripped.startswith(("{", "}", "[", "]")) or '"schemaVersion"' in stripped:
         counter["dropped"] += 1
+        samples = counter.setdefault("droppedSamples", [])
+        if isinstance(samples, list) and len(samples) < 20:
+            samples.append({"reason": "jsonFragment", "preview": stripped[:160]})
         return ""
     combined = f"{context}\n{text}"
     if _PRIVATE_LABEL_RE.search(combined):
@@ -254,7 +264,7 @@ class KeyInfoDocBuilder:
 
         self.params = params or load_style_params()
         self.doc = Document()
-        self.counter: dict[str, int] = {"paragraphs": 0, "headings": 0, "tables": 0, "dropped": 0, "masked": 0}
+        self.counter: dict[str, Any] = {"paragraphs": 0, "headings": 0, "tables": 0, "dropped": 0, "masked": 0}
         self._num_id: int | None = None
         self._setup_styles()
         self._setup_page()
@@ -493,6 +503,59 @@ class KeyInfoDocBuilder:
         meta.paragraph_format.space_after = Pt(12)
         meta_run = meta.add_run(f"项目编号：{project_no}    导出时间：{exported_at}")
         self._set_run_font(meta_run, font_name=str(self.params["fontFamily"]), size_pt=10.5)
+        self.counter["paragraphs"] += 1
+
+    def add_toc_field(self, title: str = "目录") -> None:
+        """P2-10：可选插入 Word TOC 域（`--with-toc`），打开文档时提示更新域。
+
+        不默认开启：多数招标文件不强制目录，且未更新域时 Word 只显示占位提示。
+        需要目录时用 `bg_export_docx.py --mode tech --with-toc`，导出后自检
+        `tocFieldPresent=true`；用户打开 docx 后按 F9/“更新域”即可生成页码。
+        """
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        from docx.shared import Pt
+
+        heading = self.doc.add_paragraph()
+        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        heading.paragraph_format.space_before = Pt(12)
+        heading.paragraph_format.space_after = Pt(6)
+        heading_run = heading.add_run(title)
+        self._set_run_font(
+            heading_run,
+            font_name=str(self.params["headingFontFamily"]),
+            latin_font=str(self.params.get("headingFontLatin", "Arial")),
+            size_pt=float(self.params["headingSizesPt"].get("h1", 16)),
+            bold=True,
+        )
+        paragraph = self.doc.add_paragraph()
+        begin_run = paragraph.add_run()
+        begin = OxmlElement("w:fldChar")
+        begin.set(qn("w:fldCharType"), "begin")
+        begin.set(qn("w:dirty"), "true")
+        begin_run._r.append(begin)
+        instr_run = paragraph.add_run()
+        instr = OxmlElement("w:instrText")
+        instr.set(qn("xml:space"), "preserve")
+        instr.text = ' TOC \\o "1-3" \\h \\z \\u '
+        instr_run._r.append(instr)
+        separate_run = paragraph.add_run()
+        separate = OxmlElement("w:fldChar")
+        separate.set(qn("w:fldCharType"), "separate")
+        separate_run._r.append(separate)
+        placeholder_run = paragraph.add_run("（目录域：打开 Word 后按 Ctrl+A、F9 更新；或右键选择“更新域”）")
+        self._set_run_font(placeholder_run, font_name=str(self.params["fontFamily"]), size_pt=10.5)
+        end_run = paragraph.add_run()
+        end = OxmlElement("w:fldChar")
+        end.set(qn("w:fldCharType"), "end")
+        end_run._r.append(end)
+        # 打开 Word 时自动更新域（w:updateFields），避免用户看到空目录
+        settings = self.doc.settings.element
+        if settings.find(qn("w:updateFields")) is None:
+            update = OxmlElement("w:updateFields")
+            update.set(qn("w:val"), "true")
+            settings.append(update)
         self.counter["paragraphs"] += 1
 
     def _alignment(self, name: str) -> Any:
@@ -1211,6 +1274,7 @@ def export_tech(
     profile_id: str | None = None,
     package_id: str | None = None,
     keep_history: int = 1,
+    with_toc: bool = False,
 ) -> dict[str, Any]:
     started_at = paths.iso_now()
     started = time.monotonic()
@@ -1251,6 +1315,8 @@ def export_tech(
     package_count = int(project.get("packageCount") or 1)
     tech_title = _tech_package_title(project, package_meta, package_id, package_count, project_dir)
     builder.add_title_block(tech_title, str(project.get("projectNo") or "未提及"), started_at)
+    if with_toc:
+        builder.add_toc_field()
     builder.doc.core_properties.title = tech_title
     figures: dict[str, dict[str, Any]] = {}
     for node in outline_validate.iter_preorder(outline.get("chapters") or []):
@@ -1300,7 +1366,7 @@ def export_tech(
         "missingFigures": builder.missing_figures,
         "tableMarkers": builder.table_marker_warnings,
         "warnings": style_warnings,
-        "tocFieldPresent": False,
+        "tocFieldPresent": bool(with_toc),
         "cover": False,
         "sanitizedXml": sanitized_xml,
         "cleanup": cleanup,
@@ -1347,7 +1413,7 @@ def export_tech(
         "missingFigures": report["missingFigures"],
         "tableMarkers": report.get("tableMarkers") or [],
         "warnings": report["warnings"],
-        "tocFieldPresent": False,
+        "tocFieldPresent": bool(report.get("tocFieldPresent")),
         "durationMs": report["durationMs"],
         "reportPath": paths.rel_posix(project_dir, report_path),
     }
@@ -1594,7 +1660,11 @@ def export_keyinfo(workspace: Path, project_dir: Path, *, out_path: str | None =
         },
         "tableStyle": table_config(params),
         "tableWidthsCm": builder.counter.get("tableWidths", [])[:10],
-        "sanitized": {"dropped": builder.counter["dropped"], "masked": builder.counter["masked"]},
+        "sanitized": {
+            "dropped": builder.counter["dropped"],
+            "masked": builder.counter["masked"],
+            "droppedSamples": list(builder.counter.get("droppedSamples") or []),
+        },
         "sanitizedXml": sanitized_xml,
         "keyInfoExport": key_info_export,
         "resolvedStylePath": paths.rel_posix(project_dir, resolved_path) if resolved_path is not None else "",
@@ -1815,6 +1885,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", help="输出 docx 路径（缺省 exports/<项目名>-关键信息-<ts14>.docx）")
     parser.add_argument("--run", action="store_true", help="执行导出（默认动作，H.1 兼容）")
     parser.add_argument("--keep-history", type=int, default=1, help="默认导出目录保留历史份数（默认 1，只留最新）")
+    parser.add_argument("--with-toc", action="store_true", help="tech 模式：插入 Word TOC 域（打开后按 F9 更新目录）")
     parser.add_argument("--selftest", action="store_true", help="运行脚本自检")
     return parser
 
@@ -1830,7 +1901,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
     if mode == "tech":
-        return export_tech(workspace, project_dir, out_path=getattr(args, "out", None), profile_id=None, package_id=getattr(args, "package", None), keep_history=int(getattr(args, "keep_history", 1) or 1))
+        return export_tech(workspace, project_dir, out_path=getattr(args, "out", None), profile_id=None, package_id=getattr(args, "package", None), keep_history=int(getattr(args, "keep_history", 1) or 1), with_toc=bool(getattr(args, "with_toc", False)))
     return export_keyinfo(workspace, project_dir, out_path=getattr(args, "out", None), keep_history=int(getattr(args, "keep_history", 1) or 1))
 
 

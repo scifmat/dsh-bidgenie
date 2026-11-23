@@ -35,7 +35,7 @@
 | A 结构/完整性 | `missing_chapter` `extra_chapter` `empty_document` `heading_depth_exceeded` `heading_level_mismatch` |
 | A 字数 | `word_count_low` `word_count_high` `total_word_low` `total_word_high` |
 | B 覆盖度 | `coverage_gap` `weak_response` `missing_criterion` `criterion_mismatch` |
-| C 图表/表格 | `figure_missing` `figure_quality` `figure_mismatch` `caption_mismatch` `table_missing` `table_mismatch` |
+| C 图表/表格 | `figure_missing` `figure_quality` `figure_render_fallback` `figure_mismatch` `caption_mismatch` `table_missing` `table_mismatch` |
 | 引用/格式/内容 | `citation_missing` `source_mismatch` `caption_format` `marker_format` `forbidden_content` `placeholder_left` |
 | 导出/运行 | `export_failed` `missing_figure_on_export` `toc_missing` `review_timeout` `script_error` |
 

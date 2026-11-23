@@ -637,6 +637,26 @@ def run_selftest() -> dict[str, Any]:
         if set_pkg["changed"] != []:
             raise AssertionError("set-package 幂等失败")
         checks.append("set_package")
+        # P1-2：T13 前误切到下一包时，按上一已完成包自动识别；且不得把下一包误判已完成
+        t13_project = {
+            "writingPackages": ["package-1", "package-2"],
+            "extensions": {"packageProgress": {"package-1": {"status": "completed"}}},
+        }
+        t13_state = {
+            "currentStage": "completed",
+            "currentPackage": "package-2",
+            "history": [{"to": "completed", "scope": "package-1"}],
+        }
+        if "package-2" in state_lib._completed_packages(t13_project, t13_state):
+            raise AssertionError("T13 前误切的 package-2 被误判为已完成")
+        nxt, _selected, _current, effective, recovered = state_lib._t13_progress(t13_project, t13_state)
+        if nxt != "package-2" or effective != "package-1" or not recovered:
+            raise AssertionError(f"T13 提前切包未自动识别：nxt={nxt} effective={effective} recovered={recovered}")
+        t13_state_normal = dict(t13_state, currentPackage="package-1")
+        nxt_normal, _s, _c, effective_normal, recovered_normal = state_lib._t13_progress(t13_project, t13_state_normal)
+        if nxt_normal != "package-2" or effective_normal != "package-1" or recovered_normal:
+            raise AssertionError(f"T13 正常顺序判定错误：nxt={nxt_normal} effective={effective_normal}")
+        checks.append("t13_pre_switch_recovery")
 
         abort = state_lib.abort_project(workspace, project_dir, reason="自检取消")
         if abort["to"] != "aborted":

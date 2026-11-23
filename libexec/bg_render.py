@@ -38,7 +38,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, paths, schema, state as state_lib
+from _lib import errors, jsonio, paths, runtime as runtime_env, schema, state as state_lib
 import bg_outline_validate as outline_validate
 
 SCHEMA_VERSION = "1.0"
@@ -113,8 +113,9 @@ def rel(project_dir: Path, path: Path) -> str:
 
 
 def find_node() -> str | None:
-    candidate = os.environ.get("BG_NODE") or shutil.which("node")
-    return candidate if candidate and Path(candidate).is_file() else None
+    """按 `_lib.runtime` 的统一顺序找 node（BG_NODE → PATH → DSH 运行时）。"""
+    path, _source = runtime_env.find_node()
+    return str(path) if path is not None else None
 
 
 #: 单次 node/浏览器渲染的私有临时根目录前缀（P1-4：渲染不留 dsh/tmp / 系统 TEMP 残留）。
@@ -773,7 +774,9 @@ MERMAID_TYPE_ALIASES = {
 
 def mermaid_source_type(text: str) -> str:
     """读取 mermaid 源文件首个有效行的图类型（跳过 frontmatter/%% 注释）。"""
-    lines = [line.rstrip("\n") for line in str(text).splitlines()]
+    # P2-9：PowerShell/记事本可能写 UTF-8 BOM；BOM 会让首行 token 变成 "\ufeffflowchart"
+    # 从而误报 figure_subtype_mismatch，这里先去掉首行 BOM。
+    lines = [line.lstrip("\ufeff").rstrip("\n") for line in str(text).splitlines()]
     index = 0
     if lines and lines[0].strip() == "---":
         index = 1
@@ -1421,6 +1424,12 @@ def run_selftest() -> dict[str, Any]:
     from PIL import Image
 
     checks: list[str] = []
+    # P2-9：.mmd 首行 BOM 不应导致 subtype 误报
+    if mermaid_source_type("\ufeffflowchart TB\nA-->B") != "flowchart":
+        raise AssertionError("mermaid 首行 BOM 未剥离")
+    if subtype_mismatch_message("\ufeffflowchart TB\nA-->B", "flowchart"):
+        raise AssertionError("BOM 触发 figure_subtype_mismatch 误报")
+    checks.append("bom_subtype")
     tmp = Path(tempfile.mkdtemp(prefix="bidgenie-render-selftest-"))
     try:
         workspace, project_dir, package_dir, outline = _build_selftest_project(tmp)

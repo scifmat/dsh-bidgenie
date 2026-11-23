@@ -442,8 +442,8 @@ def verify_docx(
     except Exception:  # noqa: BLE001
         toc_present = False
     checks["tocFieldPresent"] = toc_present
-    if toc_present:
-        findings.append({"code": "toc_field_present", "message": "文档存在 TOC 域（不允许）"})
+    # tech 模式允许 TOC 域（--with-toc）；缺 TOC 时已在上面记 warning，不视为失败。
+    # keyinfo/overview 仍在各自分支禁止 TOC（见 mode in ("keyinfo","overview") 分支）。
 
     color_values: set[str] = set()
     font_attrs: set[str] = set()

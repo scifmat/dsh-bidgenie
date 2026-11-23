@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "checklistVersion": "1.0.0",
+  "checklistVersion": "1.0.1",
   "hostVersionBaseline": "0.2.x",
   "generatedFor": "M2",
   "items": [
@@ -105,7 +105,7 @@
       "label": "插件脚本完整性",
       "description": "插件自带脚本是否完整可用（含 M3 转换/回填/校验/导出）",
       "required": true,
-      "itemVersion": "1.4",
+      "itemVersion": "1.5",
       "check": "枚举 libexec/*.py + compileall + 逐脚本 --selftest",
       "remediation": "重新安装/更新插件后重试",
       "degradeImpact": "",
@@ -189,10 +189,10 @@
       "label": "图表渲染",
       "description": "能否把示意图（Mermaid）渲染成图片",
       "required": false,
-      "itemVersion": "1.0",
-      "check": "检测 Chrome/Edge + 内置 assets/mermaid/mermaid.min.js",
-      "remediation": "安装 Chrome/Edge；否则图表降级为简化图",
-      "degradeImpact": "mermaid 图降级为源码+简化图",
+      "itemVersion": "1.1",
+      "check": "检测 Chrome/Edge + 内置 assets/mermaid/mermaid.min.js + node（BG_NODE/PATH/DSH 运行时）",
+      "remediation": "安装 Chrome/Edge；node 由 DSH 运行时提供，若缺失请修复/重装 DSH 运行时，否则图表降级为占位图",
+      "degradeImpact": "mermaid 图降级为 Pillow 占位图（A 层审查会拦截）",
       "introducedIn": "M3",
       "config": {
         "browsers": [

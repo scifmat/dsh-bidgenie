@@ -1078,34 +1078,105 @@ def _recheck_tables(path: Path, page_count: int, fallback_pages: list[int], mark
     return markdown_tables, info, warnings
 
 
-def _pdf_page_coverage(markdown: str, page_texts: list[str]) -> dict[str, Any]:
-    """逐页覆盖校验（P0-2）：pymupdf4llm 整页丢失时回退追加该页纯文本，并生成回退标记。
+#: 逐页覆盖匹配时忽略的 Markdown/空白标记（避免 `**页码**`、表格管线影响行匹配）
+_PAGE_MATCH_DROP_RE = re.compile(r"[\s*#|_`>~\-—–·]+")
 
-    返回 `markdown/pageCoverage/fallbackPages/fallbackPageCount/keyDataFromFallbackOnly/fallbackNote/warnings`；
-    回退页的 warning 文案即「关键数据仅来自回退文本」的机器标记，供 F3 汇报显式提示核对原件（P2-11）。
+
+def _compact_for_page_match(text: str) -> str:
+    return _PAGE_MATCH_DROP_RE.sub("", str(text or ""))
+
+
+def _insert_fallback_block(markdown: str, page_no: int, block: str) -> str | None:
+    """尽量把回退块就地插入到该页页标之后；找不到唯一页标时返回 None（退回文末附录）。
+
+    pymupdf4llm 会保留 PDF 页眉页脚（如 `武汉市公安局交通管理局 **49**`）。页标后紧跟
+    分页线 `-----` 时，把补录块插到分页线之后，正文顺序更接近原 PDF，也避免文末重复。
     """
-    compact_md = re.sub(r"\s+", "", markdown)
-    page_coverage: list[dict[str, Any]] = []
+    pattern = re.compile(rf"(?m)^.*\*\*{page_no}\*\*\s*$")
+    matches = list(pattern.finditer(markdown))
+    if len(matches) != 1:
+        return None
+    tail = markdown[matches[0].end() : matches[0].end() + 500]
+    separator = re.search(r"(?m)^\s*-{3,}\s*$", tail)
+    if separator is None:
+        return None
+    insert_at = matches[0].end() + separator.end()
+    return f"{markdown[:insert_at]}\n\n{block}\n{markdown[insert_at:]}"
+
+
+def _pdf_page_coverage(markdown: str, page_texts: list[str]) -> dict[str, Any]:
+    """逐页覆盖校验（P0-2/P2-4）：pymupdf4llm 整页丢失时回退补齐，但避免整页重复。
+
+    2026-11-23 冒烟修复：旧实现用“20 字符采样块”判断覆盖，PDF 页眉/换行会让
+    **内容其实已在正文**的页面被判丢失，然后整页追加到文末（261 页样本 49 页全部
+    重复追加，仅第 49 页真的缺内容）。改为按行匹配：
+    - 一行只要在已生成 Markdown 中出现即视为已覆盖（先去掉空白/Markdown 标记）；
+    - 页面行覆盖率 >= 85% 视为覆盖；否则只追加**缺失行**，并在标题下标注缺失行数；
+    - 页眉页码等短行不影响判定，也不会让文末出现整页重复。
+
+    返回 `markdown/pageCoverage/fallbackPages/fallbackPageCount/keyDataFromFallbackOnly/fallbackNote/fallbackDetail/warnings`。
+    """
     fallback_pages: list[int] = []
     warnings: list[str] = []
+    fallback_detail: list[dict[str, Any]] = []
+    page_coverage: list[dict[str, Any]] = []
     result_markdown = markdown
+    matched_markdown = _compact_for_page_match(markdown)
     for page_no, page_text in enumerate(page_texts, start=1):
-        compact_page = re.sub(r"\s+", "", page_text)
-        if len(compact_page) < 20:
-            page_coverage.append({"page": page_no, "chars": len(compact_page), "covered": True, "fallback": False})
+        raw_lines = [line.strip() for line in str(page_text or "").splitlines() if line.strip()]
+        compact_lines = [(_compact_for_page_match(line), line) for line in raw_lines]
+        compact_lines = [(compact, line) for compact, line in compact_lines if len(compact) >= 2]
+        total_chars = sum(len(compact) for compact, _line in compact_lines)
+        if total_chars < 20:
+            page_coverage.append({"page": page_no, "chars": total_chars, "covered": True, "fallback": False, "lineCoverage": 1.0})
             continue
-        sample_step = max(1, len(compact_page) // 20)
-        samples = [compact_page[index:index + 20] for index in range(0, len(compact_page), sample_step)][:20]
-        matched = sum(1 for sample in samples if sample in compact_md)
-        numbers = {token for token in re.findall(r"\d{3,}", compact_page)}
-        numeric_ok = not numbers or any(token in compact_md for token in numbers)
-        covered = matched >= max(1, int(len(samples) * 0.6)) and numeric_ok
-        page_coverage.append({"page": page_no, "chars": len(compact_page), "covered": covered, "fallback": False})
-        if not covered:
-            fallback_pages.append(page_no)
-            page_coverage[-1]["fallback"] = True
-            result_markdown += f"\n\n## 第 {page_no} 页（转换回退文本）\n\n{page_text.strip()}\n"
-            compact_md += compact_page
+        missing: list[tuple[str, str]] = []
+        present_chars = 0
+        for compact, line in compact_lines:
+            if compact in matched_markdown:
+                present_chars += len(compact)
+            else:
+                missing.append((compact, line))
+        line_coverage = present_chars / total_chars if total_chars else 1.0
+        covered = line_coverage >= 0.85
+        page_coverage.append(
+            {
+                "page": page_no,
+                "chars": total_chars,
+                "covered": covered,
+                "fallback": not covered,
+                "lineCoverage": round(line_coverage, 3),
+                "missingLineCount": len(missing),
+                "missingChars": sum(len(compact) for compact, _line in missing),
+            }
+        )
+        if covered:
+            continue
+        fallback_pages.append(page_no)
+        missing_chars = sum(len(compact) for compact, _line in missing)
+        fallback_detail.append(
+            {
+                "page": page_no,
+                "lineCoverage": round(line_coverage, 3),
+                "missingLineCount": len(missing),
+                "missingChars": missing_chars,
+            }
+        )
+        missing_text = "\n".join(line for _compact, line in missing)
+        marker = (
+            f"<!-- BG:FALLBACK-PAGE:{page_no} missing={len(missing)}/{len(compact_lines)} "
+            f"lines,{missing_chars} chars（仅补齐缺失行，避免整页重复） -->"
+        )
+        inline_block = f"**第 {page_no} 页（转换回退文本，仅缺失行）**\n\n{marker}\n\n{missing_text}"
+        inserted = _insert_fallback_block(result_markdown, page_no, inline_block)
+        if inserted is not None:
+            result_markdown = inserted
+            fallback_detail[-1]["placement"] = "inline"
+        else:
+            result_markdown += f"\n\n## 第 {page_no} 页（转换回退文本）\n\n{marker}\n\n{missing_text}\n"
+            fallback_detail[-1]["placement"] = "appendix"
+        # 追加后同步匹配串，避免后续页面把同一缺失行再判一次
+        matched_markdown += "".join(compact for compact, _line in missing)
     fallback_note = ""
     if fallback_pages:
         warnings.append(f"pdf_pages_fallback:{len(fallback_pages)}")
@@ -1113,8 +1184,8 @@ def _pdf_page_coverage(markdown: str, page_texts: list[str]) -> dict[str, Any]:
         warnings.append(f"key_data_from_fallback_only:{len(fallback_pages)}")
         pages_text = "、".join(str(item) for item in fallback_pages[:20])
         fallback_note = (
-            f"关键数据仅来自回退文本：第 {pages_text} 页由纯文本回退补齐（表格/版式结构可能已丢失），"
-            "F3 提取与写作引用这些页面的数字/条款前必须核对招标文件 PDF 原件"
+            f"关键数据仅来自回退文本：第 {pages_text} 页存在缺失行，已按行就地补录（找不到唯一页标时追加到文末附录；"
+            "仅缺失内容，不整页重复）；表格/版式结构可能已丢失，F3 提取与写作引用这些页面的数字/条款前必须核对招标文件 PDF 原件"
         )
     return {
         "markdown": result_markdown,
@@ -1122,6 +1193,7 @@ def _pdf_page_coverage(markdown: str, page_texts: list[str]) -> dict[str, Any]:
         "fallbackPages": fallback_pages[:PDF_FALLBACK_LIST_LIMIT],
         "fallbackPageCount": len(fallback_pages),
         "keyDataFromFallbackOnly": bool(fallback_pages),
+        "fallbackDetail": fallback_detail,
         "fallbackNote": fallback_note,
         "warnings": warnings,
     }
@@ -1178,6 +1250,7 @@ def _pdf_to_markdown(path: Path) -> dict[str, Any]:
         "fallbackPages": coverage["fallbackPages"],
         "fallbackPageCount": coverage["fallbackPageCount"],
         "keyDataFromFallbackOnly": coverage["keyDataFromFallbackOnly"],
+        "fallbackDetail": coverage.get("fallbackDetail") or [],
         "fallbackNote": coverage["fallbackNote"],
         "tableRecheck": table_recheck,
         "pdfQuality": quality,
@@ -1420,6 +1493,7 @@ def convert_files(
                 "fallbackPages": list(existing.get("fallbackPages") or []) if existing and isinstance(existing.get("fallbackPages"), list) else [],
                 "fallbackPageCount": int(existing.get("fallbackPageCount") or 0) if existing else 0,
                 "keyDataFromFallbackOnly": bool(existing.get("keyDataFromFallbackOnly")) if existing else False,
+                "fallbackDetail": list(existing.get("fallbackDetail") or []) if existing and isinstance(existing.get("fallbackDetail"), list) else [],
                 "fallbackNote": str(existing.get("fallbackNote") or "") if existing else "",
                 "tableRecheck": dict(existing.get("tableRecheck") or {}) if existing and isinstance(existing.get("tableRecheck"), Mapping) else {},
             }
@@ -1538,6 +1612,7 @@ def convert_files(
                     "fallbackPages": list(outcome.get("fallbackPages") or []),
                     "fallbackPageCount": int(outcome.get("fallbackPageCount") or 0),
                     "keyDataFromFallbackOnly": bool(outcome.get("keyDataFromFallbackOnly")),
+                    "fallbackDetail": list(outcome.get("fallbackDetail") or []),
                     "fallbackNote": str(outcome.get("fallbackNote") or ""),
                     "tableRecheck": dict(outcome.get("tableRecheck") or {}),
                 }

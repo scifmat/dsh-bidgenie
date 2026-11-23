@@ -49,6 +49,7 @@
 ```
 
 T3 必须显式 `--package "<writingPackages[0]>"`；失败先 `--verify` 出缺包清单补齐。
+多包 T13（completed→package_prepare）**会自动切换 currentPackage**：先 T13，再 `--verify`，再显式 T3；**不要在 T13 前 `set-package` 到下一包**（若已误切，脚本会按上一已完成包自动识别并提示）。
 `set-package`/`lock` 在 `state.history` 记为 `kind=event`（`action=set_package`/`lock`），不是阶段迁移；读历史用 `state_lib.history_transitions/history_events`（旧记录 `from==to` 也按事件兼容）。
 
 ## --all-selected 输出

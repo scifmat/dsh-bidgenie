@@ -18,7 +18,7 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 
 1. 建图：节点=leaf，边=`dependsOn`；拓扑分层；层内按 priority→scoreWeight→seq 排序。
 2. 每批 **4–6 个末级章节（约 6000–9000 字）**，批内不跨硬依赖；**一个批次交给一个子智能体，不要每章一个**。
-3. **优先用生成器**：`bg_write_brief.py --batch <k>` 输出 `chapters/_batches/batch-<k>.md/.json`（含本批章节、criterionRefs、contentRequirements、figurePlan、projectFacts、dependencySummaries），直接把 md 交给子智能体，不再手工拼 prompt；`--all` 可一次生成全部批次，`--no-write` 只预览。生成器同时维护 `_batch-state.json` 台账。
+3. **优先用生成器**：`bg_write_brief.py --batch <k>` 输出 `chapters/_batches/batch-<k>.md/.json`（含本批章节、criterionRefs、contentRequirements、figurePlan、projectFacts、dependencySummaries、maxBodyHeadingLevel），直接把 md 交给子智能体，不再手工拼 prompt；`--all` 可一次生成全部批次，`--no-write` 只预览。批次按大纲 `seq` 连续切分，生成器同时维护 `_batch-state.json` 台账（含实际 batchSize）。
 4. 批间并发受 `maxParallelWriters`/DSH 并发上限限制；每批结束调 `bg_chapter_merge.py` 合并本批结果，再下一批。
 5. 中断恢复：先用 `bg_state.py doctor` 看 `staleResults`/待做章节；读 `_batches/_batch-state.json` 与 `pending`；**优先 `send_message` 唤醒原批次子代理**（保留已读原文上下文，省重读成本），原会话不可用再重派；`writing` 超 30 分钟无更新视为失败，重置 pending。
 

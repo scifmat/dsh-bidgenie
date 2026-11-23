@@ -57,7 +57,8 @@ description: BidGenie 图表规划与生成规则（F5-1 大纲必用，F5-2/F6/
 - 节点文字尽量 ≤10 个汉字；长标签用 `<br/>` 折行。
 - 图固有宽度目标 ≤950px（A4 正文约 8pt）；1000–1200px 需精简，>1200px 优先拆图。
 - 先写 `.mmd` 源文件到 `resources/mermaid/<anchorId>.mmd`；不要把 png 嵌进 md。
-- 图源首行类型必须与大纲 `subtype` 一致。
+- 图源首行类型必须与大纲 `subtype` 一致；`.mmd` 用 UTF-8 无 BOM 写入（BOM 会误报 subtype 不匹配）。
+- 渲染依赖 node + Chrome/Edge；`bg_render.py` 会自动找 `BG_NODE`/PATH/DSH 运行时 node。若 `render-manifest.json` 出现 `status=fallback`（pillow-fallback），说明 node/浏览器不可用，必须按 env-check 修复后 `bg_render.py --force` 重渲染，**不得把占位图当成品交付**。
 - 长图、宽图按“拆图/改 TB/精简节点”处理，不要靠缩字号。
 
 ### 3.2 终端图

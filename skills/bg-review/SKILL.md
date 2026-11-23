@@ -31,7 +31,7 @@ description: BidGenie 技术方案审查（F6）。当项目处于 review 阶段
 
 ## 三层与短路
 
-1. **A 脚本**：结构/完整性/标题越级/字数/图表标记与产物（table 只校题注与行列，**table 出现 `BG:FIGURE` 记 major（`marker_format`，A 层拦截）**；mermaid/terminal 校标记↔figureIndex+png+源文件；产出多于配额不算问题）；图表机检读取 `render-manifest.json` 的 `layout`（字号/宽高/行数），**mermaid 有效字号 <8pt 记 minor、<6.5pt 或固有宽 >2000px 记 major**。/题注/引用/JSON/禁用内容/手工修改。**特殊章节免字数检查、免图表检查**：只要求文件存在、非空、done；报告标注“特殊章节（免字数检查）”。
+1. **A 脚本**：结构/完整性/标题越级/字数/图表标记与产物（table 只校题注与行列，**table 出现 `BG:FIGURE` 记 major（`marker_format`，A 层拦截）**；mermaid/terminal 校标记↔figureIndex+png+源文件；产出多于配额不算问题）；图表机检读取 `render-manifest.json` 的 `layout`（字号/宽高/行数），**mermaid 有效字号 <8pt 记 minor、<6.5pt 或固有宽 >2000px 记 major**；**mermaid 渲染降级（`status=fallback`/`engine=pillow-fallback`，通常是 node 不在 PATH）记 blocker `figure_render_fallback`，必须修环境后 `bg_render --force` 重渲染**。/题注/引用/JSON/禁用内容/手工修改。**特殊章节免字数检查、免图表检查**：只要求文件存在、非空、done；报告标注“特殊章节（免字数检查）”。
 2. **A blocker → 短路 B/C**；无 blocker 继续进行 B、C。短路只看**仍未关闭**（open/fixing）的 blocker，带入且已 verified 的历史 blocker 不短路。
 3. **B 覆盖度**：逐章 summary+criterionRefs，先判 pass/weak/missing；weak/missing 才读该章全文核实（引用 ≤200 字）。特殊章节按四项审，不按普通章节覆盖度扣分。
 4. **C 图文（保留审图）**：先加载 `bg-figures`；脚本机检（png 尺寸/方差、.mmd 可解析、.txt 非空、manifest 布局指标）+ **Agent 审图**（图型是否选对、图文是否契合、终端是否真实贴合、有无文字过小/遮挡/空泛）；无视觉能力时读源文件并标注未做视觉核验；无图表直接通过。**A 层机检不替代 C 层审图**。特殊章节无图，C 层只审四项中的“没有编造/要求准确/请用户补充明确”。

@@ -46,7 +46,7 @@ ISSUE_TYPES = {
     "missing_chapter", "extra_chapter", "empty_document", "heading_depth_exceeded", "heading_level_mismatch",
     "word_count_low", "word_count_high", "total_word_low", "total_word_high",
     "coverage_gap", "weak_response", "missing_criterion", "criterion_mismatch",
-    "figure_missing", "figure_quality", "figure_mismatch", "caption_mismatch", "table_missing", "table_mismatch",
+    "figure_missing", "figure_quality", "figure_render_fallback", "figure_mismatch", "caption_mismatch", "table_missing", "table_mismatch",
     "citation_missing", "source_mismatch",
     "caption_format", "marker_format", "forbidden_content", "placeholder_left",
     "export_failed", "missing_figure_on_export", "toc_missing",

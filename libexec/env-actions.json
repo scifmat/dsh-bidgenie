@@ -39,7 +39,7 @@
     "disk_space": { "why": "清理磁盘后重试（需用户或运维处理）" },
     "path_length": { "why": "缩短工作区路径（需用户处理）" },
     "fonts": { "why": "安装中文字体（需用户处理）" },
-    "browser_renderer": { "why": "安装 Chrome/Edge 浏览器（辅助安装，需用户确认）" }
+    "browser_renderer": { "why": "安装 Chrome/Edge 浏览器；node 由 DSH 运行时提供（缺失需修复运行时，辅助安装需用户确认）" }
   },
   "pluginDefect": {
     "scripts_integrity": { "why": "脚本自检输出污染或脚本缺陷，修脚本/重装插件，不应安装依赖" },

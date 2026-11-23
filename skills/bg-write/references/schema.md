@@ -38,7 +38,7 @@
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_write_brief.py" --batch 1 --no-write --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
 ```
 
-生成器按 `dependsOn` 分波次切批（批内无硬依赖），自动带 `projectFacts`、`criterionRefs`、`contentRequirements`、`figurePlan`、`dependencySummaries`、`constraints`；子智能体直接读 `batch-<k>.md`，不再由主 Agent 手写批次 JSON。批次台账 `_batch-state.json` 记录 `chapterIds/status/briefed`，续跑时先看它。
+生成器按大纲 `seq` **连续切批**（第一批即 1-1 起连续章节，不再按 dependsOn 跨章跳跃；批内按 priority 排序），自动带 `projectFacts`、`criterionRefs`、`contentRequirements`、`figurePlan`、`dependencySummaries`、`constraints`、`maxBodyHeadingLevel`；子智能体直接读 `batch-<k>.md`，不再由主 Agent 手写批次 JSON。批次台账 `_batch-state.json` 记录 `chapterIds/status/briefed/batchSize`（回写实际 `--batch-size`），续跑时先看它。
 
 ## 批次派发示例（生成器输出的结构）
 

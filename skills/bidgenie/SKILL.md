@@ -49,7 +49,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 2. 默认导出**固定顺序**：tech 导出 → tech verify → overview 导出（基于最新 tech 报告）→ overview verify → T10；任一 verify 失败停后续，不进 T10。
 3. keyinfo 只在用户明确要求时导出；未导出不设门禁，导出则须 `--mode keyinfo` 自检通过。
 4. 每模式只导出一次、不重复导出；历史版本交 `bg_finalize.py --cleanup --keep N`；F7 结束另跑 `bg_outline_apply.py --cleanup` 清 `.bak`/`.lock`。
-5. run-manifest：T1 后 `--start`、每包导出后**记录到同一 runId**（复用 `<runId>.start.json`，产物 `<runId>.snapshot-<ts>.json/.md`）、T10 后 `--finalize` 写 `<runId>.json/.md`；`dsh/run-manifests/_latest.json` 指向最新一次 run；验收报告引用 runId/rootHash 与 `versionDrift`/`envRefreshedAfterStart`/`exitCode`；运行中刷新 env-check 不视为零漂移。
+5. run-manifest：T1 后 `--start`、每包导出后**记录到同一 runId**（复用 `<runId>.start.json`，产物 `<runId>.snapshot-<ts>.json/.md`）、T10 后 `--finalize` 写 `<runId>.json/.md`；**多包时中间包 T10 后不要 finalize，等全部 writingPackages 完成再 finalize**；`dsh/run-manifests/_latest.json` 指向最新一次 run；验收报告引用 runId/rootHash 与 `versionDrift`/`envRefreshedAfterStart`/`exitCode`；运行中刷新 env-check 不视为零漂移。
 6. 多包每包独立 F4–F7；本包完成后 T13 切下一包（下一包已 prepare，只 verify+T3）。
 
 > 具体命令见 `references/f7-export.md`（按需读）。
@@ -69,7 +69,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 | F6→定稿（T7） | blocker/major/minor 判据成立 | check/transition finalize；按 §3 执行 |
 | F7 定稿（T9） | `bg_finalize --lock` 成功（manifest/draftLocked/.locked） | check/transition export |
 | F7 导出（T10） | tech+overview 按序导出并自检通过；run-manifest/cleanup 完成；keyinfo 若导出须通过 | check/transition completed；`run-manifest --finalize` 记录结论 |
-| 多包切换（T13） | 前包 completed；下一包在 writingPackages 且已 prepare | `bg_prepare --verify` → transition package_prepare → T3；不重复问包 |
+| 多包切换（T13） | 前包 completed；下一包在 writingPackages 且已 prepare | **先 T13**（自动切 currentPackage）→ `bg_prepare --verify` → 显式 T3；T13 前不要 set-package；不重复问包 |
 
 交接失败：输出缺口清单+修复命令，停当前阶段，不写 completedStages。
 
