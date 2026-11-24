@@ -101,9 +101,8 @@ _NUMBER_PREFIX_RE = re.compile(
 )
 _SEPARATOR_CELL_RE = re.compile(r"^:?-{2,}:?$")
 _DECLARED_TOTAL_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"技术(?:评分|部分)?(?:分)?(?:满分|合计)\s*[：:]?\s*(\d+(?:\.\d+)?)\s*分?"),
+    re.compile(r"技术(?:评分|部分)?(?:分)?(?:满分|合计|总分)\s*[：:]?\s*(\d+(?:\.\d+)?)\s*分?"),
     re.compile(r"技术分满分\s*[：:]?\s*(\d+(?:\.\d+)?)\s*分?"),
-    re.compile(r"满分\s*[：:]?\s*(\d+(?:\.\d+)?)\s*分?"),
 )
 
 
@@ -367,7 +366,12 @@ def parse_markdown_structure(text: str) -> dict[str, Any]:
 # 07 评分表校验
 # ---------------------------------------------------------------------------
 def _extract_declared_total(text: str) -> float | None:
-    """从「评标办法/分值合计」文本提取技术分声明满分（优先技术评分合计/技术分满分）。"""
+    """从「评标办法/分值合计」文本提取技术分声明满分（优先技术评分合计/技术分满分）。
+
+    N10：旧实现对全文任意「满分 N 分」兜底，07 漏写技术分声明时会命中评分表里的
+    「每项满分 4 分」，把 58 的分差报成「声明满分 4」。这里只认“技术分/技术评分/
+    技术部分/技术总分 + 满分/合计/总分”的明确声明；找不到就让调用方提示缺声明。
+    """
     for pattern in _DECLARED_TOTAL_PATTERNS:
         match = pattern.search(text)
         if match:
@@ -459,7 +463,20 @@ def validate_scoring(
     declared: float | None = _extract_declared_total(text)
     if declared is None and total_row_value is None:
         blockers.append(
-            _blocker("scoring_total_missing", report_path, "技术评分标准/分值合计", "未找到技术分满分或合计数值，无法对账")
+            _blocker(
+                "scoring_total_missing",
+                report_path,
+                "技术评分标准/分值合计",
+                "缺少技术分满分声明（可写「技术分满分58分」），评分表也没有「合计」行，无法对账",
+            )
+        )
+    elif declared is None:
+        warnings.append(
+            _warning(
+                "scoring_declared_total_missing",
+                report_path,
+                f"未找到技术分满分声明，已按评分表合计 {total_row_value:g} 分对账；建议在「技术评分标准」补写「技术分满分{total_row_value:g}分」",
+            )
         )
     if declared is not None and abs(total - declared) > SCORE_TOLERANCE:
         blockers.append(
@@ -1196,6 +1213,44 @@ def run_selftest() -> dict[str, Any]:
             raise AssertionError("评分合计缺失未判 blocker")
         target07.write_text(original07, encoding="utf-8", newline="\n")
         checks.append("scoring_total_missing")
+        # N10：07 漏写技术分声明、正文只有「每项满分 4 分」时，不能把 4 当声明满分报
+        # 「合计 58 与声明满分 4 差额 +54」；应明确报缺技术分满分声明。
+        target07.write_text(
+            original07.replace("技术分满分 40 分", "技术分见招标文件附件")
+            .replace("技术评分合计：40 分", "技术评分合计：见附件")
+            .replace("方案完整可行：①完整 ②可行", "每项满分 4 分：①完整 ②可行"),
+            encoding="utf-8",
+            newline="\n",
+        )
+        no_decl = validate_project_extraction(project_dir)["report"]
+        no_decl_codes = {item["code"] for item in no_decl["blockers"]}
+        if "scoring_total_missing" not in no_decl_codes or "scoring_sum_mismatch" in no_decl_codes:
+            raise AssertionError(f"N10 缺技术分声明时诊断不正确：{sorted(no_decl_codes)}")
+        checks.append("scoring_declared_total_missing")
+        # N10：只有表内合计行、没有技术分声明时，按合计对账并给出 warning，不误报差额
+        target07.write_text(
+            original07.replace("技术分满分 40 分", "技术分见招标文件附件")
+            .replace("技术评分合计：40 分", "技术评分合计：见附件")
+            .replace("方案完整可行：①完整 ②可行", "每项满分 4 分：①完整 ②可行")
+            .replace(
+                "| 人员配置 | 10 | 人员数量：①不少于5人 ②不少于3人 | 技术评分表 |",
+                "| 人员配置 | 10 | 人员数量：①不少于5人 ②不少于3人 | 技术评分表 |\n| 合计 | 40 | 与技术总分一致 |",
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        table_total = validate_project_extraction(project_dir)["report"]
+        table_codes = {item["code"] for item in table_total["blockers"]}
+        warning_codes = {item["code"] for item in table_total["warnings"]}
+        table_scoring = table_total.get("scoringTable") or {}
+        if (
+            table_codes
+            or "scoring_declared_total_missing" not in warning_codes
+            or abs(float(table_scoring.get("declaredTotal") or 0) - 40) > 0.01
+        ):
+            raise AssertionError(f"N10 表内合计对账不正确：blockers={sorted(table_codes)} warnings={sorted(warning_codes)} scoring={table_scoring}")
+        target07.write_text(original07, encoding="utf-8", newline="\n")
+        checks.append("scoring_total_from_table_only")
 
         # 缺文件
         missing = project_dir / "extraction" / "common" / "05-Substantive-Response.md"

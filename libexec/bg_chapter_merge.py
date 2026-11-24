@@ -199,6 +199,39 @@ def table_is_planned(
     return bool(caption) and caption in planned_captions
 
 
+def _chapter_table_anchors(package_dir: Path, chapter_id: str) -> tuple[set[str], set[str]]:
+    """读取本章 chapter-result.tables[]，返回 (anchorId 集合, 归一化题注集合)。
+
+    N8：N2 后写作子智能体会按指引改写题注，若 table done 仍按“计划题注全文精确匹配”，
+    真实产出的表会一直停在 planned（doctor 看起来像没做）。因此 done 判定优先用
+    chapter-result 里登记的 anchorId（题注可改，锚点不可改），题注集合只作历史结果兜底。
+    """
+    if not chapter_id:
+        return set(), set()
+    path = result_file(package_dir, chapter_id)
+    if not path.is_file():
+        return set(), set()
+    try:
+        document = jsonio.read_json(path)
+    except errors.BgError:
+        return set(), set()
+    tables = document.get("tables") if isinstance(document, Mapping) else None
+    if not isinstance(tables, list):
+        return set(), set()
+    anchors: set[str] = set()
+    captions: set[str] = set()
+    for table in tables:
+        if not isinstance(table, Mapping):
+            continue
+        anchor_id = str(table.get("anchorId") or "").strip()
+        if anchor_id:
+            anchors.add(anchor_id)
+        caption = _normalize_caption(table.get("caption"))
+        if caption:
+            captions.add(caption)
+    return anchors, captions
+
+
 def _chapter_body_word_count(package_dir: Path, node: Mapping[str, Any]) -> int | None:
     """按审查口径（_lib/text.count_body_words）读取章节 md 的字数；文件缺失返回 None。"""
     file_path = node.get("filePath")
@@ -375,7 +408,8 @@ def sync_figure_index(outline: dict[str, Any], package_dir: Path, project_dir: P
     """按当前资源/正文同步 figureIndex（可选；不复制 figurePlan，不改正文）。
 
     - mermaid/terminal：PNG（+源文件）存在 → done；
-    - table：章节正文出现 `▼表<caption>` → done；
+    - table：chapter-result.tables[] 的 anchorId 命中 → done（题注可改写，优先锚点）；
+      否则回退到章节正文 `▼表<caption>`（兼容旧结果）；
     - 其余保持 planned。
     """
     index: list[dict[str, Any]] = []
@@ -401,11 +435,18 @@ def sync_figure_index(outline: dict[str, Any], package_dir: Path, project_dir: P
                     if source.is_file():
                         source_path = paths.rel_posix(project_dir, source)
             else:
-                # N6：计划表没有独立资源文件，以章节正文里的 `▼表<caption>` 判定是否已产出，
-                # 让 render/merge 后 doctor 的 figures.done 不再永远为 0。
+                # N6/N8：计划表没有独立资源文件，优先按 chapter-result.tables[].anchorId 判定，
+                # 其次按改写后的题注，最后兼容只在正文写 `▼表<计划题注>` 的旧结果。
+                produced = False
+                chapter_id = str(node.get("id") or "")
                 caption = str(plan.get("caption") or "").strip()
+                result_anchors, result_captions = _chapter_table_anchors(package_dir, chapter_id)
+                if anchor_id in result_anchors:
+                    produced = True
+                elif caption and _normalize_caption(caption) in result_captions:
+                    produced = True
                 file_path = str(node.get("filePath") or "")
-                if caption and file_path:
+                if not produced and caption and file_path:
                     chapter_path = package_dir / file_path
                     if chapter_path.is_file():
                         try:
@@ -413,7 +454,9 @@ def sync_figure_index(outline: dict[str, Any], package_dir: Path, project_dir: P
                         except OSError:
                             chapter_text = ""
                         if re.search(r"▼表\s*" + re.escape(caption), chapter_text):
-                            status = "produced"
+                            produced = True
+                if produced:
+                    status = "produced"
             # figureIndex 与 figurePlan 同源：figurePlan 合法状态 planned/deferred/done；
             # 资源已产出时 plan=done、index=done（index 不再使用 produced，validator 才一致）。
             plan_status = "done" if status == "produced" else "planned"
@@ -1282,11 +1325,23 @@ def run_selftest() -> dict[str, Any]:
         if status["statusCounts"].get("done", 0) != len(leaves) - 1 or status["statusCounts"].get("skipped", 0) != 1:
             raise AssertionError(f"status 计数不正确：{status['statusCounts']}")
         checks.append("status")
-        # N6：计划表按章节正文 `▼表<caption>` 同步为 done，doctor 不再永远 done=0
+        # N6/N8：计划表按 chapter-result.tables[].anchorId 同步 done（题注可改写）；
+        # 无结果时仍兼容正文 `▼表<计划题注>`；两张表一张有结果、一张没结果，验证不会误标。
         with tempfile.TemporaryDirectory(prefix="bidgenie-figure-index-") as fig_tmp:
             fig_package_dir = Path(fig_tmp)
             (fig_package_dir / "chapters").mkdir()
-            (fig_package_dir / "chapters" / "1-1.md").write_text("▼表清单表\n\n| 列 | 值 |\n|---|---|\n| a | b |\n", encoding="utf-8")
+            (fig_package_dir / "chapters" / "_results").mkdir()
+            (fig_package_dir / "chapters" / "1-1.md").write_text(
+                "▼表巡查清单（改写后题注）\n\n| 列 | 值 |\n|---|---|\n| a | b |\n", encoding="utf-8"
+            )
+            jsonio.write_json_atomic(
+                fig_package_dir / "chapters" / "_results" / "1-1.chapter-result.json",
+                {
+                    "chapterId": "1-1",
+                    "status": "done",
+                    "tables": [{"anchorId": "fig-1-1-01", "caption": "巡查清单（改写后题注）", "rows": 5, "plannedFigure": True}],
+                },
+            )
             fig_outline = {
                 "chapters": [
                     {
@@ -1294,13 +1349,19 @@ def run_selftest() -> dict[str, Any]:
                         "kind": "leaf",
                         "level": 2,
                         "filePath": "chapters/1-1.md",
-                        "figurePlan": [{"anchorId": "fig-1-1-01", "type": "table", "caption": "清单表", "status": "planned"}],
+                        "figurePlan": [
+                            {"anchorId": "fig-1-1-01", "type": "table", "caption": "清单表", "status": "planned"},
+                            {"anchorId": "fig-1-1-02", "type": "table", "caption": "未产出表", "status": "planned"},
+                        ],
                     }
                 ]
             }
             sync_figure_index(fig_outline, fig_package_dir, fig_package_dir)
-            if fig_outline["figureIndex"][0]["status"] != "done" or fig_outline["chapters"][0]["figurePlan"][0]["status"] != "done":
-                raise AssertionError(f"计划表 figureIndex 未同步 done：{fig_outline['figureIndex']}")
+            fig_status = {item["anchorId"]: item["status"] for item in fig_outline["figureIndex"]}
+            if fig_status.get("fig-1-1-01") != "done" or fig_status.get("fig-1-1-02") != "planned":
+                raise AssertionError(f"N8 计划表 anchorId 同步不正确：{fig_status}")
+            if fig_outline["chapters"][0]["figurePlan"][0]["status"] != "done":
+                raise AssertionError(f"N8 figurePlan 未同步 done：{fig_outline['chapters'][0]['figurePlan']}")
         checks.append("figure_index_table_status")
         # T5 guard/transition（state 层）
         state_before = state_lib.load_state(project_dir)

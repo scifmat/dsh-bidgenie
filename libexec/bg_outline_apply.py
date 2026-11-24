@@ -669,7 +669,14 @@ def apply_outline(
 TECH_CRITERIA_SECTION = "技术评分标准"
 # P1-1：提取稿分值列可能是 `15` 或 `15分`（两者 bg_extract_validate 都接受）；这里不再强求「分」。
 SCORE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*分?\s*\|\s*(.*?)\s*\|\s*$")
-NUMBERED_ITEM_RE = re.compile(r"(?:^|[；;])\s*(\d+)[.、]\s*(.+?)(?=；|;|。|$)")
+# N7：编号分项可能紧跟全角冒号（「…评价：1. 设备返厂维修；2. …」）、逗号、句号或空白，
+# 旧实现只认行首/分号，导致列表第一个分项被漏掉（真实 07 里多个评分分项因此没有独立末级）。
+# 说明：`(?!\d)` 避免把「1.5 分」「2.0 版」这类小数误判为编号；`\s+\d{1,2}[.、]` 允许
+# 「1.应急保障分类 2.应急流程与响应时效」这种仅用空格分隔的列表。
+NUMBERED_ITEM_RE = re.compile(
+    r"(?:^|[；;：:，,。\n\s])\s*(\d{1,2})[.、](?!\d)\s*(.+?)"
+    r"(?=；|;|。|$|\s+\d{1,2}[.、](?!\d))"
+)
 ITEM_SCORE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*分")
 # P2-3：评分标准常用 ①②③ 分项；旧实现只拆 `1.`/`1、`，导致每个评分因素只有 1 个泛化末级。
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
@@ -1399,6 +1406,53 @@ def run_selftest() -> dict[str, Any]:
         if re.search(r"等\d+项", merged_title):
             raise AssertionError(f"合并标题仍有「等N项」：{merged_title!r}")
         checks.append("init_draft_title_quality")
+        # N7：真实 07 常用「…评价：1. …；2. …」编号列表，首个分项不能被漏掉；
+        # 同时覆盖「1.应急保障分类 2.…」仅空格分隔、以及「。2.」句号后继续编号的情况。
+        stage3_07 = (
+            "# 评分标准\n\n## 技术评分标准\n\n"
+            "| 评审因素 | 分值 | 评分标准 |\n|---|---|---|\n"
+            "| 项目理解 | 15分 | 针对本项目结合现场调研展开重点难点分析：1.对外场电子设施（信号灯、诱导屏、电子警察、卡口、监控）的现状情况进行分析，梳理运维相关的重难点，并提出解决方案，10 分；评分标准：按准确性打分。2.对现有电子设施运维业务相关各系统平台现状情况、存在问题进行分析，针对性提出合理化建议，5 分；评分标准：按合理性打分。 |\n"
+            "| 维护技术实施方案 | 20分 | 投标人根据调研情况详细阐述维护方案，结合以下几点对方案的完整性、合理性、可行性进行评价：1.日常巡查及隐患排查；2.底数清理；3.故障诊断及修复；4.应急供电；5.运维档案记录管理；6.仓储管理；7.运维信息研判分析；8.质保到期接收配合；9.非现场执法工作；10.运维取电优化工作。评分标准：每项得 2 分。 |\n"
+            "| 据实结算方案 | 6分 | 投标人根据调研情况详细阐述运维据实结算工作的方案，结合以下几点进行评价：1.设备返厂维修；2.设备更换；3.管线建设及专项建设。评分标准：每项得 2 分。 |\n"
+            "| 应急保障 | 4分 | 针对各类紧急情况制定应急保障预案，预案需结合以下几点，1.应急保障分类 2.应急流程与响应时效 3.应急物资保障 4.应急演练与培训。评分标准：每项得 1 分。 |\n"
+            "| 安全文明施工 | 4分 | 针对本项目特点制定安全文明施工方案，包括但不限于：1.安全文明运维管理制度；2.带电作业与高处作业安全；3.道路占道作业安全；4.文明运维与现场管理。评分标准：每项得 1 分。 |\n"
+            "| 保密控制 | 4分 | 根据投标人提供的保密控制档案进行评审，至少包含以下几点：1.保密控制制度体系；2.人员、技术保密控制；3.文档与介质管理；4.保密培训。评分标准：每项满分 1 分。 |\n"
+            "| 沟通协调方案 | 3分 | 针对本项目特点制定沟通协调方案，对完整性、合理性、可行性进行评价。评分标准：每项满分 1 分。 |\n"
+            "| 质量承诺及违约处罚承诺 | 2分 | 根据质量承诺及违约处罚措施进行评审，措施详细可行得 2 分。 |\n"
+            "| 合计 | 58分 | 与招标文件技术总分一致 |\n"
+        )
+        (extraction_dir / "07-Evaluation-Criteria.md").write_text(stage3_07, encoding="utf-8")
+        parsed_criteria = {str(item["factor"]): item for item in parse_technical_criteria(stage3_07, "package-1")}
+        if len(_split_criteria_items(str(parsed_criteria["维护技术实施方案"]["clause"]))) != 10:
+            raise AssertionError("N7 维护技术实施方案未拆出 10 个分项")
+        if len(_split_criteria_items(str(parsed_criteria["应急保障"]["clause"]))) != 4:
+            raise AssertionError("N7 空格分隔的应急保障分项未拆分")
+        stage3_draft = build_outline_draft(
+            project_dir=project_dir,
+            package_id="package-1",
+            package_meta=init_meta,
+            project={"projectName": "M5 大纲自检项目"},
+        )
+        stage3_nodes = {str(node.get("title") or ""): node for node in stage3_draft.get("chapters") or []}
+        if len(stage3_nodes) != 8:
+            raise AssertionError(f"N7 评审因素解析父级数不正确：{list(stage3_nodes)}")
+        understanding_children = stage3_nodes.get("项目理解", {}).get("children") or []
+        if len(understanding_children) != 2:
+            raise AssertionError(f"N7 冒号/句号引导的编号分项未拆分：{understanding_children}")
+        settlement_children = stage3_nodes.get("据实结算方案", {}).get("children") or []
+        if "设备返厂维修" not in str((settlement_children or [{}])[0].get("title") or ""):
+            raise AssertionError(f"N7 冒号后首个分项仍丢失：{settlement_children}")
+        if len(stage3_nodes.get("应急保障", {}).get("children") or []) != 4:
+            raise AssertionError(f"N7 空格分隔的应急保障未生成 4 个末级：{stage3_nodes.get('应急保障')}")
+        maintenance_items = " ".join(
+            str(req)
+            for child in stage3_nodes.get("维护技术实施方案", {}).get("children") or []
+            for req in child.get("contentRequirements") or []
+        )
+        for item in ("日常巡查及隐患排查", "底数清理", "非现场执法工作", "运维取电优化工作"):
+            if item not in maintenance_items:
+                raise AssertionError(f"N7 维护分项未进入骨架：{item}")
+        checks.append("init_draft_numbered_items_after_colon")
         return {"ok": True, "selftest": {"script": "bg_outline_apply.py", "checks": checks}}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
