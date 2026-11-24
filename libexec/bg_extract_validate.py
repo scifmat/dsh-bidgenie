@@ -467,7 +467,7 @@ def validate_scoring(
                 "scoring_total_missing",
                 report_path,
                 "技术评分标准/分值合计",
-                "缺少技术分满分声明（可写「技术分满分58分」），评分表也没有「合计」行，无法对账",
+                "缺少技术分满分声明（可写「技术分满分N分」），评分表也没有「合计」行，无法对账",
             )
         )
     elif declared is None:
