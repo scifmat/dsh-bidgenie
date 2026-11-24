@@ -235,7 +235,7 @@ def collect_chapter_tree(package_dir: Path, chapters_dir: Path) -> tuple[set[str
     for entry in sorted(chapters_dir.rglob("*")):
         rel = entry.relative_to(package_dir).as_posix()
         parts = entry.relative_to(chapters_dir).parts
-        if any(part.startswith("_") for part in parts) or "resources" in parts:
+        if any(paths.is_metadata_dir(part) for part in parts) or "resources" in parts:
             continue
         if entry.name.startswith(".") or entry.name.endswith(".lock"):
             continue

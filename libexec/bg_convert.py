@@ -12,9 +12,11 @@
 无 COM 时尝试 soffice；都不可用 → 该文件标记 failed 并提示另存 `.docx`）、`.pdf`（pymupdf4llm，
 pdfplumber 复核表格：≤60 页全量、更大文件回退页优先 + 均匀抽样分批限时复核；扫描件标记 `scanned_unsupported`）、`.md`/`.txt`（直转/复制）。
 
-PDF 逐页覆盖（P0-2 / P2-11）：pymupdf4llm 整页丢失时按页回退追加纯文本，并把回退页写入
-manifest（`fallbackPages/fallbackPageCount/keyDataFromFallbackOnly/fallbackNote` + warning
-`key_data_from_fallback_only:<n>`），供 F3 汇报显式提示「关键数据仅来自回退文本」。
+PDF 逐页覆盖（P0-2 / P2-11）：pymupdf4llm 整页丢失时按行回退补齐，并把回退页写入
+manifest（`fallbackPages/fallbackPageCount/fallbackDetail/keyDataFromFallbackOnly/fallbackNote`
++ warning `pdf_pages_fallback:<首页>` / `key_data_from_fallback_only:<首页>` /
+`pdf_pages_fallback_count:<页数>` / `pdf_pages_fallback_list:<全部页码>`），供 F3 汇报显式提示
+「关键数据仅来自回退文本」。冒号后是页码，不是回退页数量。
 
 输出（CONTRACT §10.1）：
 - `<project>/sources/converted/<原文件名>.md`
@@ -1179,9 +1181,11 @@ def _pdf_page_coverage(markdown: str, page_texts: list[str]) -> dict[str, Any]:
         matched_markdown += "".join(compact for compact, _line in missing)
     fallback_note = ""
     if fallback_pages:
-        warnings.append(f"pdf_pages_fallback:{len(fallback_pages)}")
+        # N3：冒号后是页码（skill 约定 `:<n>` 为页），数量另起 `*_count`。
+        warnings.append(f"pdf_pages_fallback:{fallback_pages[0]}")
+        warnings.append(f"pdf_pages_fallback_count:{len(fallback_pages)}")
         warnings.append("pdf_pages_fallback_list:" + ",".join(str(item) for item in fallback_pages[:20]))
-        warnings.append(f"key_data_from_fallback_only:{len(fallback_pages)}")
+        warnings.append(f"key_data_from_fallback_only:{fallback_pages[0]}")
         pages_text = "、".join(str(item) for item in fallback_pages[:20])
         fallback_note = (
             f"关键数据仅来自回退文本：第 {pages_text} 页存在缺失行，已按行就地补录（找不到唯一页标时追加到文末附录；"
@@ -1582,8 +1586,8 @@ def convert_files(
                         result="error",
                     )
                 continue
-            warnings = sorted(set(list(entry["warnings"]) + list(outcome.get("warnings") or [])))
             quality, quality_warnings = _quality_for(markdown)
+            warnings = sorted(set(list(outcome.get("warnings") or []) + quality_warnings))
             warnings = sorted(set(warnings + quality_warnings))
             if outcome.get("pdfQuality"):
                 quality = str(outcome["pdfQuality"])
@@ -2015,8 +2019,9 @@ def run_selftest() -> dict[str, Any]:
             or "关键数据仅来自回退文本" not in str(coverage.get("fallbackNote") or "")
             or "## 第 2 页（转换回退文本）" not in coverage_markdown
             or "第2页关键数据 2334 1936 1691 81 909" not in coverage_markdown
-            or "key_data_from_fallback_only:1" not in list(coverage.get("warnings") or [])
-            or "pdf_pages_fallback:1" not in list(coverage.get("warnings") or [])
+            or "key_data_from_fallback_only:2" not in list(coverage.get("warnings") or [])
+            or "pdf_pages_fallback:2" not in list(coverage.get("warnings") or [])
+            or "pdf_pages_fallback_count:1" not in list(coverage.get("warnings") or [])
         ):
             raise AssertionError(f"PDF 回退页标记不正确：{coverage}")
         checks.append("pdf_fallback_markers")

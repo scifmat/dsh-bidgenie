@@ -30,7 +30,6 @@ FROZEN_DIR = "export/_frozen"
 MANIFEST_FILE = "export/_frozen/manifest.json"
 LOCK_MARKER = "chapters/.locked"
 SNAPSHOT_DIR = "export/_frozen/snapshot"
-EXCLUDED_PARTS = {"_outline", "_results", "_frozen", "resources", "export"}
 
 
 # ---------------------------------------------------------------------------
@@ -48,13 +47,15 @@ def _is_clean_freeze_file(path: Path) -> bool:
     name = path.name.lower()
     if name.endswith((".lock", ".tmp", ".bak")) or name.startswith("~$") or name.endswith("~"):
         return False
-    if any(part in {"_results", "_frozen"} for part in path.parts):
+    # N1-b：`_outline`/`_results`/`_frozen`/`_batches` 等元数据目录不进冻结清单；
+    # 用公共 helper，避免像上一轮那样只改一处白名单。
+    if any(paths.is_metadata_dir(part) for part in path.parts):
         return False
     return True
 
 
 def collect_files(package_dir: Path) -> list[Path]:
-    """章节 md + outline.json + resources/**（不含 _results/_frozen/export、*.lock/.tmp/.bak）。"""
+    """章节 md + outline.json + resources/**（不含 `_` 元数据目录、*.lock/.tmp/.bak）。"""
     collected: list[Path] = []
     chapters_dir = package_dir / "chapters"
     if chapters_dir.is_dir():
@@ -460,8 +461,11 @@ def run_selftest() -> dict[str, Any]:
         package_dir = Path(tmp) / "package-1-20261111120000"
         (package_dir / "chapters" / "_outline").mkdir(parents=True)
         (package_dir / "chapters" / "1-1").mkdir(parents=True)
+        (package_dir / "chapters" / "_batches").mkdir(parents=True)
         (package_dir / "resources" / "mermaid").mkdir(parents=True)
         (package_dir / "chapters" / "1-1" / "1-1-01.md").write_text("# 章节\n\n正文\n", encoding="utf-8", newline="\n")
+        # N1-b：批次元数据 md 不得进冻结清单（chapterCount/fileCount 不能虚增）
+        (package_dir / "chapters" / "_batches" / "batch-1.md").write_text("# 第 1 批\n", encoding="utf-8", newline="\n")
         (package_dir / "chapters" / "_outline" / "outline.json").write_text('{"schemaVersion":"1.0","chapters":[]}', encoding="utf-8", newline="\n")
         (package_dir / "resources" / "mermaid" / "fig-1-1-01.png").write_bytes(b"png-bytes")
         manifest = build_manifest(package_dir)

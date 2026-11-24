@@ -372,7 +372,12 @@ def _select_results(
 
 
 def sync_figure_index(outline: dict[str, Any], package_dir: Path, project_dir: Path) -> None:
-    """按当前资源文件同步 figureIndex（可选；不复制 figurePlan，不改正文）。"""
+    """按当前资源/正文同步 figureIndex（可选；不复制 figurePlan，不改正文）。
+
+    - mermaid/terminal：PNG（+源文件）存在 → done；
+    - table：章节正文出现 `▼表<caption>` → done；
+    - 其余保持 planned。
+    """
     index: list[dict[str, Any]] = []
     for node in outline_validate.iter_preorder(outline.get("chapters") or []):
         for plan in node.get("figurePlan") or []:
@@ -395,6 +400,20 @@ def sync_figure_index(outline: dict[str, Any], package_dir: Path, project_dir: P
                     source = package_dir / "resources" / figure_type / f"{anchor_id}{source_suffix}"
                     if source.is_file():
                         source_path = paths.rel_posix(project_dir, source)
+            else:
+                # N6：计划表没有独立资源文件，以章节正文里的 `▼表<caption>` 判定是否已产出，
+                # 让 render/merge 后 doctor 的 figures.done 不再永远为 0。
+                caption = str(plan.get("caption") or "").strip()
+                file_path = str(node.get("filePath") or "")
+                if caption and file_path:
+                    chapter_path = package_dir / file_path
+                    if chapter_path.is_file():
+                        try:
+                            chapter_text = chapter_path.read_text(encoding="utf-8-sig", errors="replace")
+                        except OSError:
+                            chapter_text = ""
+                        if re.search(r"▼表\s*" + re.escape(caption), chapter_text):
+                            status = "produced"
             # figureIndex 与 figurePlan 同源：figurePlan 合法状态 planned/deferred/done；
             # 资源已产出时 plan=done、index=done（index 不再使用 produced，validator 才一致）。
             plan_status = "done" if status == "produced" else "planned"
@@ -1263,6 +1282,26 @@ def run_selftest() -> dict[str, Any]:
         if status["statusCounts"].get("done", 0) != len(leaves) - 1 or status["statusCounts"].get("skipped", 0) != 1:
             raise AssertionError(f"status 计数不正确：{status['statusCounts']}")
         checks.append("status")
+        # N6：计划表按章节正文 `▼表<caption>` 同步为 done，doctor 不再永远 done=0
+        with tempfile.TemporaryDirectory(prefix="bidgenie-figure-index-") as fig_tmp:
+            fig_package_dir = Path(fig_tmp)
+            (fig_package_dir / "chapters").mkdir()
+            (fig_package_dir / "chapters" / "1-1.md").write_text("▼表清单表\n\n| 列 | 值 |\n|---|---|\n| a | b |\n", encoding="utf-8")
+            fig_outline = {
+                "chapters": [
+                    {
+                        "id": "1-1",
+                        "kind": "leaf",
+                        "level": 2,
+                        "filePath": "chapters/1-1.md",
+                        "figurePlan": [{"anchorId": "fig-1-1-01", "type": "table", "caption": "清单表", "status": "planned"}],
+                    }
+                ]
+            }
+            sync_figure_index(fig_outline, fig_package_dir, fig_package_dir)
+            if fig_outline["figureIndex"][0]["status"] != "done" or fig_outline["chapters"][0]["figurePlan"][0]["status"] != "done":
+                raise AssertionError(f"计划表 figureIndex 未同步 done：{fig_outline['figureIndex']}")
+        checks.append("figure_index_table_status")
         # T5 guard/transition（state 层）
         state_before = state_lib.load_state(project_dir)
         t5 = state_lib.perform_transition(

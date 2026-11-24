@@ -745,9 +745,7 @@ def _itemize_criteria(clause: str, pattern: re.Pattern[str]) -> list[dict[str, A
         title = re.sub(r"[。；;]\s*(?:评分标准|评分细则|根据投标人|根据投标文件|（1）).*$", "", title)
         title = re.sub(r"^[（(][^）)]*[）)]\s*", "", title)
         title = title.strip(" 。；;，,")
-        if len(title) > 30:
-            title = title[:30].rstrip("，,。；; ")
-        items.append({"title": title or "响应方案", "detail": text, "score": score})
+        items.append({"title": _clean_title(title), "detail": text, "score": score})
     return items
 
 
@@ -773,11 +771,11 @@ def _merge_items_to_cap(items: list[dict[str, Any]], cap: int) -> list[dict[str,
         names = [str(item.get("title") or "") for item in chunk]
         title = "、".join(names[:3])
         if len(names) > 3:
-            title += f"等{len(names)}项"
+            title += "等"
         scores = [item.get("score") for item in chunk if item.get("score") is not None]
         merged.append(
             {
-                "title": title or "响应方案",
+                "title": _clean_title(title) or "响应方案",
                 "detail": "；".join(str(item.get("detail") or "") for item in chunk),
                 "score": float(sum(scores)) if scores else None,
                 "mergedCount": len(chunk),
@@ -802,8 +800,35 @@ def _draft_title(project_name: str, package_name: str, package_id: str, package_
 
 
 def _clean_title(text: str) -> str:
+    """把评分标准原文收成可读短标题（N2：避免 30 字硬截断留下半句）。
+
+    - 去掉示例括号（如「（信号灯、诱导屏、…）」），避免标题被例子占满；
+    - 收敛「现状情况进行分析」「进行分析」等尾巴；
+    - 超长时按顿号/逗号/分号/句号取完整短语，仍无边界才硬截；
+    - 末尾不留下「的/等/顿号」这类悬空字符。
+    """
     title = re.sub(r"\s+", " ", str(text or "")).strip(" 。；;，,")
-    return title[:40] or "响应方案"
+    title = re.sub(r"（[^）]*）", "", title).strip()
+    title = re.sub(r"^对现有", "现有", title)
+    for source, target in (("情况进行分析", "分析"), ("现状情况", "现状"), ("进行分析", "分析")):
+        title = title.replace(source, target)
+    # 有逗号的长句只取第一个完整分句（如「现状分析，梳理…」→「现状分析」）
+    if "，" in title and len(title) > 24:
+        title = title.split("，")[0]
+    if len(title) > 36:
+        cut = max(title.rfind(separator, 0, 36) for separator in "、，；。")
+        title = title[:cut] if cut >= 12 else title[:36]
+    title = title.strip("、，；。的等")
+    return title or "响应方案"
+
+
+def _caption_base(title: str, *, limit: int = 24) -> str:
+    """图表题注用的短标题基（N2：避免把整段长标题带进题注）。"""
+    base = str(title or "").strip()
+    if len(base) > limit:
+        cut = max(base.rfind(separator, 0, limit) for separator in "、，；。")
+        base = base[:cut] if cut >= 8 else base[:limit]
+    return base.strip("、，；。的等") or "本章"
 
 
 def build_outline_draft(
@@ -883,7 +908,7 @@ def build_outline_draft(
                     "relatedChapters": [],
                     "figurePlan": [],
                     "insertAnchors": [],
-                    "writingNotes": [],
+                    "writingNotes": ["init-draft 生成的标题/图表题注只是骨架；写作前请按本包实际改写为通顺短语（图题同步）。"],
                     "completion": _default_completion(),
                     "reviewState": {"coverage": "unreviewed", "lastRound": 0, "issueIds": []},
                     "extensions": {},
@@ -963,11 +988,13 @@ def build_outline_draft(
             if not leaf_specs:
                 return
             leaf = leaf_specs[offset % len(leaf_specs)]
+            caption_base = _caption_base(str(leaf["title"]))
+            suffix = {"table": "相关要点表", "mermaid": "相关流程", "terminal": "相关示例"}.get(plan_type, "相关示意图")
             plan = {
                 "anchorId": f"fig-{leaf['id']}-{len(leaf['figurePlan']) + 1:02d}",
                 "type": plan_type,
                 "purpose": f"用{'表格' if plan_type == 'table' else '图'}集中呈现「{leaf['title']}」的关键信息，支撑正文可读性",
-                "caption": f"{leaf['title']}{'要点表' if plan_type == 'table' else '流程' if plan_type == 'mermaid' else '示例'}",
+                "caption": f"{caption_base}{suffix}",
                 "status": "planned",
             }
             if subtype:
@@ -1357,6 +1384,21 @@ def run_selftest() -> dict[str, Any]:
         if int(init_draft.get("stats", {}).get("plannedWordTotal") or 0) != 50000:
             raise AssertionError(f"init-draft 字数合计不正确：{init_draft.get('stats')}")
         checks.append("init_draft_split_title_and_total")
+        # N2：长分项标题按完整短语收敛，不能留「…进行分」「等4项」这种半句
+        long_title = _clean_title("对现有电子设施运维业务相关各系统平台现状情况、存在问题进行分析")
+        short_title = _clean_title("对外场电子设施（信号灯、诱导屏、电子警察、卡口、监控）的现状情况进行分析")
+        if short_title != "对外场电子设施的现状分析" or "进行分" in long_title:
+            raise AssertionError(f"分项标题收敛不正确：{short_title!r} / {long_title!r}")
+        merged_title = _merge_items_to_cap(
+            [{"title": "日常巡查及隐患排查", "detail": "a", "score": None},
+             {"title": "底数清理", "detail": "b", "score": None},
+             {"title": "故障诊断及修复", "detail": "c", "score": None},
+             {"title": "应急供电", "detail": "d", "score": None}],
+            2,
+        )[0]["title"]
+        if re.search(r"等\d+项", merged_title):
+            raise AssertionError(f"合并标题仍有「等N项」：{merged_title!r}")
+        checks.append("init_draft_title_quality")
         return {"ok": True, "selftest": {"script": "bg_outline_apply.py", "checks": checks}}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

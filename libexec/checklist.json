@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "checklistVersion": "1.0.1",
+  "checklistVersion": "1.0.2",
   "hostVersionBaseline": "0.2.x",
   "generatedFor": "M2",
   "items": [
@@ -105,7 +105,7 @@
       "label": "插件脚本完整性",
       "description": "插件自带脚本是否完整可用（含 M3 转换/回填/校验/导出）",
       "required": true,
-      "itemVersion": "1.5",
+      "itemVersion": "1.6",
       "check": "枚举 libexec/*.py + compileall + 逐脚本 --selftest",
       "remediation": "重新安装/更新插件后重试",
       "degradeImpact": "",

@@ -73,11 +73,17 @@ def plan_batches(leaves: Sequence[Mapping[str, Any]], batch_size: int = DEFAULT_
     size = max(1, int(batch_size))
     pending = [dict(node) for node in leaves if _completion_status(node) not in ("done", "skipped")]
     pending.sort(key=_seq_key)
-    batches = [pending[index : index + size] for index in range(0, len(pending), size)]
-    # 尾批过小时并入前一批；仍不超过 size
-    if len(batches) >= 2 and len(batches[-1]) < 4 and len(batches[-2]) + len(batches[-1]) <= size:
-        batches[-2].extend(batches[-1])
-        batches.pop()
+    if not pending:
+        return []
+    # N5：先算批数再均分（16 章 / 5 → 4/4/4/4），避免 5/5/5/1 的尾批 1 章。
+    batch_count = (len(pending) + size - 1) // size
+    base, extra = divmod(len(pending), batch_count)
+    batch_sizes = [base + 1] * extra + [base] * (batch_count - extra)
+    batches: list[list[dict[str, Any]]] = []
+    cursor = 0
+    for count in batch_sizes:
+        batches.append(pending[cursor : cursor + count])
+        cursor += count
     for batch in batches:
         batch.sort(key=lambda node: (_prio_rank(node), _seq_key(node)))
     return batches
@@ -187,7 +193,7 @@ def render_batch_markdown(payload: Mapping[str, Any]) -> str:
     lines = [
         f"# 第 {payload.get('batch')} 批写作任务书（{payload.get('packageId')}）",
         "",
-        f"- 本批章节：{payload.get('batchSize')} / 共 {payload.get('totalBatches')} 批；末级总数 {payload.get('totalLeaves')}",
+        f"- 本批章节：{payload.get('batchSize')} 章（全包 {payload.get('totalLeaves')} 章）；共 {payload.get('totalBatches')} 批",
         f"- 项目：{facts.get('projectName') or '未记录'} / {facts.get('packageName') or ''}",
         f"- 全包目标字数：{facts.get('expectedWordCount') or 0}",
         f"- 图表配额：{json.dumps(facts.get('figureQuota') or {}, ensure_ascii=False)}",
@@ -427,9 +433,9 @@ def run_selftest() -> dict[str, Any]:
     outline = _selftest_outline()
     leaves = _leaf_nodes(outline)
     batches = plan_batches(leaves, 4)
-    if [len(batch) for batch in batches] != [4, 1]:
-        raise AssertionError(f"批次切分不正确：{[len(batch) for batch in batches]}")
-    if [node["id"] for node in batches[0]] != ["1-1", "1-2", "1-3", "1-4"]:
+    if [len(batch) for batch in batches] != [3, 2]:
+        raise AssertionError(f"批次切分不正确（应均衡 3/2）：{[len(batch) for batch in batches]}")
+    if [node["id"] for node in batches[0]] != ["1-1", "1-2", "1-3"]:
         raise AssertionError(f"批次未按大纲顺序连续切分：{[node['id'] for node in batches[0]]}")
     checks.append("plan_batches_seq_contiguous")
     shuffled = [leaves[2], leaves[0], leaves[4], leaves[1], leaves[3]]
@@ -445,14 +451,16 @@ def run_selftest() -> dict[str, Any]:
         batch_size=4,
     )
     markdown = render_batch_markdown(payload)
-    if payload.get("batchSize") != 4 or "## 本批章节" not in markdown or "1-1" not in markdown:
+    if payload.get("batchSize") != 3 or "## 本批章节" not in markdown or "1-1" not in markdown:
         raise AssertionError("任务书 payload/markdown 不正确")
+    if "本批章节：3 章（全包 5 章）；共 2 批" not in markdown:
+        raise AssertionError(f"任务书头部口径不正确：{markdown.splitlines()[:5]}")
     checks.append("payload_markdown")
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="bidgenie-write-brief-") as tmp:
         package_dir = Path(tmp)
-        update_batch_state(package_dir, payload)
+        update_batch_state(package_dir, payload, configured_batch_size=4)
         state_path = _batch_state_path(package_dir)
         state_doc = json.loads(state_path.read_text(encoding="utf-8"))
         if state_doc.get("batches", {}).get("1", {}).get("status") != "briefed":

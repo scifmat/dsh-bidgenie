@@ -800,6 +800,42 @@ def subtype_mismatch_message(source_text: str, expected_subtype: str) -> str:
     return f"大纲 subtype={expected}，但 .mmd 首行类型为 {actual}；请改图源或回大纲修正 subtype"
 
 
+def sync_outline_figure_index(package_dir: Path, project_dir: Path) -> bool:
+    """N6：渲染完成后把 outline.figureIndex/ figurePlan.status 同步为 done。
+
+    merge 阶段可能早于 render（F5-2 常见顺序：写→merge→render），当时资源还没生成，
+    figureIndex 会一直是 planned；doctor 按 status=="done" 统计就永远 0。这里在 render
+    结束后按实际资源/正文重新同步一次。锁定后（T9）不写，避免破坏冻结清单。
+    """
+    if (package_dir / "chapters" / ".locked").exists():
+        return False
+    outline_path = outline_validate.outline_path(package_dir)
+    if not outline_path.is_file():
+        return False
+    try:
+        import bg_chapter_merge
+    except Exception:  # noqa: BLE001 - 同步失败不应让渲染失败
+        return False
+    changed = False
+    with jsonio.FileLock(outline_path, timeout=jsonio.LOCK_TIMEOUT_SEC):
+        latest = jsonio.read_json(outline_path)
+        before = json.dumps(
+            [latest.get("figureIndex") or [], [plan for node in outline_validate.iter_preorder(latest.get("chapters") or []) for plan in node.get("figurePlan") or []]],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        bg_chapter_merge.sync_figure_index(latest, package_dir, project_dir)
+        after = json.dumps(
+            [latest.get("figureIndex") or [], [plan for node in outline_validate.iter_preorder(latest.get("chapters") or []) for plan in node.get("figurePlan") or []]],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if before != after:
+            jsonio.write_json_atomic(outline_path, latest, lock=False)
+            changed = True
+    return changed
+
+
 def render_resources(
     *,
     workspace: Path,
@@ -1237,6 +1273,11 @@ def render_resources(
                 "error": residue.get("error"),
             }
         )
+    figure_index_synced = False
+    try:
+        figure_index_synced = sync_outline_figure_index(package_dir, project_dir_path)
+    except Exception:  # noqa: BLE001 - 同步失败不应让渲染失败
+        figure_index_synced = False
     return {
         "ok": True,
         "command": "render_resources",
@@ -1246,6 +1287,7 @@ def render_resources(
         "network": {"quota": network_quota, "disabled": network_quota == 0},
         "renderFallback": render_fallback,
         "fallbackCount": len(fallback_items),
+        "figureIndexSynced": figure_index_synced,
         "markerChecks": marker_checks,
         "tempResidue": temp_residues,
         "rendered": rendered,
@@ -1413,7 +1455,8 @@ def _build_selftest_project(base: Path) -> tuple[Path, Path, Path, dict[str, Any
         chapter_path.read_text(encoding="utf-8")
         + "\n<!-- BG:FIGURE:fig-1-1-01 -->\n\n```mermaid\nflowchart TD\n  A[开始] --> B{检查}\n  B -->|通过| C[结束]\n  B -->|失败| D[处理]\n  D --> C\n```\n\n"
         + "<!-- BG:FIGURE:fig-1-1-02 -->\n\n```text\n$ systemctl status nginx\n● nginx.service - A high performance web server\n     Active: active (running)\n$ df -h\n/dev/sda1  100G  42G  58G  42% /\n```\n\n"
-        + "<!-- BG:FIGURE:fig-1-1-05 -->\n\n```mermaid\nflowchart LR\n  A[并发A] --> B[并发B]\n  B --> C[完成]\n```\n",
+        + "<!-- BG:FIGURE:fig-1-1-05 -->\n\n```mermaid\nflowchart LR\n  A[并发A] --> B[并发B]\n  B --> C[完成]\n```\n\n"
+        + "▼表清单表\n\n| 列 | 值 |\n|---|---|\n| a | b |\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -1449,6 +1492,14 @@ def run_selftest() -> dict[str, Any]:
             raise AssertionError(f"渲染留下临时目录残留：{first['tempResidue']}")
         checks.append("table_no_marker_warning")
         checks.append("temp_cleanup")
+        # N6：render 结束后 figureIndex 应同步为 done（mermaid/terminal 看资源、table 看 ▼表）
+        synced_outline = jsonio.read_json(outline_validate.outline_path(package_dir))
+        synced_status = {str(item.get("anchorId")): str(item.get("status")) for item in synced_outline.get("figureIndex") or []}
+        if any(synced_status.get(anchor) != "done" for anchor in ("fig-1-1-01", "fig-1-1-02", "fig-1-1-04")):
+            raise AssertionError(f"figureIndex 未同步 done：{synced_status}")
+        if not first.get("figureIndexSynced"):
+            raise AssertionError("render 结果未标记 figureIndexSynced")
+        checks.append("figure_index_synced")
         if "fig-1-1-01" not in rendered or rendered["fig-1-1-01"]["status"] not in ("produced", "fallback"):
             raise AssertionError(f"mermaid 未生成：{first['rendered']} {first['warnings']}")
         mermaid_png = project_dir / rendered["fig-1-1-01"]["resourcePath"]

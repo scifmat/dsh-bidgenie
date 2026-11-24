@@ -1130,7 +1130,7 @@ def validate_tree_files(document: Mapping[str, Any], package_dir: Path) -> list[
     for entry in sorted(chapters_dir.rglob("*")):
         rel = entry.relative_to(package_dir).as_posix()
         parts = entry.relative_to(chapters_dir).parts
-        if any(part in ("_results", "_frozen", "resources", "_outline") for part in parts):
+        if any(paths.is_metadata_dir(part) or part == "resources" for part in parts):
             continue
         if entry.name.startswith(".") or entry.name.endswith(".lock"):
             continue
@@ -1585,6 +1585,13 @@ def run_selftest() -> dict[str, Any]:
         if not tree_result["valid"]:
             raise AssertionError(f"materialize 后文件树校验失败：{tree_result['blockers']}")
         checks.append("check_tree_pass")
+        # N1：chapters/_batches 等 `_` 元数据目录不得被 --check-tree/T4 当多余章节
+        (package_dir / "chapters" / "_batches").mkdir(parents=True, exist_ok=True)
+        (package_dir / "chapters" / "_batches" / "batch-1.md").write_text("# 第 1 批\n", encoding="utf-8", newline="\n")
+        tree_meta = validate_document(golden, package_meta, require_layout=True, check_tree=True, package_dir=package_dir)
+        if not tree_meta["valid"]:
+            raise AssertionError(f"含 _batches 时文件树校验失败：{tree_meta['blockers']}")
+        checks.append("check_tree_ignores_metadata")
         target_file = package_dir / golden["chapters"][0]["children"][0]["filePath"]
         target_file.unlink()
         tree_bad = validate_document(golden, package_meta, require_layout=True, check_tree=True, package_dir=package_dir)

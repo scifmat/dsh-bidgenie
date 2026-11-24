@@ -244,6 +244,15 @@ def workspace_fingerprint(workspace: Path) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
+def is_metadata_dir(part: str) -> bool:
+    """章节树里的元数据目录：以 `_` 开头（`_outline`/`_results`/`_frozen`/`_batches`）。
+
+    N1 之后由 outline_validate / bg_finalize / bg_review_script 共用，避免各写一份
+    白名单漏掉新目录。注意 `resources`/`export` 是包级目录，不在这里统一排除。
+    """
+    return bool(part) and str(part).startswith("_")
+
+
 def rel_posix(root: Path, target: Path) -> str:
     """返回 target 相对 root 的 POSIX 风格相对路径。"""
     try:
