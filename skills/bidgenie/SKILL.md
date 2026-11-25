@@ -21,7 +21,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 | currentStage | 技能 | 说明 |
 |---|---|---|
 | project_init | bg-init | 环境/项目初始化 → T1 |
-| info_extract | bg-extract | 九类提取 → T2 |
+| info_extract | bg-extract | 九类提取；用户只要解析/导出关键信息时停在 info_extract（extractOnly，不自动 T2），明确继续写方案才 T2 |
 | package_prepare | bg-prepare | 选包一次/逐包计划/全量 prepare → T3 |
 | outline | bg-outline | 大纲（含特殊章节 handling）→ 校验/落盘 → T4 |
 | draft | bg-write | 4–6 章一批写作（特殊章节按模板）→ T5 |

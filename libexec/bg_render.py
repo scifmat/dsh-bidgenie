@@ -576,7 +576,10 @@ def mermaid_layout_check(
             {
                 "code": "figure_too_tall",
                 "severity": "minor",
-                "message": f"图高/宽={aspect_tall:.2f}，建议合并节点或改横向分支",
+                "message": (
+                    f"图高/宽={aspect_tall:.2f}（>{MERMAID_ASPECT_TALL:g}）：建议合并节点到 ≤6 个、"
+                    "拆成 2 张图，或改用 flowchart LR；改 LR 后必须复检宽高比与字号（避免变成太扁/字太小）"
+                ),
             }
         )
     if aspect_wide > 4.0:
@@ -584,9 +587,17 @@ def mermaid_layout_check(
             {
                 "code": "figure_too_flat",
                 "severity": "minor",
-                "message": f"图宽/高={aspect_wide:.2f}，建议改 TB 或拆图",
+                "message": (
+                    f"图宽/高={aspect_wide:.2f}（>4）：建议合并节点到 ≤6 个、拆成 2 张图，或改用 flowchart TB；"
+                    "若改 LR 后字号 <8pt，应改回 TB 并拆图，不要靠横向拉长硬塞"
+                ),
             }
         )
+    recommendation = ""
+    if aspect_tall > MERMAID_ASPECT_TALL:
+        recommendation = "合并节点到 ≤6 个或拆成 2 张图；改 flowchart LR 后复检字号"
+    elif aspect_wide > 4.0:
+        recommendation = "合并节点到 ≤6 个或拆成 2 张图；改 flowchart TB，避免横向拉长导致字小"
     return {
         "diagramType": metrics.get("type") or "",
         "viewBoxWidth": round(view_width, 2),
@@ -601,6 +612,7 @@ def mermaid_layout_check(
         "labelCount": metrics.get("labelCount"),
         "maxLabelChars": metrics.get("maxLabelChars"),
         "captureScale": metrics.get("captureScale"),
+        "layoutRecommendation": recommendation,
         "warnings": warnings,
     }
 

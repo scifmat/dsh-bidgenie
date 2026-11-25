@@ -683,6 +683,24 @@ CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 CIRCLED_ITEM_RE = re.compile(rf"([{CIRCLED_NUMBERS}])\s*(.*?)(?=(?:[{CIRCLED_NUMBERS}])|$)")
 # P2-1：评分表末尾「合计/小计/总分」不是评审因素，不能生成一级章节。
 TOTAL_FACTORS = {"合计", "小计", "总分", "分值合计", "评分合计", "评审因素", "评分因素"}
+# P1-4：评分标准命中“需投标人提供证明材料”类关键词时，骨架自动拆出特殊章节，
+# 避免写作子智能体把检测报告/偏离表写成普通方案并编造已具备。
+SPECIAL_MATERIAL_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("deviation_table", ("偏离表", "响应表", "技术参数及功能指标响应")),
+    ("test_report", ("检测报告", "检验报告", "第三方检测")),
+    ("product_literature", ("产品说明书", "产品彩页", "技术说明书", "产品技术资料")),
+    ("commitment", ("承诺函", "承诺书", "声明函", "投标声明")),
+    ("sample", ("样品", "样机", "现场演示")),
+    ("certificate", ("认证证书", "资质证书", "证书复印件")),
+)
+SPECIAL_MATERIAL_LABELS: dict[str, str] = {
+    "deviation_table": "技术响应偏离表",
+    "test_report": "第三方检测报告",
+    "product_literature": "产品说明书/技术资料",
+    "commitment": "承诺函/声明",
+    "sample": "样品/演示",
+    "certificate": "证书/认证材料",
+}
 
 
 def _read_extraction_text(project_dir: Path, package_id: str, filename: str) -> str:
@@ -838,6 +856,89 @@ def _caption_base(title: str, *, limit: int = 24) -> str:
     return base.strip("、，；。的等") or "本章"
 
 
+def _special_material_candidate(criterion: Mapping[str, Any]) -> dict[str, Any] | None:
+    """P1-4：从评分因素/评分标准文本识别需用户提供证明材料的特殊章节候选。"""
+    text = f"{criterion.get('factor') or ''} {criterion.get('clause') or ''}"
+    matched: list[tuple[str, str]] = []
+    for material_type, keywords in SPECIAL_MATERIAL_RULES:
+        hit = next((keyword for keyword in keywords if keyword in text), "")
+        if hit:
+            matched.append((material_type, hit))
+    if not matched:
+        return None
+    labels = [SPECIAL_MATERIAL_LABELS[material_type] for material_type, _ in matched]
+    title = "、".join(dict.fromkeys(labels[:2])) + ("等材料清单" if len(labels) > 2 else "与证明材料清单")
+    requirements: list[dict[str, str]] = []
+    for sentence in re.split(r"[。；;]", str(criterion.get("clause") or "")):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if any(keyword in sentence for _, keywords in SPECIAL_MATERIAL_RULES for keyword in keywords):
+            requirements.append({"text": sentence[:240], "sourceRef": str(criterion.get("sourceRef") or "")})
+        if len(requirements) >= 3:
+            break
+    if not requirements:
+        requirements = [
+            {
+                "text": f"评分标准要求提供{ '、'.join(labels[:2]) }等材料，按招标文件原文响应",
+                "sourceRef": str(criterion.get("sourceRef") or ""),
+            }
+        ]
+    return {
+        "title": title,
+        "materialType": matched[0][0],
+        "requirements": requirements,
+    }
+
+
+def _special_chapter_node(
+    *,
+    parent_id: str,
+    order: int,
+    criterion: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """构造特殊章节末级（handling.mode=user_material，不产图/表）。"""
+    return {
+        "id": f"{parent_id}-{order}",
+        "title": _clean_title(str(candidate.get("title") or "证明材料清单")),
+        "level": 2,
+        "kind": "leaf",
+        "order": order,
+        "criterionRefs": [
+            {
+                "criterionId": criterion["criterionId"],
+                "factor": criterion["factor"],
+                "itemText": str(candidate.get("title") or ""),
+                "score": 0,
+                "sourceRef": criterion["sourceRef"],
+            }
+        ],
+        "scoreWeight": 0,
+        "contentRequirements": [
+            f"响应「{candidate.get('title')}」：逐项列明招标要求、我方处理方式与需用户补充的材料",
+            "按 bg-special-chapters 三段模板写（招标要求/处理方式/请用户补充），150–250 字",
+            "不代填、不承诺已具备、不编造证书编号/检测结论/保单信息",
+        ],
+        "wordTarget": int(outline_validate.SPECIAL_WORD_DEFAULT),
+        "priority": "P1",
+        "dependsOn": [],
+        "relatedChapters": [],
+        "figurePlan": [],
+        "insertAnchors": [],
+        "writingNotes": ["特殊章节：不写图/表/标记；材料由用户补充，不编造已具备。"],
+        "completion": _default_completion(),
+        "reviewState": {"coverage": "unreviewed", "lastRound": 0, "issueIds": []},
+        "extensions": {},
+        "handling": {
+            "mode": "user_material",
+            "materialType": str(candidate.get("materialType") or "test_report"),
+            "requirements": list(candidate.get("requirements") or []),
+            "userAction": "请用户提供/补充上述证明材料原件或清晰影印件，并确认是否响应；技术方案只写处理方式，不代填。",
+        },
+    }
+
+
 def build_outline_draft(
     *,
     project_dir: Path,
@@ -932,6 +1033,18 @@ def build_outline_draft(
             child["scoreWeight"] = round(weight_value, 2)
             if child.get("criterionRefs"):
                 child["criterionRefs"][0]["score"] = round(weight_value, 2)
+        # P1-4：评分标准要求提供检测报告/偏离表/说明书/承诺函/样品等材料时，
+        # 自动增加特殊章节（handling），避免写作阶段编造“已提供/已具备”。
+        special_candidate = _special_material_candidate(criterion)
+        if special_candidate is not None:
+            children.append(
+                _special_chapter_node(
+                    parent_id=parent_id,
+                    order=len(children) + 1,
+                    criterion=criterion,
+                    candidate=special_candidate,
+                )
+            )
         parent_nodes.append(
             {
                 "id": parent_id,
@@ -959,7 +1072,12 @@ def build_outline_draft(
 
     # 单章上限 8000 时，叶子太少会导致 Σ 无法达到 expectedWordCount（例如 50000/6 被
     # 截成 48000）。此时拆分分值最大的叶子，保持父级分值不变。
-    leaf_specs = [child for parent in parent_nodes for child in parent.get("children") or []]
+    leaf_specs = [
+        child
+        for parent in parent_nodes
+        for child in parent.get("children") or []
+        if not outline_validate.is_special_chapter(child)
+    ]
     min_leaves = (total_words + MAX_WORD - 1) // MAX_WORD
     while len(leaf_specs) < min_leaves:
         candidates = [
@@ -987,7 +1105,12 @@ def build_outline_draft(
         for index, child in enumerate(candidate_parent["children"], start=1):
             child["order"] = index
             child["id"] = f"{candidate_parent['id']}-{index}"
-        leaf_specs = [child for parent in parent_nodes for child in parent.get("children") or []]
+        leaf_specs = [
+            child
+            for parent in parent_nodes
+            for child in parent.get("children") or []
+            if not outline_validate.is_special_chapter(child)
+        ]
 
     # 图表配额预填：table 优先；mermaid 顺延；terminal 仅在 --with-terminal 时预填。
     def add_figure(plan_type: str, count: int, subtype: str | None = None) -> None:
@@ -1036,7 +1159,7 @@ def build_outline_draft(
             "generatedAt": paths.iso_now(),
             "needsAgentReview": True,
             "figurePrefill": {"table": table_quota, "mermaid": mermaid_quota, "terminal": terminal_quota},
-            "note": "骨架仅按技术评分因素与分项生成；写作前请 Agent 按 06/09 补充事实、重难点、特殊章节 handling，并检查标题/分项是否贴合本包。",
+            "note": "骨架按技术评分因素与分项生成；评分标准含检测报告/偏离表/说明书/承诺函/样品等材料要求时已自动生成特殊章节 handling。写作前请 Agent 按 06/09 补充事实、重难点，并检查标题/分项是否贴合本包。",
         },
     }
     # 先按同一套归一化规则分配精确字数/重算 coveredBy，避免生成后再 --strict 才发现
@@ -1453,6 +1576,40 @@ def run_selftest() -> dict[str, Any]:
             if item not in maintenance_items:
                 raise AssertionError(f"N7 维护分项未进入骨架：{item}")
         checks.append("init_draft_numbered_items_after_colon")
+        # P1-4：评分标准要求检测报告/偏离表/说明书时，自动生成特殊章节 handling
+        special_07 = (
+            "# 评分标准\n\n## 技术评分标准\n\n"
+            "| 评审因素 | 分值 | 评分标准 |\n|---|---|---|\n"
+            "| 技术参数及功能指标响应 | 10分 | 投标人需提供产品说明书、第三方检测报告、技术响应偏离表，并对技术参数逐项响应。未提供不得分。 |\n"
+            "| 合计 | 10分 | 与技术总分一致 |\n"
+        )
+        (extraction_dir / "07-Evaluation-Criteria.md").write_text(special_07, encoding="utf-8")
+        special_meta = dict(init_meta)
+        special_meta["expectedWordCount"] = 1000
+        special_draft = build_outline_draft(
+            project_dir=project_dir,
+            package_id="package-1",
+            package_meta=special_meta,
+            project={"projectName": "M5 大纲自检项目"},
+        )
+        special_parent = (special_draft.get("chapters") or [{}])[0]
+        special_children = special_parent.get("children") or []
+        special_nodes = [child for child in special_children if outline_validate.is_special_chapter(child)]
+        if len(special_nodes) != 1:
+            raise AssertionError(f"P1-4 特殊章节未自动生成：{special_children}")
+        special_node = special_nodes[0]
+        handling = special_node.get("handling") or {}
+        if (
+            handling.get("mode") != "user_material"
+            or handling.get("materialType") not in outline_validate.MATERIAL_TYPES
+            or not handling.get("requirements")
+            or special_node.get("figurePlan")
+            or int(special_node.get("wordTarget") or 0) != 200
+        ):
+            raise AssertionError(f"P1-4 特殊章节 handling 不完整：{special_node}")
+        if len(special_children) != 2:
+            raise AssertionError(f"P1-4 特殊章节不应挤掉普通末级：{[child.get('title') for child in special_children]}")
+        checks.append("init_draft_special_chapter")
         return {"ok": True, "selftest": {"script": "bg_outline_apply.py", "checks": checks}}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

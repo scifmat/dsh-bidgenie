@@ -184,6 +184,8 @@ def build_batch_payload(
             "特殊章节 handling 不为空时按 bg-special-chapters 模板写，不产图/表。",
             "只写本章 md 与 resources 源文件；不改 outline.json，不渲染 png。",
             "正文小节标题最多下探到章节层级+1（末级 level=2 时只用 ###，不要 ####/#####）。",
+            "chapter-result.figures[].status 只能是 produced / failed / skipped（不要写 generated/done）；tables[] 按实际表登记。",
+            "技术正文不写商务/报价内容：预算/限价金额、付款比例/节点、价格评审公式/报价得分、资质证书编号。",
         ],
     }
 
@@ -253,9 +255,10 @@ def render_batch_markdown(payload: Mapping[str, Any]) -> str:
             "## 交付要求",
             "",
             "- 每章写 `chapters/_results/<chapterId>.chapter-result.json`（status/wordCount/summary/criterionRefs/figures/tables）。",
+            "- `figures[].status` 只能是 `produced` / `failed` / `skipped`；渲染前源文件已写就填 `produced`，不要写 `generated`/`done`。",
             "- 只写本批文件；不要运行 bg_render.py；不要改 outline.json。",
             "- 特殊章节不写图/表，不代填材料，不承诺已具备。",
-            "- 商务/报价/资质证书内容不进技术正文。",
+            "- 商务/报价/资质证书内容不进技术正文（不写预算/限价金额、付款比例/节点、价格评审公式/报价得分）。",
             "",
         ]
     )
@@ -300,6 +303,18 @@ def update_batch_state(package_dir: Path, payload: Mapping[str, Any], *, configu
     return True
 
 
+def summarize_brief(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """P2-6：`--all --brief` 的轻量返回，避免几十 KB 的 chapters/projectFacts 回显。"""
+    batch = int(payload.get("batch") or 1)
+    return {
+        "batch": batch,
+        "batchSize": payload.get("batchSize"),
+        "totalBatches": payload.get("totalBatches"),
+        "draftJsonPath": f"{BATCH_DIR}/batch-{batch}.json",
+        "draftMarkdownPath": f"{BATCH_DIR}/batch-{batch}.md",
+    }
+
+
 def generate_briefs(
     *,
     workspace: Path,
@@ -309,6 +324,7 @@ def generate_briefs(
     all_batches: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     write: bool = True,
+    brief: bool = False,
 ) -> dict[str, Any]:
     workspace_path, project_dir_path, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
         workspace, project_dir, package_id
@@ -376,12 +392,16 @@ def generate_briefs(
         "batchSizes": [payload.get("batchSize") for payload in payloads],
         "batchStatePath": BATCH_STATE,
         "written": written,
-        "batches": payloads,
-        "currentStage": state.get("currentStage"),
+        "brief": brief,
     }
-    if len(payloads) == 1:
-        result["batch"] = payloads[0]
-        result["markdown"] = render_batch_markdown(payloads[0])
+    if brief:
+        result["batches"] = [summarize_brief(payload) for payload in payloads]
+    else:
+        result["batches"] = payloads
+        if len(payloads) == 1:
+            result["batch"] = payloads[0]
+            result["markdown"] = render_batch_markdown(payloads[0])
+    result["currentStage"] = state.get("currentStage")
     return result
 
 
@@ -456,6 +476,16 @@ def run_selftest() -> dict[str, Any]:
     if "本批章节：3 章（全包 5 章）；共 2 批" not in markdown:
         raise AssertionError(f"任务书头部口径不正确：{markdown.splitlines()[:5]}")
     checks.append("payload_markdown")
+    brief_item = summarize_brief(payload)
+    if (
+        brief_item.get("batch") != 1
+        or brief_item.get("batchSize") != 3
+        or brief_item.get("draftJsonPath") != "chapters/_batches/batch-1.json"
+        or "chapters" in brief_item
+        or "projectFacts" in brief_item
+    ):
+        raise AssertionError(f"--brief 摘要不正确：{brief_item}")
+    checks.append("brief_summary")
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="bidgenie-write-brief-") as tmp:
@@ -488,6 +518,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all", action="store_true", help="生成全部批次")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help=f"每批章节数（默认 {DEFAULT_BATCH_SIZE}，建议 4–6）")
     parser.add_argument("--no-write", action="store_true", help="只输出，不写 _batches/ 文件")
+    parser.add_argument("--full", action="store_true", help="--all 时仍返回完整 chapters/projectFacts（默认 --all 精简输出）")
     parser.add_argument("--selftest", action="store_true", help="运行脚本自检")
     return parser
 
@@ -498,14 +529,17 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
     if not getattr(args, "project", None):
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
+    all_batches = bool(getattr(args, "all", False))
+    brief = bool(getattr(args, "brief", False)) or (all_batches and not bool(getattr(args, "full", False)))
     return generate_briefs(
         workspace=workspace,
         project_dir=project_dir,
         package_id=getattr(args, "package", None),
         batch_no=int(getattr(args, "batch", 1) or 1),
-        all_batches=bool(getattr(args, "all", False)),
+        all_batches=all_batches,
         batch_size=int(getattr(args, "batch_size", DEFAULT_BATCH_SIZE) or DEFAULT_BATCH_SIZE),
         write=not bool(getattr(args, "no_write", False)),
+        brief=brief,
     )
 
 

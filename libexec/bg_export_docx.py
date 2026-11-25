@@ -506,11 +506,11 @@ class KeyInfoDocBuilder:
         self.counter["paragraphs"] += 1
 
     def add_toc_field(self, title: str = "目录") -> None:
-        """P2-10：可选插入 Word TOC 域（`--with-toc`），打开文档时提示更新域。
+        """tech 模式默认插入 Word TOC 域，打开文档时提示更新域。
 
-        不默认开启：多数招标文件不强制目录，且未更新域时 Word 只显示占位提示。
-        需要目录时用 `bg_export_docx.py --mode tech --with-toc`，导出后自检
-        `tocFieldPresent=true`；用户打开 docx 后按 F9/“更新域”即可生成页码。
+        P2-3（2026-11-25）：招标文件常要求技术文件含详细目录，默认插入；用户明确不要
+        目录时用 `bg_export_docx.py --mode tech --no-toc`。导出后自检允许 TOC 域；
+        用户打开 docx 后按 F9/“更新域”即可生成页码。
         """
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.oxml import OxmlElement
@@ -1274,7 +1274,7 @@ def export_tech(
     profile_id: str | None = None,
     package_id: str | None = None,
     keep_history: int = 1,
-    with_toc: bool = False,
+    with_toc: bool = True,
 ) -> dict[str, Any]:
     started_at = paths.iso_now()
     started = time.monotonic()
@@ -1885,7 +1885,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", help="输出 docx 路径（缺省 exports/<项目名>-关键信息-<ts14>.docx）")
     parser.add_argument("--run", action="store_true", help="执行导出（默认动作，H.1 兼容）")
     parser.add_argument("--keep-history", type=int, default=1, help="默认导出目录保留历史份数（默认 1，只留最新）")
-    parser.add_argument("--with-toc", action="store_true", help="tech 模式：插入 Word TOC 域（打开后按 F9 更新目录）")
+    parser.add_argument("--with-toc", action="store_true", help="tech 模式：插入 Word TOC 域（默认已插入，此参数保留兼容）")
+    parser.add_argument("--no-toc", action="store_true", help="tech 模式：不插入 Word TOC 域（招标文件明确不要目录时使用）")
     parser.add_argument("--selftest", action="store_true", help="运行脚本自检")
     return parser
 
@@ -1901,7 +1902,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
     if mode == "tech":
-        return export_tech(workspace, project_dir, out_path=getattr(args, "out", None), profile_id=None, package_id=getattr(args, "package", None), keep_history=int(getattr(args, "keep_history", 1) or 1), with_toc=bool(getattr(args, "with_toc", False)))
+        return export_tech(workspace, project_dir, out_path=getattr(args, "out", None), profile_id=None, package_id=getattr(args, "package", None), keep_history=int(getattr(args, "keep_history", 1) or 1), with_toc=not bool(getattr(args, "no_toc", False)))
     return export_keyinfo(workspace, project_dir, out_path=getattr(args, "out", None), keep_history=int(getattr(args, "keep_history", 1) or 1))
 
 

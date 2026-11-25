@@ -47,6 +47,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib  # noqa: E402
+from _lib import extraction_risk  # noqa: E402
 
 SCHEMA_VERSION = "1.0"
 REPORT_FILE_NAME = "_extraction-report.json"
@@ -76,22 +77,23 @@ DEFAULT_EXPECTED_SECTIONS: dict[str, tuple[str, ...]] = {
     "04": ("投标文件格式", "投标文件编制要求"),
     "05": (
         "企业证书证明",
-        "拟派人员证书证明",
+        "拟派人员要求",
+        "业绩与车辆要求",
         "书面承诺/声明",
         "各信用平台查询截图",
-        "产品/服务厂商授权、第三方检测报告、其它资质证明资料等",
+        "产品/服务厂商授权、第三方检测报告",
         "其它实质性应标资料",
     ),
     "06": ("标段信息", "采购内容"),
-    "07": ("评标办法", "商务评分标准", "技术评分标准", "报价评分标准"),
-    "08": ("企业资质要求", "人员资质要求", "业绩要求", "财务要求", "服务要求", "付款方式"),
+    "07": ("评标办法", "商务评分标准", "技术评分标准", "报价评分标准", "分值合计"),
+    "08": ("企业资质要求", "人员资质要求", "业绩要求", "财务要求", "服务要求", "材料要求", "付款方式"),
     "09": (),
 }
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _NUMBER_PREFIX_RE = re.compile(
     r"^(?:"
-    r"第[一二三四五六七八九十百零〇两\d]+[章节部分篇]\s*[、.．:：]?\s*"
+    r"第[一二三四五六七八九十百零〇两\d]+(?:部分|[章节篇])\s*[、.．:：]?\s*"
     r"|[一二三四五六七八九十]+\s*[、.．:：]\s*"
     r"|\d+(?:\.\d+)+\s+"
     r"|\d+(?:\.\d+)*\s*[、.．:：)]\s*"
@@ -1075,6 +1077,60 @@ def run_selftest() -> dict[str, Any]:
         if not report["scoringTable"] or report["scoringTable"]["rows"] != 3:
             raise AssertionError(f"评分表解析不正确：{report.get('scoringTable')}")
         checks.append("golden_pass")
+        # P1-6：DEFAULT_EXPECTED_SECTIONS 必须与 manifest v3 对齐，避免模板缺失时按旧口径误判
+        manifest = load_template_manifest()
+        for template in manifest["templates"]:
+            template_id = str(template.get("id") or "")
+            expected = tuple(template.get("expectedSections") or ())
+            fallback = DEFAULT_EXPECTED_SECTIONS.get(template_id, ())
+            if expected != fallback:
+                raise AssertionError(f"template {template_id} 默认章节与 manifest 不一致：{fallback} != {expected}")
+        # P1-5：「第一部分：交通标线」不能把“部”当编号剥掉
+        if strip_heading_numbering("第一部分：交通标线") != "交通标线":
+            raise AssertionError(f"第N部分编号剥离不正确：{strip_heading_numbering('第一部分：交通标线')!r}")
+        if strip_heading_numbering("第一章 项目概况") != "项目概况" or strip_heading_numbering("1.1 项目背景") != "项目背景":
+            raise AssertionError("常规章节编号剥离回归")
+        checks.append("default_sections_and_heading_numbering")
+        # P1-2/P1-3：回退页/表格/复选框风险汇总与确认标记
+        review_dir = tmp / "project-fallback-review"
+        (review_dir / "sources").mkdir(parents=True)
+        (review_dir / "extraction" / "packages" / "package-1").mkdir(parents=True)
+        jsonio.write_json_atomic(
+            review_dir / "project.json",
+            {"schemaVersion": "1.0", "projectId": "prj-fallback-review", "extensions": {}},
+        )
+        jsonio.write_json_atomic(
+            review_dir / "sources" / "conversion-manifest.json",
+            {
+                "schemaVersion": "1.0",
+                "files": [
+                    {
+                        "sourceName": "a.pdf",
+                        "fallbackPages": [7],
+                        "fallbackPageCount": 1,
+                        "keyDataFromFallbackOnly": True,
+                        "fallbackNote": "关键数据仅来自回退文本：第 7 页由纯文本回退补齐",
+                    }
+                ],
+            },
+        )
+        (review_dir / "extraction" / "packages" / "package-1" / "08-Business-Requirements.md").write_text(
+            "# 商务要求\n\n"
+            "## 需用户确认\n\n"
+            "- 前附表复选框符号（□√）转换后不可辨，需核对 PDF 原件。\n"
+            "- 采购清单跨页合并单元格断行错位，需核对 PDF 原件。\n"
+            "- 第一章第 7 页关键字段（项目编号/预算/限价/分包数）来自回退文本，需核对 PDF 原件。\n",
+            encoding="utf-8",
+        )
+        risks = extraction_risk.detect_fallback_review_risks(review_dir)
+        risk_codes = {str(item.get("code")) for item in risks}
+        if not {"fallback_page", "ambiguous_symbol", "table_structure"} <= risk_codes:
+            raise AssertionError(f"回退/勾选风险识别不完整：{risks}")
+        extraction_risk.write_review(review_dir, risks, confirmed_at="2026-01-01T00:00:00+08:00", note="用户已核对")
+        marker = extraction_risk.review_from_project(jsonio.read_json(review_dir / "project.json"))
+        if not marker.get("required") or not marker.get("confirmedAt") or len(marker.get("risks") or []) != len(risks):
+            raise AssertionError(f"风险确认标记写入不正确：{marker}")
+        checks.append("fallback_review_risks")
 
         # P3-14：coverage.criteriaCount 口径（单包 / 全包合计）+ criteriaByPackage
         coverage = report.get("coverage") or {}
@@ -1104,23 +1160,23 @@ def run_selftest() -> dict[str, Any]:
 
         # P2-12：caveats 去空条目/去重/按包合并，且不丢真实不同项
         caveat_lines = [
-            ("extraction/common/02-Eligibility-Review.md", "需用户确认：本国产品成本承诺声明函格式与原文件第六章不一致，需确认格式来源。"),
-            ("extraction/common/05-Substantive-Response.md", "8. 本国产品成本承诺声明函格式：第四章称格式详见第六章，但第六章未列该声明函，需确认格式来源。"),
+            ("extraction/common/02-Eligibility-Review.md", "需用户确认：条款 A 与条款 B 的表述不一致，需核对原件。"),
+            ("extraction/common/05-Substantive-Response.md", "8. 条款 A 与条款 B 的表述不一致，需核对原件（需确认）。"),
             (
                 "extraction/packages/package-1/08-Business-Requirements.md",
-                "2. **履约担保复选框不可辨**：第二章前附表第 32 项「履约担保」转换后仅存「□有 无」，复选框符号丢失；第五章明确不要求履约担保。已按「无」记录，需用户确认。",
+                "需用户确认：2. **复选框状态不可辨**：表格中的勾选符号转换后丢失，已按语义暂记，需核对原件。",
             ),
             (
                 "extraction/packages/package-1/09-Technical-Requirements.md",
-                "6. **履约担保复选框不可辨**：第二章投标人须知前附表第 32 项「履约担保」转换后仅存「□有 无」，与第五章合同编制说明对应，已按「无」记录，需确认。",
+                "需用户确认：6. **复选框状态不可辨**：表格中的勾选符号转换后丢失，已按语义暂记，需核对原件。",
             ),
             (
                 "extraction/packages/package-1/08-Business-Requirements.md",
-                "1. **中小微企业政策口径存在冲突**：第一章允许联合体参与，第二章前附表要求必须为中小微企业，需确认。",
+                "需用户确认：1. **条款冲突**：同一要求在前后两节表述不同，需核对原件。",
             ),
             ("extraction/packages/package-1/06-Procurement-Content.md", "**需用户确认：**"),
-            ("extraction/packages/package-4/09-Technical-Requirements.md", "**需用户确认：** 服务期条款冲突（第三章 vs 第五章），需核对原件确认。"),
-            ("extraction/packages/package-5/09-Technical-Requirements.md", "**需用户确认：** 付款方式存在表述差异（第二章前附表 vs 第五章合同 30%/40%/30%），需核对原件确认。"),
+            ("extraction/packages/package-4/09-Technical-Requirements.md", "**需用户确认：** 条款 E 在两处表述不同，需核对原件。"),
+            ("extraction/packages/package-5/09-Technical-Requirements.md", "**需用户确认：** 条款 F 在两处表述不同，需核对原件。"),
         ]
         entries = build_caveat_entries(caveat_lines)
         duplicate_items = [item for item in entries if int(item.get("duplicateCount") or 1) > 1]
@@ -1130,8 +1186,8 @@ def run_selftest() -> dict[str, Any]:
             or any(not str(item.get("text") or "").strip() for item in entries)
             or len(duplicate_items) != 2
             or not all(len(item.get("sources") or []) == int(item.get("duplicateCount") or 0) for item in entries)
-            or "付款方式" not in " ".join(str(item.get("text") or "") for item in entries if item.get("scope") == "package-5")
-            or "服务期条款冲突" not in " ".join(str(item.get("text") or "") for item in entries if item.get("scope") == "package-4")
+            or "条款 F" not in " ".join(str(item.get("text") or "") for item in entries if item.get("scope") == "package-5")
+            or "条款 E" not in " ".join(str(item.get("text") or "") for item in entries if item.get("scope") == "package-4")
         ):
             raise AssertionError(f"caveats 去重/按包合并结果不正确：{entries}")
         if caveats_by_package(entries) != {"common": 1, "package-1": 2, "package-4": 1, "package-5": 1}:
@@ -1142,7 +1198,8 @@ def run_selftest() -> dict[str, Any]:
         demo_09 = demo_dir / "extraction" / "packages" / "package-1" / "09-Technical-Requirements.md"
         demo_09.write_text(
             demo_09.read_text(encoding="utf-8")
-            + "\n**需用户确认：**\n\n需用户确认：设备数量仅存在于回退文本第 2 页，需与 PDF 原件核对。\n",
+            + "\n**需用户确认：**\n\n需用户确认：设备数量仅存在于回退文本第 2 页，需与 PDF 原件核对。\n"
+            + "\n## 需用户确认\n\n- 采购清单跨页表格需对照 PDF 原件核对。\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -1152,6 +1209,7 @@ def run_selftest() -> dict[str, Any]:
             or any(not str(item.get("text") or "").strip() for item in collected)
             or any("需用户确认" == _caveat_meaningful_text(str(item.get("text") or "")) for item in collected)
             or not all(item.get("packages") and item.get("sources") and "source" in item for item in collected)
+            or not any("跨页表格" in str(item.get("text") or "") for item in collected)
         ):
             raise AssertionError(f"collect_extraction_caveats 结果不正确：{collected}")
         written_caveats = write_extraction_caveats(demo_dir, collected)
@@ -1311,6 +1369,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scope", choices=["all", "common", "packages"], default="all", help="校验范围（默认 all）")
     parser.add_argument("--package", help="只校验指定 package-<N>")
     parser.add_argument("--strict", action="store_true", help="warning 升级为 blocker")
+    parser.add_argument("--confirm-fallback", action="store_true", help="用户已核对回退页/表格/复选框风险后登记确认")
+    parser.add_argument("--note", default="", help="--confirm-fallback 的用户确认说明（写 project.extensions）")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--apply", action="store_true", help="校验并写报告（默认）")
     action.add_argument("--report", action="store_true", help="同 --apply（写报告）")
@@ -1447,6 +1507,31 @@ def caveats_by_package(caveats: list[dict[str, Any]]) -> dict[str, int]:
     return stats
 
 
+def _caveat_source_lines(text: str) -> list[str]:
+    """按「需用户确认」章节收集 caveat 行（P2-7）。
+
+    旧实现只认行内标记，章节下的「- 请对照原件复核…」没有「需用户确认」字样就会被跳过；
+    这里以 H2/H3 标题为界，把章节内的列表项也纳入，并补上可识别的确认前缀。
+    """
+    lines: list[str] = []
+    in_caveat_section = False
+    for raw in str(text or "").splitlines():
+        stripped = raw.strip()
+        heading = re.match(r"^#{2,6}\s+(.+?)\s*$", stripped)
+        if heading:
+            in_caveat_section = any(marker in heading.group(1) for marker in CAVEAT_MARKERS)
+            continue
+        if in_caveat_section:
+            if not stripped or stripped.startswith("|") or stripped.startswith("```"):
+                continue
+            if not any(marker in stripped for marker in CAVEAT_MARKERS):
+                stripped = "需用户确认：" + re.sub(r"^[-*+]\s*", "", stripped)
+            lines.append(stripped)
+        else:
+            lines.append(raw)
+    return lines
+
+
 def collect_extraction_caveats(project_dir: Path) -> list[dict[str, Any]]:
     """从提取稿收集 caveats（转换说明/需用户确认/疑似缺失/原文缺失），去重合并后机读写 project.extensions。"""
     extraction_dir = project_dir / "extraction"
@@ -1458,7 +1543,7 @@ def collect_extraction_caveats(project_dir: Path) -> list[dict[str, Any]]:
         except OSError:
             continue
         source = paths.rel_posix(project_dir, path)
-        lines.extend((source, line) for line in text.splitlines())
+        lines.extend((source, line) for line in _caveat_source_lines(text))
     return build_caveat_entries(lines)
 
 
@@ -1487,6 +1572,21 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
     if not args.project:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
+    # P1-2/P1-3：把回退页/表格/复选框风险汇总为阻塞式核对项
+    risks = extraction_risk.detect_fallback_review_risks(project_dir)
+    project_doc = state_lib.load_project(project_dir)
+    existing_review = extraction_risk.review_from_project(project_doc)
+    confirmed_at = str(existing_review.get("confirmedAt") or "")
+    if getattr(args, "confirm_fallback", False):
+        confirmed_at = paths.iso_now()
+    review_written = ""
+    if not getattr(args, "check", False):
+        review_written = extraction_risk.write_review(
+            project_dir,
+            risks,
+            confirmed_at=confirmed_at,
+            note=str(getattr(args, "note", "") or existing_review.get("note") or ""),
+        )
     result = validate_project_extraction(
         project_dir,
         scope=str(args.scope),
@@ -1506,13 +1606,28 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
         warnings = []
-        report["blockers"] = blockers
-        report["warnings"] = warnings
-        report["passed"] = not blockers
-        report["ok"] = not blockers
+    report["fallbackReview"] = {"required": bool(risks), "risks": risks, "confirmedAt": confirmed_at}
+    if risks and not confirmed_at:
+        blockers.append(
+            {
+                "code": "fallback_review_required",
+                "file": "sources/conversion-manifest.json",
+                "pointer": "",
+                "message": (
+                    f"检测到 {len(risks)} 项需用户核对（回退页关键字段/跨页表格/复选框符号不可辨）；"
+                    "请先向用户确认受影响字段，再运行 bg_extract_validate.py --confirm-fallback --note \"<用户确认结论>\""
+                ),
+            }
+        )
+    report["blockers"] = blockers
+    report["warnings"] = warnings
+    report["passed"] = not blockers
+    report["ok"] = not blockers
     written: list[str] = []
     if not getattr(args, "check", False):
         written = write_reports(project_dir, report)
+        if review_written:
+            written.append(review_written)
     summary = report.get("summary") or {}
     if blockers:
         event_log.log_event(
@@ -1531,6 +1646,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                 "blockers": blockers[:50],
                 "warnings": warnings[:50],
                 "summary": summary,
+                "fallbackReview": report.get("fallbackReview"),
                 "written": written,
             },
         )
@@ -1565,6 +1681,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         "caveatCount": len(caveats),
         "caveatsByPackage": caveat_stats,
         "caveatsWritten": caveats_written,
+        "fallbackReview": report.get("fallbackReview"),
         "blockers": [],
         "summary": summary,
         "reportPath": paths.rel_posix(project_dir, project_dir / "extraction" / "common" / REPORT_FILE_NAME),

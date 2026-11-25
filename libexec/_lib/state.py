@@ -646,6 +646,22 @@ def guard_t2(ctx: TransitionContext) -> list[dict[str, Any]]:
         manifest_ok,
         manifest_detail,
     )
+    # P1-2/P1-3：转换回退/跨页表格/复选框风险必须先由用户确认（bg_extract_validate --confirm-fallback）
+    extensions = project.get("extensions") if isinstance(project.get("extensions"), Mapping) else {}
+    review = extensions.get("extractionFallbackReview") if isinstance(extensions, Mapping) else None
+    review_required = bool(review.get("required")) if isinstance(review, Mapping) else False
+    review_confirmed = bool(str(review.get("confirmedAt") or "")) if isinstance(review, Mapping) else False
+    _check(
+        checks,
+        "extraction_fallback_review",
+        "回退页/表格/复选框不确定项已由用户确认",
+        (not review_required) or review_confirmed,
+        {
+            "required": review_required,
+            "confirmedAt": str(review.get("confirmedAt") or "") if isinstance(review, Mapping) else "",
+            "risks": (review.get("risks") or [])[:5] if isinstance(review, Mapping) else [],
+        },
+    )
     return checks
 
 

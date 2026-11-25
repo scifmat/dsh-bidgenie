@@ -36,7 +36,11 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
 
 - 主技能路由而来：项目 `state.currentStage == info_extract`。
 - 源文件就绪：`<projectDir>/sources/conversion-manifest.json` 存在，主招标文件已转换。
-  按 CONTRACT §10.1：**由 Agent 语义分类并复制**为固定命名 `sources/01-bidding-documents.md` … `sources/07-<描述>.md`（原件保留在 `sources/raw/`，不修改原文件；分类不确定时询问用户）。
+  **由 Agent 语义分类并复制**（不改原文件、原件留在 `sources/raw/`）为固定命名：
+  `sources/01-bidding-documents.md`（主招标文件）、`02-technical-requirements.md`（技术要求）、
+  `03-procurement-list.md`（采购清单）、`04-evaluation-criteria.md`（评审标准）、
+  `05-construction-instructions.md`（施工说明）、`06-proposed-plan.md`（方案建议书）、
+  `07-<内容描述>.md`（其他）；分类不确定时询问用户。完整规则见插件根 `CONTRACT.md §10.1`（随包发布）。
 - 转换回退提示（大 PDF 必看）：manifest 的 `files[]`/`sources[]` 条目带
   `fallbackPageCount/fallbackPages/keyDataFromFallbackOnly/fallbackNote`，warnings 含
   `key_data_from_fallback_only:<n>`、`pdf_pages_fallback:<n>` 时表示**该页结构化内容（表格/版式）由纯文本回退补齐**；
@@ -82,6 +86,13 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
    - `coverage.criteriaCount` 口径：`criteriaCountScope=all_packages_total` 时为**全包合计**（`criteriaCountNote` 已写明、`criteriaByPackage` 给分包明细）；单包 outline/审查不要按全包合计核对，按单包个数取。
    - `extractionCaveats`（写回 `project.extensions`）：按包合并展示、纯标题行（`**需用户确认：**` 之类）已丢弃、同包内相似重复项已合并（`duplicateCount/sources` 可见合并来源），汇报时用 `caveatsByPackage` 分片说明。
    有 blocker → 按报告修复（保持人读格式）后重跑，**≤3 轮**；仍失败 → 输出缺口清单 + 需用户补充项，停在 `info_extract`。
+   - **回退页/表格/复选框阻塞确认**：若报告出现 `fallback_review_required`，必须把 `fallbackReview.risks`（回退页关键字段、跨页表格、复选框/符号不可辨）逐条交给用户核对（`ask_user_question`，不猜、不跳过）；用户确认后重跑并带确认说明：
+
+     ```text
+     "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_extract_validate.py" --workspace "<ws>" --project "<projectDir>" --confirm-fallback --note "<用户确认结论（含受影响字段/是否以提取稿为准）>" --json
+     ```
+
+     未确认时 T2 guard 也会因 `extractionFallbackReview.required=true` 失败。
 6. **关键信息导出（用户要求时）**：
 
    ```text
@@ -100,7 +111,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
    - 公开联系人/电话/邮箱完整未脱敏。
    抽检不合格 → 重写对应章节 → 重跑第 5、6 步。
 8. **汇报与后续**：9 类文件绝对路径、分包结论、校验结果、抽检结论、缺口/待用户补充、导出路径（如有）。
-   - 独立提取模式：按 CONTRACT §10.5 只登记 `extractOnly`，**M3 不自动迁移 T2**；
+   - 独立提取模式（用户只要求解析/导出关键信息，未说要继续写方案）：只登记 `extractOnly`，**本阶段不自动迁移 T2**；用户明确说「继续/准备写方案」才走 T2。
    - 用户要「继续/进入准备包」→ 先 `bg_state.py check --to package_prepare` 预检并汇报 guard，迁移按主技能与里程碑约定执行。
 
 ## 4. 内容与格式规则
@@ -151,6 +162,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
 4. **F3 汇报必须显式提示**：列出回退页号与受影响的字段/数值（如各包设施数量、服务范围），提示用户核对原件后再进入写作；
 5. 同名关键数值（如不同包的设施数量）跨页合并前，先确认是否来自同一页/同一表；无法确认时按「见冲突/需核对」记录，不自行合并；
 6. `tables_maybe_lost_estimated` / `pdf_table_recheck_*` 时：07 评分表、05 人员/车辆表、06 采购内容表必须对照 PDF 复核跨页表头/合并单元格，不把转换稿的断行当独立行。
+7. **阻塞式确认**：`bg_extract_validate.py` 会把上述回退页/跨页表格/复选框风险汇总为 `fallback_review_required` blocker；必须逐条 `ask_user_question` 核对，用户确认后才能用 `--confirm-fallback --note` 继续；不允许只看 warning 就推进。
 
 ### 5.2 内部矛盾：照实分别摘录，不裁决
 
@@ -199,6 +211,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_convert.py"        --workspace "<ws>" --project "<projectDir>" --files "<abs1,abs2>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_project.py"        fields --workspace "<ws>" --project "<projectDir>" --data "<fields.json>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_extract_validate.py" --workspace "<ws>" --project "<projectDir>" --json
+"<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_extract_validate.py" --workspace "<ws>" --project "<projectDir>" --confirm-fallback --note "<用户确认结论>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_export_docx.py"    --workspace "<ws>" --project "<projectDir>" --mode keyinfo --out "<abs.docx>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_state.py"          status --workspace "<ws>" --project "<projectDir>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_state.py"          check --to package_prepare --workspace "<ws>" --project "<projectDir>" --json

@@ -50,7 +50,7 @@ if (-not (Test-Path (Join-Path $DevPlugin 'index.js'))) { throw "开发插件目
 if (-not (Test-Path (Join-Path $Repo 'package.json'))) { throw "发布仓库目录无效：$Repo" }
 if ($Commit -and -not $Message) { throw "-Commit 需要同时提供 -Message" }
 
-$runtimeFiles = @('index.js', 'cordis.patch.yml')
+$runtimeFiles = @('index.js', 'cordis.patch.yml', 'CONTRACT.md')
 $runtimeDirs = @('client', 'lib', 'libexec', 'config', 'skills', 'templates', 'assets')
 
 Write-Step '源与目标'

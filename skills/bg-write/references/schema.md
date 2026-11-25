@@ -22,6 +22,7 @@
 ```
 
 - `status`：done / partial / blocked；blocked 带 `blockReason` 与 `questions[]`（回传主 Agent，不直接问用户）。
+- `figures[].status`：**只允许 `produced` / `failed` / `skipped`**（不要写 `generated`/`done`；`done` 是 outline/completion 的口径）。渲染前只需把 `.mmd/.txt` 写好，状态填 `produced`；合并脚本会把旧别名 `generated` 归一为 `produced`，但不要依赖。
 - `wordCount`：**审查口径字数**（汉字逐个 + ASCII 连续词，标点/空白不计，去掉标题行与 HTML 注释）；合并脚本会按章节 md 复核并回写 `outline.stats.writtenWordTotal`。目标区间为 `wordTarget` 的 90%–120%。
 - `summary`：200–400 **字符长度（`len(str)`，含标点）**，不是字数口径；两者不要混用。
 - 补充表：`tables[]` 登记本章所有 Markdown 表。属于 figurePlan 的“计划表”须带 `anchorId`（或 `caption` 与 figurePlan 完全一致，可加 `"plannedFigure": true`）；合并脚本只把**真正补充表**写入 `outline.supplementTables`（按 `anchorId`/题注去重），计划表不会重复登记成 `sup-*`。
@@ -33,7 +34,7 @@
 ```text
 # 生成第 1 批（写 chapters/_batches/batch-1.json/.md + _batch-state.json）
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_write_brief.py" --batch 1 --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
-# 一次生成全部批次 / 只预览不落盘
+# 一次生成全部批次（默认 --brief 只回批次摘要与路径；需要完整 chapters 时加 --full）/ 只预览不落盘
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_write_brief.py" --all --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
 "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_write_brief.py" --batch 1 --no-write --workspace "<ws>" --project "<projectDir>" --package "package-<N>" --json
 ```

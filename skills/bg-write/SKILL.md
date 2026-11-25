@@ -18,14 +18,14 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 
 1. 建图：节点=leaf，边=`dependsOn`；拓扑分层；层内按 priority→scoreWeight→seq 排序。
 2. 每批 **4–6 个末级章节（约 6000–9000 字）**，批内不跨硬依赖；**一个批次交给一个子智能体，不要每章一个**。
-3. **优先用生成器**：`bg_write_brief.py --batch <k>` 输出 `chapters/_batches/batch-<k>.md/.json`（含本批章节、criterionRefs、contentRequirements、figurePlan、projectFacts、dependencySummaries、maxBodyHeadingLevel），直接把 md 交给子智能体，不再手工拼 prompt；`--all` 可一次生成全部批次，`--no-write` 只预览。批次按大纲 `seq` 连续切分，生成器同时维护 `_batch-state.json` 台账（含实际 batchSize）。
+3. **优先用生成器**：`bg_write_brief.py --batch <k>` 输出 `chapters/_batches/batch-<k>.md/.json`（含本批章节、criterionRefs、contentRequirements、figurePlan、projectFacts、dependencySummaries、maxBodyHeadingLevel），直接把 md 交给子智能体，不再手工拼 prompt；`--all` 可一次生成全部批次（默认 `--brief` 只回批次摘要与路径，加 `--full` 才回完整 chapters），`--no-write` 只预览。批次按大纲 `seq` 连续切分，生成器同时维护 `_batch-state.json` 台账（含实际 batchSize）。
 4. 批间并发受 `maxParallelWriters`/DSH 并发上限限制；每批结束调 `bg_chapter_merge.py` 合并本批结果，再下一批。
 5. 中断恢复：先用 `bg_state.py doctor` 看 `staleResults`/待做章节；读 `_batches/_batch-state.json` 与 `pending`；**优先 `send_message` 唤醒原批次子代理**（保留已读原文上下文，省重读成本），原会话不可用再重派；`writing` 超 30 分钟无更新视为失败，重置 pending。
 
 ## 子智能体交付（逐章）
 
 1. **正文**：写 `filePath`；首行标题 `#`×level；正文标题只允许 level+1 及以内；表格用真实 Markdown，题注在表上方 `▼表<表名>`，**table 不写 `BG:FIGURE` 标记**；图/终端写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`，不嵌图片。**带 `handling` 的特殊章节按模板写，不写图/表/标记。**
-2. **章节结果**：每章写 `chapters/_results/<chapterId>.chapter-result.json`（status/wordCount/summary/criterionRefs/figures/tables/issues）；特殊章节 `figures=[]`、`tables=[]`。
+2. **章节结果**：每章写 `chapters/_results/<chapterId>.chapter-result.json`（status/wordCount/summary/criterionRefs/figures/tables/issues）；特殊章节 `figures=[]`、`tables=[]`；`figures[].status` 只能写 `produced`/`failed`/`skipped`（不要写 `generated`/`done`）。
 3. **图表源码**：mermaid `.mmd`、terminal `.txt` 写到 `resources/<type>/<anchorId>.*`；**不要运行 `bg_render.py`**——渲染统一由主 Agent 在整批合并后执行，避免并发写 `render-manifest.json`、避免包内 png 与临时目录残留。子智能体确需本地预览只能生成临时文件，交付前必须删除，不得留下 png/临时目录。特殊章节不产资源。
 4. **沙箱**：写入因 workspace-write 权限失败（EPERM）→ 停止并提示用户切换 DSH 文件策略为 **danger-full-access** 或授权工作区后重试；不静默降级、不伪造 png。
 5. 只写本批各章文件；不改 outline.json、不写其他批次、不删资源、不渲染 png。

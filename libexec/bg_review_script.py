@@ -50,6 +50,34 @@ FORBIDDEN_PATTERNS = (
     (r"详见第\s*[0-9一二三四五六七八九十]+\s*章", "forbidden_content"),
     (r"见商务部分|见资格部分|证明材料见", "forbidden_content"),
 )
+#: P0-3：题注只拦真正的“编号形态”；「1包」「2 包」「2026年」「1.5mm」等业务数字放行。
+CAPTION_NUMBERING_RE = re.compile(
+    r"^[▼▲][表图]\s*(?:"
+    r"第\s*\d+\s*[章节部分篇条]"
+    r"|[（(]\s*\d+\s*[)）]"
+    r"|\d{1,2}\s*[、.．)）](?!\d)"
+    r"|[一二三四五六七八九十]{1,2}\s*[、.．]"
+    r"|[表图]\s*\d"
+    r")"
+)
+#: P2-4：技术正文混入商务/报价内容（A 层机检，写作任务书已提前约束）
+BUSINESS_PATTERNS: tuple[tuple[str, str, str], ...] = (
+    (
+        r"评标基准价|投标报价得分|报价得分|价格分(?:计算|评审|权重)",
+        "business_content_mixed",
+        "技术正文删除价格评审/报价得分/评标基准价，相关内容只在商务/报价文件",
+    ),
+    (
+        r"(?:最高限价|预算金额|采购预算|限价)\s*[：:]?\s*[0-9０-９]",
+        "business_content_mixed",
+        "技术正文不写预算/最高限价金额，删除后改为定性描述",
+    ),
+    (
+        r"付款(?:比例|节点|方式为|方式：)|货款支付|预付(?:款|比例)\s*[0-9０-９]",
+        "business_content_mixed",
+        "技术正文不写付款比例/付款节点/货款支付，相关内容只在商务文件",
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +463,18 @@ def review_a_layer(
             match = re.search(pattern, text)
             if match:
                 collector.add("script", issue_type, "major", chapter_id=chapter_id, file_path=file_path, evidence=f"命中禁用内容「{match.group(0)[:40]}」", suggestion="删除占位/绝对路径/证明材料提示")
+        for pattern, issue_type, suggestion in BUSINESS_PATTERNS:
+            match = re.search(pattern, text)
+            if match:
+                collector.add(
+                    "script",
+                    issue_type,
+                    "major",
+                    chapter_id=chapter_id,
+                    file_path=file_path,
+                    evidence=f"技术正文混入商务/报价内容「{match.group(0)[:40]}」",
+                    suggestion=suggestion,
+                )
         if special:
             # 特殊章节不规划图、免图表检查；正文只写要求/处理方式/请用户补充。
             continue
@@ -444,8 +484,8 @@ def review_a_layer(
             table_rows.append({"chapterId": chapter_id, "line": table["line"], "caption": caption, "rows": len(table["rows"])})
             if not caption:
                 collector.add("script", "table_missing", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"第 {table['line']} 行表格上方缺少「▼表」题注", suggestion="表格上方补独立题注行 `▼表<题名>`（不带编号）")
-            elif not re.match(r"^▼表[^\d]", caption):
-                collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"表题格式不正确：{caption[:60]}", suggestion="使用 `▼表<题名>`，不带编号")
+            elif CAPTION_NUMBERING_RE.match(caption):
+                collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"表题带编号：{caption[:60]}", suggestion="使用 `▼表<题名>`，不带编号（「1包」「2026年」等业务数字开头不算编号）")
             if not table["header"]:
                 collector.add("script", "table_mismatch", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"第 {table['line']} 行表格无表头", suggestion="补齐可读表头")
         # 图表规划
@@ -491,8 +531,8 @@ def review_a_layer(
                 next_line = next((line.strip() for line in following if line.strip()), "")
                 if not next_line.startswith("▲图"):
                     collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"标记下一行缺少「▲图」题注：{next_line[:60]}", suggestion="标记下一行写独立 `▲图<题名>`（不带编号）")
-                elif re.match(r"^▲图\d", next_line):
-                    collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"图题带编号：{next_line[:60]}", suggestion="题注不带编号")
+                elif CAPTION_NUMBERING_RE.match(next_line):
+                    collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"图题带编号：{next_line[:60]}", suggestion="题注不带编号（「1包」「2026年」等业务数字开头不算编号）")
             anchor_meta = render_anchors.get(anchor_id) if isinstance(render_anchors, Mapping) else None
             render_fallback = ""
             if figure_type == "mermaid":
@@ -814,6 +854,21 @@ def run_selftest() -> dict[str, Any]:
     if len(tables) != 1 or tables[0]["caption"] != "▼表运维范围" or len(tables[0]["rows"]) != 1:
         raise AssertionError(f"表格解析不正确：{tables}")
     checks.append("markdown_tables")
+    # P0-3：业务数字开头（1包/2 包/2026年）不是编号；真正编号才拦
+    for caption in ("▼表1包采购设施规格与预估量对照表", "▼表2 包采购量清单", "▼表2026年设施清单", "▼表1.5mm标线参数"):
+        if CAPTION_NUMBERING_RE.match(caption):
+            raise AssertionError(f"业务数字题注被误判为编号：{caption}")
+    for caption in ("▼表1、设施清单", "▼表第1章设施", "▼表（1）设施", "▼表一、设施", "▼表表1设施"):
+        if not CAPTION_NUMBERING_RE.match(caption):
+            raise AssertionError(f"真正的题注编号未拦截：{caption}")
+    checks.append("caption_numbering")
+    # P2-4：技术正文商务/报价混入机检
+    business_hits = [bool(re.search(pattern, "价格评审按低价优先法，评标基准价…最高限价 130.86 万元，货款支付分两段 97%")) for pattern, _, _ in BUSINESS_PATTERNS]
+    if not all(business_hits):
+        raise AssertionError(f"商务/报价混入未全部命中：{business_hits}")
+    if any(re.search(pattern, "作业人员按统一制服上岗，巡查频次每季度一次。") for pattern, _, _ in BUSINESS_PATTERNS):
+        raise AssertionError("普通技术正文被误判商务/报价内容")
+    checks.append("business_content_patterns")
     # 正文剥离（首行标题 / BG:CHAPTER / HTML 注释）
     body = body_text("## 标题\n<!-- BG:CHAPTER id=1-1 -->\n\n正文 <!-- BG:FIGURE:fig-1 -->内容\n")
     if "标题" in body or "BG:CHAPTER" in body or "BG:FIGURE" in body or "正文" not in body:

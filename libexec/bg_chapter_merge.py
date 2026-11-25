@@ -21,7 +21,8 @@ CLI：
     --status                     只读进度（leaf 状态/结果文件/blocked/pending）
     --verify-all                 只读校验全部 leaf 完成（done/skipped、无 blocked、summary/wordCount）
     --chapter <id>               合并指定章节结果
-    --batch <k>                  合并第 k 批（state.extensions.draftBatches[k-1]；无批次记录时合并全部可用结果）
+    --batch <k>                  合并第 k 批（读 chapters/_batches/_batch-state.json 的章节清单；
+                                 缺失时读 batch-<k>.json；仍无则报错，不再退化成“合并全部”）
     --result <file>              合并指定结果文件
     （无选择器 = 合并 _results/ 下全部可用结果）
 """
@@ -51,8 +52,12 @@ SUMMARY_MAX = 400
 RESULT_SUFFIX = ".chapter-result.json"
 RESULTS_DIR = "chapters/_results"
 LOCK_MARKER = "chapters/.locked"
+BATCH_STATE_REL = "chapters/_batches/_batch-state.json"
 STATUS_MAP = {"done": "done", "skipped": "skipped", "blocked": "blocked", "partial": "blocked"}
 FIGURE_STATUS = ("produced", "failed", "skipped")
+#: 旧技能文档/子智能体常把图状态写成 generated/done；合并前归一为 produced，
+#: 避免一个旧字段导致整批 chapter-result 校验失败（P0-1，2026-11-25 冒烟）。
+FIGURE_STATUS_ALIASES = {"generated": "produced", "done": "produced"}
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +282,25 @@ def supplement_is_planned_table(entry: Mapping[str, Any], outline: Mapping[str, 
 # ---------------------------------------------------------------------------
 # 结果校验
 # ---------------------------------------------------------------------------
+def _normalize_figure_statuses(document: dict[str, Any]) -> int:
+    """把 figures[].status 的旧别名（generated/done）归一为 produced；返回修改条数。"""
+    figures = document.get("figures")
+    if not isinstance(figures, list):
+        figures = document.get("figureResults")
+    if not isinstance(figures, list):
+        return 0
+    changed = 0
+    for figure in figures:
+        if not isinstance(figure, dict):
+            continue
+        raw = str(figure.get("status") or "").strip().lower()
+        normalized = FIGURE_STATUS_ALIASES.get(raw)
+        if normalized and figure.get("status") != normalized:
+            figure["status"] = normalized
+            changed += 1
+    return changed
+
+
 def validate_result(result: Any, node: Mapping[str, Any], package_dir: Path) -> list[dict[str, Any]]:
     """校验 chapter-result.json（F5.2.3）；返回 findings（severity=blocker）。"""
     findings: list[dict[str, Any]] = []
@@ -368,6 +392,38 @@ def validate_result(result: Any, node: Mapping[str, Any], package_dir: Path) -> 
 # ---------------------------------------------------------------------------
 # 合并
 # ---------------------------------------------------------------------------
+def _batch_chapter_ids(package_dir: Path, batch: int) -> list[str] | None:
+    """读取第 k 批的章节 id：优先 `_batch-state.json`，其次 `batch-<k>.json`。
+
+    旧实现只读 ``state.extensions.draftBatches``（实际从没写入过），`--batch k` 会
+    静默退化成“合并全部结果”，任何一批有错都会拖住所有批次（P0-1）。
+    """
+    state_path = package_dir / BATCH_STATE_REL
+    if state_path.is_file():
+        try:
+            document = jsonio.read_json(state_path)
+        except errors.BgError:
+            document = {}
+        batches = document.get("batches") if isinstance(document, Mapping) else None
+        entry = batches.get(str(batch)) if isinstance(batches, Mapping) else None
+        if isinstance(entry, Mapping):
+            ids = entry.get("chapterIds")
+            if isinstance(ids, list):
+                return [str(item) for item in ids if isinstance(item, (str, int))]
+    brief_path = package_dir / "chapters" / "_batches" / f"batch-{batch}.json"
+    if brief_path.is_file():
+        try:
+            document = jsonio.read_json(brief_path)
+        except errors.BgError:
+            document = {}
+        chapters = document.get("chapters") if isinstance(document, Mapping) else None
+        if isinstance(chapters, list):
+            ids = [str(item.get("chapterId")) for item in chapters if isinstance(item, Mapping) and item.get("chapterId")]
+            if ids:
+                return ids
+    return None
+
+
 def _select_results(
     package_dir: Path,
     state: Mapping[str, Any],
@@ -395,12 +451,20 @@ def _select_results(
         return [path]
     all_results = available_results(package_dir)
     if batch is not None:
-        batches = (state.get("extensions") or {}).get("draftBatches") if isinstance(state.get("extensions"), Mapping) else None
-        if isinstance(batches, list) and 1 <= batch <= len(batches):
-            ids = [str(item) for item in batches[batch - 1] if isinstance(item, (str, int))]
-            selected = [result_file(package_dir, chapter_id) for chapter_id in ids]
-            return [path for path in selected if path.is_file()]
-        return all_results
+        ids = _batch_chapter_ids(package_dir, batch)
+        if ids is None:
+            legacy = (state.get("extensions") or {}).get("draftBatches") if isinstance(state.get("extensions"), Mapping) else None
+            if isinstance(legacy, list) and 1 <= batch <= len(legacy):
+                ids = [str(item) for item in legacy[batch - 1] if isinstance(item, (str, int))]
+            else:
+                raise errors.BgError(
+                    errors.E_NOT_FOUND,
+                    f"找不到第 {batch} 批的章节清单",
+                    hint=f"先运行 bg_write_brief.py --batch {batch} 生成批次任务书/台账，或改用 --chapter/--result 指定结果",
+                    detail={"batchState": BATCH_STATE_REL},
+                )
+        selected = [result_file(package_dir, chapter_id) for chapter_id in ids]
+        return [path for path in selected if path.is_file()]
     return all_results
 
 
@@ -532,6 +596,8 @@ def merge_selected(
                 }
             )
             continue
+        if isinstance(document, dict) and _normalize_figure_statuses(document):
+            jsonio.write_json_atomic(path, document)
         summary_text = document.get("summary") if isinstance(document, Mapping) else None
         if isinstance(summary_text, str) and len(summary_text.strip()) > SUMMARY_MAX:
             original_length = len(summary_text.strip())
@@ -1070,7 +1136,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", help="工作区根绝对路径")
     parser.add_argument("--project", help="项目目录（绝对/相对）或 projectId（配合 --workspace）")
     parser.add_argument("--package", help="目标包 package-<N>（缺省 state.currentPackage / packagesToWrite 首个）")
-    parser.add_argument("--batch", type=int, help="合并第 k 批（读取 state.extensions.draftBatches[k-1]；无批次记录则合并全部可用结果）")
+    parser.add_argument("--batch", type=int, help="合并第 k 批（读 chapters/_batches/_batch-state.json 或 batch-<k>.json 的章节清单）")
     parser.add_argument("--chapter", help="只合并指定末级章节 id（如 1-1）")
     parser.add_argument("--result", help="合并指定 chapter-result.json 文件")
     parser.add_argument("--verify-all", action="store_true", help="只读校验全部 leaf 完成（done/skipped、无 blocked、summary/wordCount）")
@@ -1363,6 +1429,34 @@ def run_selftest() -> dict[str, Any]:
             if fig_outline["chapters"][0]["figurePlan"][0]["status"] != "done":
                 raise AssertionError(f"N8 figurePlan 未同步 done：{fig_outline['chapters'][0]['figurePlan']}")
         checks.append("figure_index_table_status")
+        # P0-1：--batch k 只读本批清单（不再退化成全部）；旧 figures.status 别名归一为 produced
+        with tempfile.TemporaryDirectory(prefix="bidgenie-batch-select-") as batch_tmp:
+            batch_package = Path(batch_tmp)
+            (batch_package / "chapters" / "_results").mkdir(parents=True)
+            (batch_package / "chapters" / "_batches").mkdir(parents=True)
+            for chapter_id in ("1-1", "1-2"):
+                jsonio.write_json_atomic(
+                    batch_package / "chapters" / "_results" / f"{chapter_id}.chapter-result.json",
+                    {"chapterId": chapter_id},
+                )
+            jsonio.write_json_atomic(
+                batch_package / "chapters" / "_batches" / "_batch-state.json",
+                {"batches": {"1": {"chapterIds": ["1-1"]}}},
+            )
+            selected = _select_results(batch_package, {}, batch=1)
+            if [path.name for path in selected] != ["1-1.chapter-result.json"]:
+                raise AssertionError(f"batch 选择未限定本批：{[path.name for path in selected]}")
+            try:
+                _select_results(batch_package, {}, batch=9)
+            except errors.BgError as exc:
+                if exc.code != errors.E_NOT_FOUND:
+                    raise AssertionError(f"缺少批次台账错误码不正确：{exc.code}") from exc
+            else:
+                raise AssertionError("缺少批次台账时未报错（不应退化成合并全部）")
+            alias_document = {"chapterId": "1-1", "figures": [{"anchorId": "fig-1-1-01", "status": "generated"}]}
+            if _normalize_figure_statuses(alias_document) != 1 or alias_document["figures"][0]["status"] != "produced":
+                raise AssertionError(f"figures.status 旧别名未归一：{alias_document}")
+        checks.append("batch_selection_and_status_alias")
         # T5 guard/transition（state 层）
         state_before = state_lib.load_state(project_dir)
         t5 = state_lib.perform_transition(

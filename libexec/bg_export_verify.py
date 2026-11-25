@@ -663,14 +663,24 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
     if not args.project:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
-    _, _, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
-        workspace, project_dir, args.package
-    )
-    outline_path = outline_validate.outline_path(package_dir)
-    if not outline_path.is_file():
-        raise errors.BgError(errors.E_NOT_FOUND, "缺少 chapters/_outline/outline.json")
-    outline = jsonio.read_json(outline_path)
-    report_path = package_dir / REPORT_REL if args.mode == "tech" else package_dir / "export" / f"_last-export-report-{args.mode}.json"
+    # P0-2：keyinfo 是 F3 产物，此时 F4 还没建包目录，不能走 resolve_package_context。
+    # 只依赖 project.json 的包数与 exports/*.docx，自检就能在 F3 阶段直接跑。
+    if args.mode == "keyinfo":
+        target = "project"
+        package_dir = project_dir
+        package_meta: dict[str, Any] = {}
+        outline: dict[str, Any] = {}
+        project_doc = state_lib.load_project(project_dir)
+        report_path = project_dir / "exports" / "_last-verify-keyinfo.json"
+    else:
+        _, _, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
+            workspace, project_dir, args.package
+        )
+        outline_path = outline_validate.outline_path(package_dir)
+        if not outline_path.is_file():
+            raise errors.BgError(errors.E_NOT_FOUND, "缺少 chapters/_outline/outline.json")
+        outline = jsonio.read_json(outline_path)
+        report_path = package_dir / REPORT_REL if args.mode == "tech" else package_dir / "export" / f"_last-export-report-{args.mode}.json"
     report_data: dict[str, Any] = {}
     if report_path.is_file():
         try:

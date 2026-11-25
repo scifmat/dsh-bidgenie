@@ -487,7 +487,7 @@ def _clean_period_candidates(candidates: Sequence[str]) -> str:
         value = re.sub(r"[「」『』*`]", "", value).strip(" ；;，,。、/")
         if not value or len(value) > 60:
             continue
-        if not re.search(r"\d+\s*(?:日历天|天|年|个月|月|日|周)", value):
+        if not re.search(r"\d+\s*(?:个)?\s*(?:日历天|日历日|工作日|天|年|个月|月|日|周)", value):
             continue
         if value not in cleaned:
             cleaned.append(value)
@@ -1702,6 +1702,12 @@ PACKAGE_SCOPE_RE = re.compile(r"第\s*(\d+(?:\s*(?:[—\-~～至到、,，和及
 PACKAGE_SCOPE_NEGATION_RE = re.compile(r"不适用于本包|本包未要求|本包未提及|本包不适用|不适用本包")
 #: 程序性/条件性文本（不是"要求投标人具备什么"），不计入缺口
 QUALIFICATION_NOISE_RE = re.compile(r"审查|由采购人|招标代理|按照招标文件|未提供|不符|评标|评审程序|材料清单")
+#: 产品/技术标准条款（GB/T、产品规格、材料性能等）不是投标人资格，排除
+QUALIFICATION_PRODUCT_STANDARD_RE = re.compile(
+    r"GB\s*/?\s*T?\s*\d|国家标准|行业标准|产品|材料|设备|规格|型号|技术参数|技术指标|性能|检验|检测|说明书"
+)
+#: 资格/证书硬名词：出现时才允许保留“产品标准”句（如“ISO9001 认证证书”）
+QUALIFICATION_CREDENTIAL_RE = re.compile(r"资质|证书|许可证|建造师|监理|职称|安全生产许可")
 #: 过于泛化的词，不作为可缺口名词
 QUALIFICATION_GENERIC_TERMS = frozenset({"资质", "证书", "等级", "认证", "许可证", "投标人资质", "投标人证书", "资质要求", "资格证书"})
 
@@ -1776,6 +1782,8 @@ def _qualification_clauses(text: str) -> list[tuple[str, str]]:
                 if not QUALIFICATION_MODAL_RE.search(clause):
                     continue
                 if QUALIFICATION_NOISE_RE.search(clause):
+                    continue
+                if QUALIFICATION_PRODUCT_STANDARD_RE.search(clause) and not QUALIFICATION_CREDENTIAL_RE.search(clause):
                     continue
                 if clause in seen:
                     continue
@@ -2674,6 +2682,21 @@ def run_selftest() -> dict[str, Any]:
         if (project_dir / result["packageMetaPath"]).stat().st_size > 8000:
             raise AssertionError(f"package-meta 未瘦身：{(project_dir / result['packageMetaPath']).stat().st_size} B")
         checks.append("package_meta")
+        # P2-1：合同履行期限「10 个日历日内」要能推导 servicePeriod（旧正则只认 10 天/10 日历天）
+        schedule_text = (
+            "| 事项 | 内容 |\n|---|---|\n| 合同履行期限 | 合同签订后 10 个日历日内完成供货及安装 |\n"
+        )
+        derived_plan, derived = derive_schedule_plan({"01": schedule_text})
+        if not derived or "10 个日历日" not in str(derived_plan.get("servicePeriod") or ""):
+            raise AssertionError(f"合同履行期限未推导：{derived_plan} derived={derived}")
+        # P2-2：产品执行标准（GB/T…并通过认证）不是投标人资格缺口
+        qualification_clauses = _qualification_clauses(
+            "投标人应具备公路交通工程专业承包（公路安全设施分项）二级及以上资质；"
+            "产品应符合 GB/T 24972-2010《弹性交通柱》标准并通过认证"
+        )
+        if len(qualification_clauses) != 1 or "资质" not in qualification_clauses[0][0]:
+            raise AssertionError(f"资格缺口过滤不正确：{qualification_clauses}")
+        checks.append("schedule_and_qualification_filter")
         package_dir = project_dir / result["packageDir"]
         for rel in REQUIRED_PACKAGE_DIRS:
             if not (package_dir / rel).is_dir():
