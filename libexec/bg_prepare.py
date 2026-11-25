@@ -1330,6 +1330,15 @@ def build_package_meta(
     else:
         expected_word_count = default_tier
         assumptions.append(f"字数档：提取稿未识别字数要求，采用 user-settings 默认 {default_tier} 字（agent-default）")
+    # F-02（2026-11-25 轻量冒烟）：30000/60000 等非面板档位来自 user-settings 时，
+    # 必须在 prepare 汇报与 package-meta 里显式标注，避免“字数档被静默改写”无从追溯。
+    known_word_tiers = (50000, 100000, 150000)
+    word_tier_known = expected_word_count in known_word_tiers
+    word_tier_source = str(value_source.get("expectedWordCount") or "agent-default")
+    if not word_tier_known and word_tier_source != "user":
+        assumptions.append(
+            f"字数档：{expected_word_count} 为自定义档（非面板 5/10/15 万档位），来源 {word_tier_source}；请确认篇幅预期"
+        )
 
     # 2) personnelPlan / equipmentPlan / schedulePlan
     def existing_or(value: Any, field: str) -> Any:
@@ -1487,6 +1496,13 @@ def build_package_meta(
     extensions: dict[str, Any] = {}
     if assumptions:
         extensions["assumptions"] = assumptions
+    extensions["wordCountTier"] = {
+        "value": expected_word_count,
+        "knownTier": word_tier_known,
+        "custom": not word_tier_known,
+        "source": word_tier_source,
+        "knownTiers": list(known_word_tiers),
+    }
     if isinstance(auto_fill, Mapping):
         extensions["autoFill"] = {
             "mode": str(auto_fill.get("mode") or "auto"),
@@ -1807,6 +1823,53 @@ def _qualification_terms(clause: str) -> list[str]:
     return terms
 
 
+def _bidder_entity_kind(workspace: Path, project: Mapping[str, Any]) -> str:
+    """F-05：判定投标人主体类型，用于过滤资格条款里的并列选项。
+
+    返回 enterprise / public_institution / social_org / individual / unknown。
+    只看当前投标人名称与 bidderType，不猜测招标文件意图。
+    """
+    bidder_ref = project.get("bidderRef") if isinstance(project.get("bidderRef"), Mapping) else {}
+    dir_name = str(bidder_ref.get("dirName") or "")
+    bidder_file = workspace / "dsh" / "bidders" / dir_name / "bidder.json" if dir_name else None
+    display_name = str(bidder_ref.get("displayName") or "")
+    bidder_type = ""
+    if bidder_file is not None and bidder_file.is_file():
+        try:
+            bidder = jsonio.read_json(bidder_file)
+        except errors.BgError:
+            bidder = {}
+        if isinstance(bidder, Mapping):
+            display_name = str(bidder.get("displayName") or bidder.get("legalName") or display_name)
+            bidder_type = str(bidder.get("bidderType") or "")
+    if bidder_type == "natural_person":
+        return "individual"
+    if any(marker in display_name for marker in ("公司", "集团", "企业", "厂", "商行")):
+        return "enterprise"
+    if any(marker in display_name for marker in ("协会", "学会", "基金会", "社会团体", "民办非企业")):
+        return "social_org"
+    if any(marker in display_name for marker in ("事业单位", "医院", "学校", "学院", "研究院", "研究所", "中心", "馆", "站", "机关")):
+        return "public_institution"
+    return "unknown"
+
+
+def _qualification_option_applies(clause: str, entity_kind: str) -> bool:
+    """并列主体选项（企业/事业/非企业/社会团体/个体）只保留适用于当前投标人的一条。"""
+    if entity_kind == "unknown":
+        return True
+    if "事业单位" in clause:
+        return entity_kind == "public_institution"
+    if "非企业专业服务机构" in clause or "民办非企业" in clause:
+        return entity_kind in ("social_org", "public_institution")
+    if "社会团体" in clause:
+        return entity_kind == "social_org"
+    if "个体工商户" in clause or "自然人" in clause:
+        return entity_kind == "individual"
+    if "企业" in clause and any(marker in clause for marker in ("企业提供", "企业投标", "企业营业执照")):
+        return entity_kind == "enterprise"
+    return True
+
+
 def find_qualification_gaps(workspace: Path, project_dir: Path, project: Mapping[str, Any], package_id: str) -> list[dict[str, Any]]:
     """F4 前资格/证书要求提示（P2-8 去噪）：只对 02/08/09 的资格硬项做比对，每包 ≤5 条 info。
 
@@ -1816,6 +1879,7 @@ def find_qualification_gaps(workspace: Path, project_dir: Path, project: Mapping
     - 仅作 info 提示（blocking=false）：资格/证书要求属商务部分，供用户核对；技术方案不据此判定，不阻断 F4/T3。
     """
     cert_text, _cert_available = load_bidder_cert_text(workspace, project)
+    entity_kind = _bidder_entity_kind(workspace, project)
     target_no = _target_package_number(package_id)
     sources = [project_dir / "extraction" / "common" / "02-Eligibility-Review.md"]
     sources.extend(
@@ -1833,6 +1897,8 @@ def find_qualification_gaps(workspace: Path, project_dir: Path, project: Mapping
                 continue
             package_numbers = _package_numbers(context)
             if package_numbers and target_no not in package_numbers:
+                continue
+            if not _qualification_option_applies(clause, entity_kind):
                 continue
             terms = _qualification_terms(clause)
             if not terms:
@@ -2030,6 +2096,7 @@ def prepare_project(
         "createdDirs": created_dirs,
         "reused": bool(existing_meta is not None),
         "expectedWordCount": meta["expectedWordCount"],
+        "wordCountTier": (meta.get("extensions") or {}).get("wordCountTier"),
         "figureQuota": meta["figureQuota"],
         "valueSource": meta["valueSource"],
         "qualificationGaps": qualification_gaps,
@@ -2059,6 +2126,7 @@ def prepare_project(
         },
         "t3Check": t3_check,
         "readyForT3": bool(t3_check.get("pass")),
+        "t3State": "ready" if t3_check.get("pass") else "blocked",
         "autoMode": auto_mode,
         "autoFill": (
             {
@@ -2682,6 +2750,31 @@ def run_selftest() -> dict[str, Any]:
         if (project_dir / result["packageMetaPath"]).stat().st_size > 8000:
             raise AssertionError(f"package-meta 未瘦身：{(project_dir / result['packageMetaPath']).stat().st_size} B")
         checks.append("package_meta")
+        # F-02：非面板档位（30000）必须在 package-meta 标注 custom + 提醒用户确认
+        custom_settings = dict(jsonio.read_json(paths.user_settings_path(workspace)))
+        custom_settings["defaultWordCountTier"] = 30000
+        custom_auto = build_auto_fill(
+            texts={},
+            settings=custom_settings,
+            bidder_summary={},
+            package_id="package-1",
+        )
+        custom_meta = build_package_meta(
+            project_dir=project_dir,
+            project=state_lib.load_project(project_dir),
+            package_id="package-1",
+            answers={},
+            settings=custom_settings,
+            texts={},
+            bidder_summary={},
+            auto_fill=custom_auto,
+        )
+        custom_tier = (custom_meta.get("extensions") or {}).get("wordCountTier") or {}
+        if custom_meta.get("expectedWordCount") != 30000 or custom_tier.get("knownTier") is not False or custom_tier.get("custom") is not True:
+            raise AssertionError(f"自定义字数档未标注：word={custom_meta.get('expectedWordCount')} tier={custom_tier}")
+        if not any("自定义档" in str(item) for item in (custom_meta.get("extensions") or {}).get("assumptions") or []):
+            raise AssertionError(f"自定义字数档未写入 assumptions：{(custom_meta.get('extensions') or {}).get('assumptions')}")
+        checks.append("custom_word_tier")
         # P2-1：合同履行期限「10 个日历日内」要能推导 servicePeriod（旧正则只认 10 天/10 日历天）
         schedule_text = (
             "| 事项 | 内容 |\n|---|---|\n| 合同履行期限 | 合同签订后 10 个日历日内完成供货及安装 |\n"
@@ -2696,6 +2789,15 @@ def run_selftest() -> dict[str, Any]:
         )
         if len(qualification_clauses) != 1 or "资质" not in qualification_clauses[0][0]:
             raise AssertionError(f"资格缺口过滤不正确：{qualification_clauses}")
+        # F-05：企业投标时，“事业单位/非企业专业服务机构”并列选项不应再算 gap
+        if _qualification_option_applies("事业单位提供事业单位法人证书", "enterprise"):
+            raise AssertionError("企业投标仍保留事业单位并列选项")
+        if _qualification_option_applies("非企业专业服务机构提供执业许可证等证明文件", "enterprise"):
+            raise AssertionError("企业投标仍保留非企业机构并列选项")
+        if not _qualification_option_applies("事业单位提供事业单位法人证书", "public_institution"):
+            raise AssertionError("事业单位投标被误删事业单位选项")
+        if not _qualification_option_applies("企业提供营业执照", "enterprise"):
+            raise AssertionError("企业投标被误删企业营业执照选项")
         checks.append("schedule_and_qualification_filter")
         package_dir = project_dir / result["packageDir"]
         for rel in REQUIRED_PACKAGE_DIRS:
@@ -2704,6 +2806,8 @@ def run_selftest() -> dict[str, Any]:
         checks.append("package_dirs")
         if not result.get("readyForT3"):
             raise AssertionError(f"T3 预检未通过：{result.get('t3Check')}")
+        if result.get("t3State") != "ready":
+            raise AssertionError(f"单包 prepare 的 t3State 应为 ready：{result.get('t3State')}")
         checks.append("t3_ready")
         state = state_lib.load_state(project_dir)
         if state.get("currentStage") != "package_prepare" or state.get("currentPackage") != "package-1":
@@ -2995,6 +3099,14 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                 result["t3Pending"] = True
                 result["note"] = "中间包 readyForT3=false 属正常顺序中间态（后续包尚未 prepare）；以汇总/最后一包 readyForT3 为准"
                 pending_packages.append(package_id)
+            # F-07：readyForT3 仍是 bool（兼容旧调用），另给三态 t3State 明确“未就绪”的原因，
+            # 避免只读逐包结果的 Agent 把顺序中间态误判为失败。
+            if result.get("readyForT3"):
+                result["t3State"] = "ready"
+            elif result.get("pendingReason") == "sequence-in-progress":
+                result["t3State"] = "pending-sequence"
+            else:
+                result["t3State"] = "blocked"
             results.append(result)
         if packages:
             state_lib.set_package(workspace, project_dir, package=packages[0])
@@ -3008,9 +3120,11 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             "packagesToWrite": packages,
             "prepared": [item.get("packageId") for item in results],
             "readyForT3": bool(last.get("readyForT3")),
+            "sequenceInProgress": bool(pending_packages),
             "pendingPackages": pending_packages,
             "summary": {
                 "readyForT3": bool(last.get("readyForT3")),
+                "sequenceInProgress": bool(pending_packages),
                 "finalPackage": last.get("packageId"),
                 "pendingReason": "sequence-in-progress" if pending_packages else "",
                 "note": (

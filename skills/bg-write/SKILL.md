@@ -24,7 +24,7 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 
 ## 子智能体交付（逐章）
 
-1. **正文**：写 `filePath`；首行标题 `#`×level；正文标题只允许 level+1 及以内；表格用真实 Markdown，题注在表上方 `▼表<表名>`，**table 不写 `BG:FIGURE` 标记**；图/终端写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`，不嵌图片。**带 `handling` 的特殊章节按模板写，不写图/表/标记。**
+1. **正文**：写 `filePath`；**首行 = `#` × leaf.level（如 `## 标题`），第二行逐字复制任务书 `heading.metaLine`（`<!-- BG:CHAPTER id=… level=… wordTarget=… seq=… -->`）**；正文标题只允许 level+1 及以内；表格用真实 Markdown，题注在表上方 `▼表<表名>`，**table 不写 `BG:FIGURE` 标记**；图/终端写 `<!-- BG:FIGURE:<anchorId> -->` + 下一行 `▲图<caption>`，不嵌图片。**带 `handling` 的特殊章节按模板写，不写图/表/标记。** 任务书每个章节都带可复制的 `heading.firstLine`/`heading.metaLine`，不要自行改层级或省略 meta。
 2. **章节结果**：每章写 `chapters/_results/<chapterId>.chapter-result.json`（status/wordCount/summary/criterionRefs/figures/tables/issues）；特殊章节 `figures=[]`、`tables=[]`；`figures[].status` 只能写 `produced`/`failed`/`skipped`（不要写 `generated`/`done`）。
 3. **图表源码**：mermaid `.mmd`、terminal `.txt` 写到 `resources/<type>/<anchorId>.*`；**不要运行 `bg_render.py`**——渲染统一由主 Agent 在整批合并后执行，避免并发写 `render-manifest.json`、避免包内 png 与临时目录残留。子智能体确需本地预览只能生成临时文件，交付前必须删除，不得留下 png/临时目录。特殊章节不产资源。
 4. **沙箱**：写入因 workspace-write 权限失败（EPERM）→ 停止并提示用户切换 DSH 文件策略为 **danger-full-access** 或授权工作区后重试；不静默降级、不伪造 png。
@@ -41,6 +41,7 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 ## 合并与 T5
 
 - 每批结束调 `bg_chapter_merge.py`；检查各章 completion：done 继续，blocked 重试该章 ≤2 次，仍 blocked 交主 Agent。
+- **章节头自动归一**：合并前按 outline 重写每章首行 `#`×level 与第二行 BG:CHAPTER meta（只动前两行，不改正文）；输出 `headingFixes`/`headingFixCount`。若 `headingFixCount>0`，说明写作侧层级/meta 写错，已自动修复，继续流程即可；不要再用临时脚本改标题。需要排查时可用 `--no-fix-headings` 关闭。
 - 合并脚本会重算 `outline.stats`：`writtenWordTotal` 按章节 md 的审查口径复算（同时记 `reportedWordTotal` 供对照）、清理 `supplementTables` 里的计划表重复登记；`wordCountWarnings` 提示“上报字数与实测偏差 >20%”的章节，`wordCountDiagnostics` 给出全包偏差与逐章超/欠目标清单；`staleResults` 列出“md 已改/字数不符但 chapter-result 未同步”的章节（优化阶段尤其要查）。
 - 全包偏差 >±10% 时先按诊断清单定点调整，再进入 T5；避免“全包超额”被审查 A 层记为 major 后才返工。
 - 全部 leaf 为 done/skipped、无 blocked → `bg_chapter_merge.py --verify-all` → `bg_state.py check --to review` → `transition --to review`（T5）。

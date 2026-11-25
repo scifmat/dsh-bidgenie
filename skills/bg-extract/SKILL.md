@@ -74,7 +74,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
    "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_project.py" fields --workspace "<ws>" --project "<projectDir>" --data "<临时字段.json>" --json
    ```
 
-   白名单：`projectNo / projectName / isSubcontracted / packageCount / packagesToWrite / sourceFiles`（`sourceFiles` 条目需 `originalName/rawPath/convertedPath`，路径为工作区相对 POSIX 路径）。脚本报错按 `hint` 修数据后重跑；成功后删除临时 JSON。**禁止手写 project.json/state.json**。
+   白名单：`projectNo / projectName / isSubcontracted / packageCount / packagesToWrite / sourceFiles`（`sourceFiles` 条目需 `originalName/rawPath/convertedPath`，路径为**项目目录相对** POSIX 路径（如 `sources/raw/x.pdf`，不要带项目目录名））。脚本报错按 `hint` 修数据后重跑；成功后删除临时 JSON。**禁止手写 project.json/state.json**。
    - `packagesToWrite` 两种合法写法：①**不传** → 按 `packageCount` 自动生成 `package-1..N`；②显式传 `[]` 或 `packageCount` 内子集 → 表示「撰写包待 F4 确认」，脚本接受并返回 warning/`packagesToWriteNote`；**最终撰写包由 F4 选包（`bg_project.py select-packages`）覆盖**，F3 不必强行定死。
 5. **结构校验（必须）**：
 
@@ -92,7 +92,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
      "<pythonExe>" -X utf8 "{{SCRIPTS}}/bg_extract_validate.py" --workspace "<ws>" --project "<projectDir>" --confirm-fallback --note "<用户确认结论（含受影响字段/是否以提取稿为准）>" --json
      ```
 
-     未确认时 T2 guard 也会因 `extractionFallbackReview.required=true` 失败。
+     未确认时 T2 guard 也会因 `extractionFallbackReview.required=true` 失败。**`--note` 至少 8 字符，必须写清核对了哪些页码/字段/表格**（如“已核对第7页回退文本与采购清单跨页表，截止时间/工期按 PDF 原件确认”），空话会被脚本拒绝。**可与 F4 选包合并成一次提问**：若 F3 分包裁决与 F4 选包同源（同一份招标文件、用户本就要确认包号），把“回退风险确认 + 撰写包选择”放进同一个 `ask_user_question`，用户只被打断一次；两项结论分别落 `--confirm-fallback --note` 与 `bg_project.py select-packages`。
 6. **关键信息导出（用户要求时）**：
 
    ```text
@@ -162,7 +162,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
 4. **F3 汇报必须显式提示**：列出回退页号与受影响的字段/数值（如各包设施数量、服务范围），提示用户核对原件后再进入写作；
 5. 同名关键数值（如不同包的设施数量）跨页合并前，先确认是否来自同一页/同一表；无法确认时按「见冲突/需核对」记录，不自行合并；
 6. `tables_maybe_lost_estimated` / `pdf_table_recheck_*` 时：07 评分表、05 人员/车辆表、06 采购内容表必须对照 PDF 复核跨页表头/合并单元格，不把转换稿的断行当独立行。
-7. **阻塞式确认**：`bg_extract_validate.py` 会把上述回退页/跨页表格/复选框风险汇总为 `fallback_review_required` blocker；必须逐条 `ask_user_question` 核对，用户确认后才能用 `--confirm-fallback --note` 继续；不允许只看 warning 就推进。
+7. **阻塞式确认**：`bg_extract_validate.py` 会把上述回退页/跨页表格/复选框风险按类型合并（同类多文件命中只显示一条，`sources/fields/excerpts` 列全部来源）并报 `fallback_review_required` blocker；必须逐条 `ask_user_question` 核对，用户确认后才能用 `--confirm-fallback --note`（note ≥8 字符，写清页码/字段）继续；不允许只看 warning 就推进。
 
 ### 5.2 内部矛盾：照实分别摘录，不裁决
 

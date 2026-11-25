@@ -11,8 +11,9 @@
 
 白名单：`projectNo` / `projectName` / `isSubcontracted` / `packageCount` /
 `packagesToWrite` / `sourceFiles`。`sourceFiles` 条目仅允许
-`originalName` / `rawPath` / `convertedPath` / `kind` / `hash`（PRD 4.5）；缺少 `hash`
-且源文件在工作区内时自动补 `sha256:<hex>`。
+`originalName` / `rawPath` / `convertedPath` / `kind` / `hash`（PRD 4.5）；路径一律是
+**项目目录相对 POSIX 路径**（如 `sources/raw/x.pdf`，不要带项目目录名前缀）；
+缺少 `hash` 且源文件存在时自动补 `sha256:<hex>`。
 
 data 文件格式（二选一，其余键一律拒绝）：
     {"projectNo": "...", "projectName": "...", ...}
@@ -58,12 +59,12 @@ PACKAGE_ID_RE = re.compile(r"^package-\d+$")
 # 字段规范化/校验
 # ---------------------------------------------------------------------------
 def _normalize_rel_path(value: Any, *, field: str) -> str:
-    """规范化工作区相对路径（POSIX 分隔、禁止绝对路径/`..`）。"""
+    """规范化项目目录相对路径（POSIX 分隔、禁止绝对路径/`..`）。"""
     if not isinstance(value, str) or not value.strip():
         raise errors.BgError(
             errors.E_SCHEMA_INVALID,
             f"{field} 必须是非空字符串",
-            hint="使用工作区相对路径（如 sources/raw/x.docx，POSIX 分隔）",
+            hint="使用项目目录相对路径（如 sources/raw/x.pdf，POSIX 分隔，不要带项目目录名）",
             detail={"field": field},
         )
     raw = value.strip().replace("\\", "/")
@@ -71,7 +72,7 @@ def _normalize_rel_path(value: Any, *, field: str) -> str:
         raise errors.BgError(
             errors.E_SCHEMA_INVALID,
             f"{field} 不得是绝对路径：{value!r}",
-            hint="sourceFiles 只记录工作区/项目内相对路径",
+            hint="sourceFiles 只记录项目目录内相对路径（如 sources/raw/x.pdf）",
             detail={"field": field, "value": value},
         )
     parts: list[str] = []
@@ -135,9 +136,18 @@ def normalize_source_files(project_dir: Path, entries: Any) -> tuple[list[dict[s
             )
         seen_raw.add(raw_path)
         if not raw_path.startswith("sources/raw/"):
-            warnings.append(f"{pointer}.rawPath 不在 sources/raw/ 下：{raw_path}")
+            if raw_path.startswith(project_dir.name + "/"):
+                warnings.append(
+                    f"{pointer}.rawPath 带了项目目录名前缀（应去掉 {project_dir.name}/）：{raw_path}"
+                )
+            else:
+                warnings.append(
+                    f"{pointer}.rawPath 必须是项目目录相对路径并以 sources/raw/ 开头（如 sources/raw/x.pdf）：{raw_path}"
+                )
         if not converted_path.startswith("sources/"):
-            warnings.append(f"{pointer}.convertedPath 不在 sources/ 下：{converted_path}")
+            warnings.append(
+                f"{pointer}.convertedPath 必须是项目目录相对路径并以 sources/ 开头（如 sources/01-bidding-documents.md）：{converted_path}"
+            )
         record["rawPath"] = raw_path
         record["convertedPath"] = converted_path
         kind = entry.get("kind")
@@ -533,6 +543,32 @@ def run_selftest() -> dict[str, Any]:
         ]:
             raise AssertionError(f"sourceFiles 规范化/自动 hash 不正确：{updated.get('sourceFiles')}")
         checks.append("source_files_hash")
+        # F-03：路径基准是项目目录（不是工作区）；带项目目录名前缀时 warning 要给出可操作提示
+        _, prefix_warnings = normalize_source_files(
+            project_dir,
+            [
+                {
+                    "originalName": "招标文件.docx",
+                    "rawPath": f"{project_dir.name}/sources/raw/招标文件.docx",
+                    "convertedPath": f"{project_dir.name}/sources/01-bidding-documents.md",
+                }
+            ],
+        )
+        if not any("项目目录名前缀" in str(item) for item in prefix_warnings):
+            raise AssertionError(f"带项目目录名前缀时未给出提示：{prefix_warnings}")
+        _, valid_warnings = normalize_source_files(
+            project_dir,
+            [
+                {
+                    "originalName": "招标文件.docx",
+                    "rawPath": "sources/raw/招标文件.docx",
+                    "convertedPath": "sources/01-bidding-documents.md",
+                }
+            ],
+        )
+        if any("rawPath" in str(item) or "convertedPath" in str(item) for item in valid_warnings):
+            raise AssertionError(f"合法项目目录相对路径不应有路径 warning：{valid_warnings}")
+        checks.append("source_path_scope")
         if state_file.read_bytes() != state_snapshot:
             raise AssertionError("state.json 被改写（必须只写 project.json）")
         checks.append("state_untouched")

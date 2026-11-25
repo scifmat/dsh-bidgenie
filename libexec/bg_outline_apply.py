@@ -856,6 +856,71 @@ def _caption_base(title: str, *, limit: int = 24) -> str:
     return base.strip("、，；。的等") or "本章"
 
 
+def _figure_caption(title: str, plan_type: str) -> str:
+    """F-04：按章节标题语义给图表题注，而不是统一「XX相关要点表/相关流程」。
+
+    只做确定性关键词映射；仍属骨架（extensions.titleSource=skeleton），
+    写作前可按 06/09 事实微调，但已比通用后缀更接近最终题名。
+    """
+    base = _caption_base(title)
+    stem = re.sub(r"(方案|措施|分析|响应|承诺|计划|管理|服务|处理|要点|清单)$", "", base).strip() or base
+    if plan_type == "table":
+        if any(keyword in title for keyword in ("参数", "指标", "规格")):
+            return f"{stem}对照表"
+        if "进度" in title:
+            return f"{stem}计划表"
+        if "供货" in title:
+            return f"{stem}配置表"
+        if "质量" in title:
+            return f"{stem}控制要点表"
+        if any(keyword in title for keyword in ("检测", "调试")):
+            return f"{stem}项目与判定表"
+        if any(keyword in title for keyword in ("验收", "交付")):
+            return f"{stem}资料清单表"
+        if "人员" in title:
+            return f"{stem}配置表"
+        if "设备" in title:
+            return f"{stem}配置表"
+        if any(keyword in title for keyword in ("巡查", "巡检")):
+            return f"{stem}清单表"
+        if "工序" in title:
+            return f"{stem}质量控制表"
+        if "风险" in title:
+            return f"{stem}识别与应对表"
+        return f"{stem}要点与响应表" if "响应" in title else f"{stem}要点表"
+    if plan_type == "mermaid":
+        if any(keyword in title for keyword in ("安装", "施工", "工序")):
+            return f"{stem}流程图"
+        if any(keyword in title for keyword in ("检测", "调试")):
+            return f"{stem}流程图"
+        if "验收" in title:
+            return f"{stem}与归档流程图"
+        if any(keyword in title for keyword in ("售后", "服务", "响应")):
+            return f"{stem}流程图"
+        if any(keyword in title for keyword in ("供货", "交付", "进度")):
+            return f"{stem}流程图"
+        if "组织" in title:
+            return f"{stem}职责示意图"
+        if "管理" in title:
+            return f"{stem}流程图"
+        if "应急" in title:
+            return f"{stem}响应流程图"
+        if "重难点" in title:
+            return f"{stem}应对流程图"
+        return f"{stem}技术路线图"
+    if plan_type == "terminal":
+        if "巡检" in title:
+            return "巡检终端示例"
+        if "监控" in title:
+            return "监控终端示例"
+        if "诊断" in title:
+            return "故障诊断终端示例"
+        if "记录" in title:
+            return "记录输出示例"
+        return "终端操作示例"
+    return f"{stem}示意图"
+
+
 def _special_material_candidate(criterion: Mapping[str, Any]) -> dict[str, Any] | None:
     """P1-4：从评分因素/评分标准文本识别需用户提供证明材料的特殊章节候选。"""
     text = f"{criterion.get('factor') or ''} {criterion.get('clause') or ''}"
@@ -1016,10 +1081,10 @@ def build_outline_draft(
                     "relatedChapters": [],
                     "figurePlan": [],
                     "insertAnchors": [],
-                    "writingNotes": ["init-draft 生成的标题/图表题注只是骨架；写作前请按本包实际改写为通顺短语（图题同步）。"],
+                    "writingNotes": ["init-draft 生成的标题/图表题注只是骨架（extensions.titleSource=skeleton）；写作前请按本包 06/09 实际改写为通顺短语（图题同步）。"],
                     "completion": _default_completion(),
                     "reviewState": {"coverage": "unreviewed", "lastRound": 0, "issueIds": []},
-                    "extensions": {},
+                    "extensions": {"titleSource": "skeleton"},
                 }
             )
             leaf_specs.append(children[-1])
@@ -1118,13 +1183,11 @@ def build_outline_draft(
             if not leaf_specs:
                 return
             leaf = leaf_specs[offset % len(leaf_specs)]
-            caption_base = _caption_base(str(leaf["title"]))
-            suffix = {"table": "相关要点表", "mermaid": "相关流程", "terminal": "相关示例"}.get(plan_type, "相关示意图")
             plan = {
                 "anchorId": f"fig-{leaf['id']}-{len(leaf['figurePlan']) + 1:02d}",
                 "type": plan_type,
                 "purpose": f"用{'表格' if plan_type == 'table' else '图'}集中呈现「{leaf['title']}」的关键信息，支撑正文可读性",
-                "caption": f"{caption_base}{suffix}",
+                "caption": _figure_caption(str(leaf["title"]), plan_type),
                 "status": "planned",
             }
             if subtype:
@@ -1158,6 +1221,7 @@ def build_outline_draft(
             "generatedBy": "bg_outline_apply.py --init-draft",
             "generatedAt": paths.iso_now(),
             "needsAgentReview": True,
+            "titleSource": "skeleton",
             "figurePrefill": {"table": table_quota, "mermaid": mermaid_quota, "terminal": terminal_quota},
             "note": "骨架按技术评分因素与分项生成；评分标准含检测报告/偏离表/说明书/承诺函/样品等材料要求时已自动生成特殊章节 handling。写作前请 Agent 按 06/09 补充事实、重难点，并检查标题/分项是否贴合本包。",
         },
@@ -1529,6 +1593,27 @@ def run_selftest() -> dict[str, Any]:
         if re.search(r"等\d+项", merged_title):
             raise AssertionError(f"合并标题仍有「等N项」：{merged_title!r}")
         checks.append("init_draft_title_quality")
+        # F-04：图表题注按标题语义生成，不再是统一的「相关要点表/相关流程」；
+        # 叶子带 extensions.titleSource=skeleton，写作阶段可识别骨架题名。
+        if _figure_caption("安装施工方案", "mermaid") != "安装施工流程图":
+            raise AssertionError(f"mermaid 题注语义不正确：{_figure_caption('安装施工方案', 'mermaid')}")
+        if _figure_caption("主要材料与设施技术参数响应", "table") != "主要材料与设施技术参数对照表":
+            raise AssertionError(f"table 题注语义不正确：{_figure_caption('主要材料与设施技术参数响应', 'table')}")
+        if any(
+            "相关要点表" in str(plan.get("caption") or "") or "相关流程" in str(plan.get("caption") or "")
+            for node in init_draft.get("chapters") or []
+            for child in node.get("children") or []
+            for plan in child.get("figurePlan") or []
+        ):
+            raise AssertionError("init-draft 仍输出通用图表题注")
+        if any(
+            (child.get("extensions") or {}).get("titleSource") != "skeleton"
+            for node in init_draft.get("chapters") or []
+            for child in node.get("children") or []
+            if not outline_validate.is_special_chapter(child)
+        ):
+            raise AssertionError("init-draft 叶子缺少 extensions.titleSource=skeleton")
+        checks.append("init_draft_figure_caption")
         # N7：真实 07 常用「…评价：1. …；2. …」编号列表，首个分项不能被漏掉；
         # 同时覆盖「1.应急保障分类 2.…」仅空格分隔、以及「。2.」句号后继续编号的情况。
         stage3_07 = (

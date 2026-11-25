@@ -48,7 +48,7 @@ plugin/                              # 正式插件包根（M1 起）
 | `DELETE /bidgenie/bidders/:id` | body `{workspace, confirm:true}` | `{ok,trashedTo}` |
 | `POST /bidgenie/bidders/:id/current` | body `{workspace}` | `{ok,currentBidderId}` |
 | `GET /bidgenie/settings` | `?workspace=` | `{ok,settings}` |
-| `PUT /bidgenie/settings` | body `{workspace, settings}` | `{ok,updatedAt}` |
+| `PUT /bidgenie/settings` | body `{workspace, settings}` | `{ok,updatedAt,changedKeys,skipped?}` |
 | `GET /bidgenie/projects` | `?workspace=` | `{ok,projects:[{projectId,dirName,projectName,currentStage,currentPackage,updatedAt}]}` |
 | `GET /bidgenie/env-check` | `?workspace=` | M1 返回 `{ok, status:'not-run', checklistVersion:null, items:[], requiredPassed:0, requiredTotal:8}`（M2 接真实脚本） |
 
@@ -183,7 +183,7 @@ plugin/templates/styles/keyinfo/official-keyinfo.json   # 官方-关键信息导
 ### 9.4 接口
 
 `GET /bidgenie/styles?workspace=` → `{ok, builtin:{tech:[{id,label}], keyInfo:[{id,label}]}, custom:{tech:[{id,label,path}], keyInfo:[...]}, warnings:[{file,message}]}`
-`PUT /bidgenie/settings`：校验 `styleProfiles.tech` 属于 tech 可用集合、`styleProfiles.keyInfo` 属于 keyInfo 可用集合，否则 400 `E_SCHEMA_INVALID` + 对应可选值。旧 `styleProfile` 写入继续兼容（镜像到 styleProfiles.tech）。
+`PUT /bidgenie/settings`：**部分合并**——只应用请求里出现的键，未出现的键保持原值；无实际变化时 `skipped=true` 且不写盘。校验 `styleProfiles.tech` 属于 tech 可用集合、`styleProfiles.keyInfo` 属于 keyInfo 可用集合，否则 400 `E_SCHEMA_INVALID` + 对应可选值。旧 `styleProfile` 写入继续兼容（镜像到 styleProfiles.tech）。每次实际写入追加 `settings.updated` 事件（`actor=user`、`source=panel`、`detail.changedKeys`、`detail.changed{key:{before,after}}`），用于追溯字数档/配额等设置变化。
 ## 10. M3 转换与提取契约（2026-11-09）
 
 ### 10.1 `bg_convert.py`

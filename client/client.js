@@ -4342,6 +4342,7 @@ window.__ModuleLoader__.load({
       const timerRef = useRef(null);
       const mounted = useMountedRef();
       const saveRef = useRef(null);
+      const pendingPatchRef = useRef({});
       const overviewSupportedRef = useRef(false);
 
       useEffect(() => {
@@ -4393,18 +4394,22 @@ window.__ModuleLoader__.load({
       }, [loadStyles, props.refreshKey]);
 
       const putSettings = useCallback(
-        (next) => {
+        (next, patch) => {
           setSaveState({ status: 'saving', error: null });
-          const payload = Object.assign({}, next);
+          // F-02：自动保存只提交本次真正改动的键（patch）；完整 next 只用于本地状态/重试，
+          // 避免请求期间服务端设置变化时用旧草稿整体覆盖（曾出现字数档静默被改）。
+          const payload = Object.assign({}, patch || next);
           delete payload.styleProfile; // M2.5：只用 styleProfiles 键，旧字段不再提交
           delete payload.allowNetworkImages; // P1：网络配图已移除，旧字段不再提交
-          const quota = isPlainObject(payload.defaultFigureQuota) ? payload.defaultFigureQuota : {};
-          const quotaNumber = (value) => (typeof value === 'number' && isFinite(value) ? value : 5);
-          payload.defaultFigureQuota = {
-            table: quotaNumber(quota.table),
-            mermaid: quotaNumber(quota.mermaid),
-            terminal: quotaNumber(quota.terminal),
-          };
+          if (Object.prototype.hasOwnProperty.call(payload, 'defaultFigureQuota')) {
+            const quota = isPlainObject(payload.defaultFigureQuota) ? payload.defaultFigureQuota : {};
+            const quotaNumber = (value) => (typeof value === 'number' && isFinite(value) ? value : 5);
+            payload.defaultFigureQuota = {
+              table: quotaNumber(quota.table),
+              mermaid: quotaNumber(quota.mermaid),
+              terminal: quotaNumber(quota.terminal),
+            };
+          }
           if (!overviewSupportedRef.current && isPlainObject(payload.styleProfiles)) {
             const profiles = Object.assign({}, payload.styleProfiles);
             delete profiles.overview;
@@ -4438,9 +4443,12 @@ window.__ModuleLoader__.load({
         setDraft((prev) => {
           const next = Object.assign({}, prev);
           next[key] = value;
+          pendingPatchRef.current[key] = value;
           if (timerRef.current) clearTimeout(timerRef.current);
           timerRef.current = setTimeout(() => {
-            if (saveRef.current) saveRef.current(next);
+            const patch = Object.assign({}, pendingPatchRef.current);
+            pendingPatchRef.current = {};
+            if (saveRef.current) saveRef.current(next, patch);
           }, 600);
           return next;
         });

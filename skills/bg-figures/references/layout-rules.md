@@ -2,7 +2,7 @@
 
 ## mermaid
 
-- 默认 `flowchart TB`；单图节点 ≤12，标签尽量 ≤10 汉字。
+- 默认 `flowchart TB`；纵向线性链 ≥8 节点改 `LR`（或拆图），单图节点 ≤12，标签尽量 ≤10 汉字。
 - 长链/多分支优先拆成两张图，不靠缩字号。
 - 渲染后机检字段（`render-manifest.json` 的 `layout`）：
   - `viewBoxWidth`：图固有宽度；目标 ≤950px（A4 正文约 8pt 所需），>1200px 优先拆图，>2000px 必须拆图；

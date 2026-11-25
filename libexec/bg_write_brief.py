@@ -137,13 +137,34 @@ def build_batch_payload(
             if dep_node is not None:
                 summary = (dep_node.get("completion") or {}).get("summary") if isinstance(dep_node.get("completion"), Mapping) else ""
                 dependency_summaries[dep] = str(summary or "")
+        level = int(node.get("level") or 1)
+        title = str(node.get("title") or "")
+        figure_plan: list[dict[str, Any]] = []
+        for plan in node.get("figurePlan") or []:
+            if not isinstance(plan, Mapping):
+                continue
+            item = dict(plan)
+            if str(item.get("type") or "") == "mermaid":
+                # F-06：纵向 flowchart 节点过多会渲染成超高图（高宽比失败）；
+                # 在任务书阶段就给出可执行约束，而不是等 bg_render 失败后返工。
+                item["layoutHint"] = "flowchart 节点 >=8 时用 `flowchart LR` 或拆成两张图；避免纵向 >6 层（高宽比过大）"
+            figure_plan.append(item)
         chapters.append(
             {
                 "chapterId": chapter_id,
-                "title": node.get("title") or "",
-                "level": node.get("level"),
+                "title": title,
+                "level": level,
                 "seq": node.get("seq"),
                 "filePath": node.get("filePath") or "",
+                # F-01（2026-11-25 轻量冒烟）：任务书直接给出可复制的首行/第二行，
+                # 避免写作子智能体自由选择 H1/H2 或漏写 BG:CHAPTER meta。
+                "heading": {
+                    "firstLine": f"{'#' * level} {title}",
+                    "metaLine": (
+                        f"<!-- BG:CHAPTER id={chapter_id} level={level} "
+                        f"wordTarget={node.get('wordTarget') or 0} seq={node.get('seq') or 0} -->"
+                    ),
+                },
                 "wordTarget": node.get("wordTarget") or 0,
                 "priority": node.get("priority") or "",
                 "scoreWeight": node.get("scoreWeight") or 0,
@@ -151,7 +172,7 @@ def build_batch_payload(
                 "maxBodyHeadingLevel": (int(node.get("level") or 1) + 1),
                 "criterionRefs": node.get("criterionRefs") or [],
                 "contentRequirements": node.get("contentRequirements") or [],
-                "figurePlan": node.get("figurePlan") or [],
+                "figurePlan": figure_plan,
                 "insertAnchors": node.get("insertAnchors") or [],
                 "writingNotes": node.get("writingNotes") or [],
                 "handling": node.get("handling"),
@@ -179,8 +200,9 @@ def build_batch_payload(
             "maxBodyHeadingLevel": "outline.level + 1（末级 level=2 时正文只能用 ###，禁止 ####）",
         },
         "writingRules": [
+            "每章前两行必须逐字使用 heading.firstLine / heading.metaLine（首行 `#`×level，第二行 BG:CHAPTER）；不要改成 H1 或省略 meta。",
             "加载 bg-writing-style；正文不写跨章引用（如“详见第 3 章”）。",
-            "图表按 figurePlan 生成；table 不写 BG:FIGURE，mermaid/terminal 才写标记。",
+            "图表按 figurePlan 生成；table 不写 BG:FIGURE，mermaid/terminal 才写标记。flowchart 节点 >=8 时用 `flowchart LR` 或拆图（避免纵向超高）。",
             "特殊章节 handling 不为空时按 bg-special-chapters 模板写，不产图/表。",
             "只写本章 md 与 resources 源文件；不改 outline.json，不渲染 png。",
             "正文小节标题最多下探到章节层级+1（末级 level=2 时只用 ###，不要 ####/#####）。",
@@ -214,6 +236,10 @@ def render_batch_markdown(payload: Mapping[str, Any]) -> str:
                 f"- 文件：`{chapter.get('filePath') or ''}`",
                 f"- 目标字数：{chapter.get('wordTarget') or 0}（审查口径，目标区间 90%–120%）",
                 f"- 优先级/分值：{chapter.get('priority') or '-'} / {chapter.get('scoreWeight') or 0}",
+                "- **首行（逐字复制，不要改层级/标题）**：",
+                f"  `{(chapter.get('heading') or {}).get('firstLine') or ''}`",
+                "- **第二行（逐字复制）**：",
+                f"  `{(chapter.get('heading') or {}).get('metaLine') or ''}`",
                 f"- 正文标题上限：`{'#' * int(chapter.get('maxBodyHeadingLevel') or 3)}`（不要写更深层级）",
                 "- 评审因素：",
             ]
@@ -243,6 +269,7 @@ def render_batch_markdown(payload: Mapping[str, Any]) -> str:
                     f"  - `{plan.get('anchorId')}` {plan.get('type')}"
                     + (f"/{plan.get('subtype')}" if plan.get("subtype") else "")
                     + f"：{plan.get('caption') or ''}（{plan.get('purpose') or ''}）"
+                    + (f"；{plan.get('layoutHint')}" if plan.get("layoutHint") else "")
                 )
         dep_summaries = (chapter.get("context") or {}).get("dependencySummaries") or {}
         if dep_summaries:
@@ -475,6 +502,14 @@ def run_selftest() -> dict[str, Any]:
         raise AssertionError("任务书 payload/markdown 不正确")
     if "本批章节：3 章（全包 5 章）；共 2 批" not in markdown:
         raise AssertionError(f"任务书头部口径不正确：{markdown.splitlines()[:5]}")
+    first_chapter = payload["chapters"][0]
+    heading = first_chapter.get("heading") or {}
+    if heading.get("firstLine") != "## 现状":
+        raise AssertionError(f"任务书首行模板不正确：{heading}")
+    if heading.get("metaLine") != "<!-- BG:CHAPTER id=1-1 level=2 wordTarget=1000 seq=0 -->":
+        raise AssertionError(f"任务书 meta 模板不正确：{heading}")
+    if f"`{heading['firstLine']}`" not in markdown or f"`{heading['metaLine']}`" not in markdown:
+        raise AssertionError("任务书未内联可复制的首行/meta 模板")
     checks.append("payload_markdown")
     brief_item = summarize_brief(payload)
     if (

@@ -301,6 +301,83 @@ def _normalize_figure_statuses(document: dict[str, Any]) -> int:
     return changed
 
 
+#: F-01（2026-11-25 轻量冒烟）：写作侧可能把首行写成 H1/H2 混用、或漏写/写错
+#: BG:CHAPTER meta。合并前按 outline 做一次确定性归一（只动前两行，不改正文）。
+CHAPTER_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*$")
+CHAPTER_META_RE = re.compile(r"^<!--\s*BG:CHAPTER\b.*-->\s*$")
+
+
+def expected_chapter_header(node: Mapping[str, Any]) -> tuple[str, str]:
+    """返回大纲要求的首行标题与第二行 BG:CHAPTER meta。"""
+    level = int(node.get("level") or 1)
+    title = str(node.get("title") or "").strip()
+    header = f"{'#' * level} {title}"
+    meta = (
+        f"<!-- BG:CHAPTER id={node.get('id')} level={level} "
+        f"wordTarget={node.get('wordTarget') or 0} seq={node.get('seq') or 0} -->"
+    )
+    return header, meta
+
+
+def normalize_chapter_headings(package_dir: Path, outline: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """按 outline 重写每章首行标题与第二行 meta（幂等）；返回实际修改的章节。
+
+    只移除“标题文字与 outline 完全一致”的前导标题行与 BG:CHAPTER 行，再补回正确层级；
+    其他前导内容原样保留，避免误删正文。文件不存在（尚未写）时跳过。
+    """
+    fixes: list[dict[str, Any]] = []
+    for node in leaf_nodes(outline):
+        rel = str(node.get("filePath") or "")
+        if not rel:
+            continue
+        path = package_dir / rel
+        if not path.is_file():
+            continue
+        title = str(node.get("title") or "").strip()
+        header, meta = expected_chapter_header(node)
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        lines = text.splitlines()
+        cursor = 0
+        while cursor < len(lines) and not lines[cursor].strip():
+            cursor += 1
+        remaining = lines[cursor:]
+        removed_headings = 0
+        removed_meta = 0
+        while remaining:
+            stripped = remaining[0].strip()
+            heading = CHAPTER_HEADING_RE.match(stripped)
+            if heading and heading.group("title").strip() == title:
+                remaining = remaining[1:]
+                removed_headings += 1
+                continue
+            if CHAPTER_META_RE.match(stripped):
+                remaining = remaining[1:]
+                removed_meta += 1
+                continue
+            break
+        body = "\n".join(remaining).strip("\n")
+        new_text = header + "\n" + meta + "\n"
+        if body:
+            new_text += "\n" + body + "\n"
+        if new_text.rstrip("\n") == text.rstrip("\n"):
+            continue
+        path.write_text(new_text.rstrip("\n") + "\n", encoding="utf-8")
+        fixes.append(
+            {
+                "chapterId": str(node.get("id") or ""),
+                "filePath": rel,
+                "removedHeadings": removed_headings,
+                "removedMeta": removed_meta,
+                "firstLine": header,
+                "metaLine": meta,
+            }
+        )
+    return fixes
+
+
 def validate_result(result: Any, node: Mapping[str, Any], package_dir: Path) -> list[dict[str, Any]]:
     """校验 chapter-result.json（F5.2.3）；返回 findings（severity=blocker）。"""
     findings: list[dict[str, Any]] = []
@@ -553,6 +630,7 @@ def merge_selected(
     chapter: str | None = None,
     result_path: str | None = None,
     batch: int | None = None,
+    fix_headings: bool = True,
 ) -> dict[str, Any]:
     workspace_path, project_dir_path, target, package_dir, package_meta, state, project_doc = resolve_context(
         workspace, project_dir, package_id
@@ -566,6 +644,7 @@ def merge_selected(
             detail={"lock": LOCK_MARKER},
         )
     outline = load_outline(package_dir)
+    heading_fixes = normalize_chapter_headings(package_dir, outline) if fix_headings else []
     nodes = leaf_nodes(outline)
     by_id = {str(node.get("id")): node for node in nodes}
     selected = _select_results(package_dir, state, chapter=chapter, result_path=result_path, batch=batch)
@@ -992,6 +1071,8 @@ def merge_selected(
         "merged": merged,
         "unchanged": unchanged,
         "idempotent": idempotent,
+        "headingFixes": heading_fixes,
+        "headingFixCount": len(heading_fixes),
         "backup": backup,
         "stats": updated_outline.get("stats"),
         "supplementTables": updated_outline.get("supplementTables") or [],
@@ -1139,6 +1220,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch", type=int, help="合并第 k 批（读 chapters/_batches/_batch-state.json 或 batch-<k>.json 的章节清单）")
     parser.add_argument("--chapter", help="只合并指定末级章节 id（如 1-1）")
     parser.add_argument("--result", help="合并指定 chapter-result.json 文件")
+    parser.add_argument(
+        "--no-fix-headings",
+        action="store_true",
+        help="不自动按 outline 修复章节首行标题/第二行 BG:CHAPTER meta（默认修复）",
+    )
     parser.add_argument("--verify-all", action="store_true", help="只读校验全部 leaf 完成（done/skipped、无 blocked、summary/wordCount）")
     parser.add_argument("--status", action="store_true", help="只读进度（状态计数/结果文件/blocked/pending）")
     parser.add_argument("--selftest", action="store_true", help="运行脚本自检")
@@ -1162,6 +1248,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         chapter=args.chapter,
         result_path=args.result,
         batch=args.batch if args.batch is not None and args.batch > 0 else None,
+        fix_headings=not bool(getattr(args, "no_fix_headings", False)),
     )
 
 
@@ -1272,6 +1359,16 @@ def run_selftest() -> dict[str, Any]:
             encoding="utf-8",
             newline="\n",
         )
+        # F-01：模拟写作子智能体把末级章写成 H1 且完全漏掉 BG:CHAPTER meta，
+        # 合并时应自动归一为 "## 标题" + 逐字 meta，而不是等审查 blocker。
+        expected_header, expected_meta = expected_chapter_header(first)
+        corrupted_lines = first_chapter_path.read_text(encoding="utf-8").splitlines()
+        body_lines = corrupted_lines[2:]
+        first_chapter_path.write_text(
+            "# " + str(first.get("title") or "") + "\n\n" + "\n".join(body_lines).strip("\n") + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         results = results_dir(package_dir)
         results.mkdir(parents=True, exist_ok=True)
 
@@ -1306,6 +1403,15 @@ def run_selftest() -> dict[str, Any]:
             tables=first_tables,
         )
         merged = merge_selected(workspace=workspace, project_dir=project_dir, chapter=str(first.get("id")))
+        if merged.get("headingFixCount") != 1 or not merged.get("headingFixes"):
+            raise AssertionError(f"章节头未自动修复：{merged.get('headingFixes')}")
+        normalized_lines = first_chapter_path.read_text(encoding="utf-8").splitlines()
+        if normalized_lines[:2] != [expected_header, expected_meta]:
+            raise AssertionError(f"章节头归一结果不正确：{normalized_lines[:2]}")
+        second_merge = merge_selected(workspace=workspace, project_dir=project_dir, chapter=str(first.get("id")))
+        if second_merge.get("headingFixCount") != 0:
+            raise AssertionError(f"章节头修复不幂等：{second_merge.get('headingFixes')}")
+        checks.append("heading_autofix")
         updated = jsonio.read_json(outline_file)
         node = next(item for item in leaf_nodes(updated) if item.get("id") == first.get("id"))
         if not merged.get("merged") or node["completion"]["status"] != "done" or node["completion"]["wordCount"] != 1800:

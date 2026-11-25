@@ -32,6 +32,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 
 - 辅助：`bg-bidder`（投标人资料）、`bg-writing-style`（去 AI 味共享规则）、`bg-export-style`（自建导出样式）、`bg-figures`（图表规划/审图）、`bg-special-chapters`（证书/检测报告/偏离表等特殊章节）。
 - 多包：`writingPackages` 只在 F4 一次确认（选项每包一项、可多选、禁组合/禁二次问）；每包按 F4→F7 串行走完，前包 completed 后 T13 切下一包，不重复问包。
+- **可合并提问**：F3 的「回退风险确认」与 F4 的「选择撰写包」若同源（同一份招标文件、用户本就要定包号），合并成一次 `ask_user_question`；确认结论分别用于 `bg_extract_validate --confirm-fallback --note` 和 `bg_project.py select-packages`。
 
 ## 2. 硬约束
 

@@ -48,6 +48,7 @@
   "batch": 2,
   "chapters": [
     { "chapterId": "1-3-1", "title": "…", "level": 3, "filePath": "…", "criterionRefs": ["C-03"],
+      "heading": { "firstLine": "### …", "metaLine": "<!-- BG:CHAPTER id=1-3-1 level=3 wordTarget=1800 seq=12 -->" },
       "contentRequirements": ["…"], "wordTarget": 1800,
       "figurePlan": [ { "anchorId": "fig-1-3-1-01", "type": "mermaid", "subtype": "flowchart", "caption": "…" } ],
       "context": { "dependencySummaries": {}, "projectFacts": "…", "userPlans": "…" } }
@@ -71,6 +72,7 @@
 渲染前源文件：mermaid `.mmd`（首行类型与大纲 `subtype` 一致）、terminal `.txt`（写在 `resources/<type>/<anchorId>.*`）。图表生成前加载 `bg-figures`；terminal 可按大纲在一章写多张，但不得新增未规划的图。
 
 - **渲染只由主 Agent 执行**（合并全部批次后跑一次 `bg_render.py`）；子智能体只写 `.mmd/.txt`，不跑 `bg_render`、不在包内留 png。
+- 合并输出 `headingFixes`：合并前已按 outline 自动重写首行 `#`×level 与第二行 BG:CHAPTER meta（只改前两行）；`headingFixCount>0` 表示写作侧写错层级/漏 meta，已修复，无需临时脚本。
 - 合并输出 `wordCountDiagnostics`：全包 `deviationPct` 超 ±10% 时，按 `chaptersOverTarget/UnderTarget` 定点调整后再 T5。
 
 ## 异常与时限
@@ -83,7 +85,8 @@
 | 字数 <90% | 普通章先重派并给扩写要点；仍不足如实记录留审查。特殊章节按模板写够 150–250 字即可，不扩写凑数 |
 | 全包字数 >±10% | 按 `wordCountDiagnostics.chaptersOverTarget/UnderTarget` 定点精简/扩写，再 T5（特殊章节不在清单内） |
 | 子智能体留下临时 png/目录 | 交付前删除；渲染统一由主 Agent 执行 |
-| 标题越级 | 合并脚本报错 → 重写；连续 2 次记 blocker |
+| 标题越级/漏 meta | 合并脚本默认按 outline 自动归一（`headingFixes`）；不要再用临时脚本改章节头 |
+| 正文小标题越级 | 改写为 level+1 以内（如末级 `##` 下只用 `###`）；连续 2 次记 blocker |
 | 图表渲染失败 | 保留源文件、`figures[].status="failed"`、记 issues |
 | 沙箱权限失败 | 提示切换 danger-full-access/授权工作区；不静默降级、不伪造 png |
 | 并发写冲突 | 子智能体只写本批文件；合并脚本串行落盘 |

@@ -1126,6 +1126,14 @@ def run_selftest() -> dict[str, Any]:
         risk_codes = {str(item.get("code")) for item in risks}
         if not {"fallback_page", "ambiguous_symbol", "table_structure"} <= risk_codes:
             raise AssertionError(f"回退/勾选风险识别不完整：{risks}")
+        fallback_risk = next(item for item in risks if item.get("code") == "fallback_page")
+        if int(fallback_risk.get("occurrences") or 0) < 2 or not any(
+            str(item).startswith("extraction/") for item in fallback_risk.get("sources") or []
+        ):
+            raise AssertionError(f"同类型风险未合并 sources/occurrences：{fallback_risk}")
+        if len(risks) != len({str(item.get('code')) for item in risks}):
+            raise AssertionError(f"同类风险未去重：{[item.get('code') for item in risks]}")
+        checks.append("fallback_risk_grouped")
         extraction_risk.write_review(review_dir, risks, confirmed_at="2026-01-01T00:00:00+08:00", note="用户已核对")
         marker = extraction_risk.review_from_project(jsonio.read_json(review_dir / "project.json"))
         if not marker.get("required") or not marker.get("confirmedAt") or len(marker.get("risks") or []) != len(risks):
@@ -1579,13 +1587,22 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
     confirmed_at = str(existing_review.get("confirmedAt") or "")
     if getattr(args, "confirm_fallback", False):
         confirmed_at = paths.iso_now()
+    # F-08：确认动作必须带可追溯结论，不能空 note / “OK” 一句话带过。
+    effective_note = str(getattr(args, "note", "") or existing_review.get("note") or "").strip()
+    if getattr(args, "confirm_fallback", False) and len(effective_note) < 8:
+        raise errors.BgError(
+            errors.E_USAGE,
+            "确认回退风险时 --note 至少 8 个字符，需写明核对了哪些字段/页码",
+            hint='例：--note "已核对第7页回退文本与采购清单跨页表格，截止时间/工期按PDF原件确认"',
+            detail={"noteLength": len(effective_note)},
+        )
     review_written = ""
     if not getattr(args, "check", False):
         review_written = extraction_risk.write_review(
             project_dir,
             risks,
             confirmed_at=confirmed_at,
-            note=str(getattr(args, "note", "") or existing_review.get("note") or ""),
+            note=effective_note,
         )
     result = validate_project_extraction(
         project_dir,

@@ -137,17 +137,45 @@ def _extraction_line_risks(project_dir: Path) -> list[dict[str, Any]]:
 def detect_fallback_review_risks(project_dir: str | Path) -> list[dict[str, Any]]:
     """汇总需要用户核对的风险：回退页关键字段、跨页表格、复选框/符号不可辨。
 
-    返回去重后的风险列表；空列表表示无需确认。
+    同一风险类型（code）在多个提取文件/清单里重复出现时合并为一条：保留首条
+    source/excerpt，同时累积 sources/fields/pages/excerpts/occurrences。这样用户
+    看到的是“3 类风险”而不是同一条提示重复 9 次，也不会丢核对范围。
     """
     root = Path(project_dir)
-    risks: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    grouped: dict[str, dict[str, Any]] = {}
     for risk in [*_manifest_fallback_risks(root), *_extraction_line_risks(root)]:
-        key = (str(risk.get("code") or ""), str(risk.get("source") or ""), str(risk.get("excerpt") or ""))
-        if key in seen:
+        code = str(risk.get("code") or "")
+        if not code:
             continue
-        seen.add(key)
-        risks.append(risk)
+        entry = grouped.get(code)
+        if entry is None:
+            grouped[code] = {
+                **risk,
+                "sources": [str(risk.get("source") or "")],
+                "fields": list(risk.get("fields") or []),
+                "pages": list(risk.get("pages") or []),
+                "excerpts": [str(risk.get("excerpt") or "")],
+                "occurrences": 1,
+            }
+            continue
+        entry["occurrences"] = int(entry.get("occurrences") or 1) + 1
+        for key in ("sources", "fields", "pages", "excerpts"):
+            if key == "sources":
+                values = [str(risk.get("source") or "")]
+            elif key in ("fields", "pages"):
+                values = list(risk.get(key) or [])
+            else:
+                values = [str(risk.get("excerpt") or "")]
+            for item in values:
+                if item not in entry[key]:
+                    entry[key].append(item)
+    risks: list[dict[str, Any]] = []
+    for entry in grouped.values():
+        entry["fields"] = sorted({str(item) for item in entry.get("fields") or [] if str(item)})
+        entry["pages"] = sorted({int(item) for item in entry.get("pages") or [] if isinstance(item, int)})
+        entry["sources"] = [item for item in entry.get("sources") or [] if item]
+        entry["excerpts"] = [item for item in entry.get("excerpts") or [] if item][:5]
+        risks.append(entry)
         if len(risks) >= MAX_RISKS:
             break
     return risks

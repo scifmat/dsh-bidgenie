@@ -54,8 +54,8 @@ T3 必须显式 `--package "<writingPackages[0]>"`；失败先 `--verify` 出缺
 
 ## --all-selected 输出
 
-- `results[]`：逐包 prepare 结果；中间包 `readyForT3=false` 时会带 `pendingReason="sequence-in-progress"`、`t3Pending=true`，是顺序中间态不是失败。
-- 顶层 `readyForT3` = 最后一包结果；`pendingPackages` 列中间态包；`summary.note` 说明判定口径。汇报以顶层 `readyForT3` 为准。
+- `results[]`：逐包 prepare 结果；中间包 `readyForT3=false` 时会带 `pendingReason="sequence-in-progress"`、`t3State="pending-sequence"`、`t3Pending=true`，是顺序中间态不是失败；最终包 `t3State="ready"`，自身失败项为 `blocked`。
+- 顶层 `readyForT3` = 最后一包结果；`sequenceInProgress=true` 表示仍有中间包顺序态，`pendingPackages` 列这些包；`summary.note` 说明判定口径。汇报以顶层 `readyForT3` + `sequenceInProgress` 为准，不要只读逐包 `readyForT3`。
 
 ## 异常
 
