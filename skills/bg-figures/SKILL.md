@@ -52,7 +52,8 @@ description: BidGenie 图表规划与生成规则（F5-1 大纲必用，F5-2/F6/
 
 ### 3.1 mermaid
 
-- 默认 `flowchart TB`；**节点控制在 6–7 个、判定 ≤3、回边 ≤1、标签 ≤12 字、箭头文字 ≤6 字**；超过 7 个节点先拆成 2 张图，不要只靠改 LR/TB 硬塞。`bg_render.py` 渲染前会做静态预判并在结果里给 `layoutPreflight/rewriteSuggestion`。
+- 默认 `flowchart TB`；**节点控制在 6–7 个、判定 ≤3、回边 ≤1、标签 ≤12 字、箭头文字 ≤6 字**；超过 7 个节点先拆成 2 张图。`bg_render.py` 渲染前会做静态预判并在结果里给 `layoutPreflight/estimatedAspectTall/rewriteSuggestion`。
+- **TB 近线性链**（节点 ≥7、判定 ≤1）容易超高（真实案例 7 节点/1 判定/0 回边 → 高宽比 3.94、字号 13.7pt）：优先改 `flowchart LR`（7–11 节点）或合并到 ≤6 节点/拆 2 张；有并列分支时 7 节点也可能安全，以预判结果为准。
 - 单图建议 ≤7 个节点；超过拆图。
 - 节点文字尽量 ≤10 个汉字；长标签用 `<br/>` 折行。
 - 图固有宽度目标 ≤950px（A4 正文约 8pt）；1000–1200px 需精简，>1200px 优先拆图。

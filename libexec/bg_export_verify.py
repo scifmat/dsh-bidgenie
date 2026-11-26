@@ -795,7 +795,12 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             errors.E_VALIDATE_FAILED,
             f"导出后自检失败：{len(result['findings'])} 项",
             hint="保留 docx，修正问题后重新导出/自检；--strict 会把缺图升级为失败",
-            detail={"findings": result["findings"], "checks": result["checks"], "report": paths.rel_posix(project_dir, report_path)},
+            detail={
+                "findings": result["findings"],
+                "warnings": result.get("warnings") or [],
+                "checks": result["checks"],
+                "report": paths.rel_posix(project_dir, report_path),
+            },
         )
     return {
         "ok": True,

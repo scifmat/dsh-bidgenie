@@ -2,8 +2,11 @@
 
 ## mermaid
 
-- 默认 `flowchart TB`；节点 6–7、判定 ≤3、回边 ≤1、标签 ≤12 字；超过 7 节点先拆图（只改 LR/TB 往往仍会超高或过扁）。
+- 默认 `flowchart TB`；节点 6–7、判定 ≤3、回边 ≤1、标签 ≤12 字；超过 7 节点先拆图。
+- **TB 近线性链**（节点 ≥7、判定 ≤1、基本一条链）容易超高：真实案例 7 节点/1 判定/0 回边 → 高宽比 3.94、字号 13.7pt。优先改 `flowchart LR`（7–11 节点）或合并到 ≤6 节点/拆 2 张；不要只靠缩字号。
+- 有并列分支（同一层 2 个节点）会横向撑宽，7 节点也可能安全（真实案例 7 节点/1 判定/1 回边 → 2.15）；以预判结果为准。
 - 长链/多分支优先拆成两张图，不靠缩字号。
+- 渲染前 `bg_render.py` 会给 `layoutPreflight/estimatedAspectTall/rewriteSuggestion`（只看预判，不改图）；渲染后 `layout.warnings` 才是机检结论。
 - 渲染后机检字段（`render-manifest.json` 的 `layout`）：
   - `viewBoxWidth`：图固有宽度；目标 ≤950px（A4 正文约 8pt 所需），>1200px 优先拆图，>2000px 必须拆图；
   - `fontPtAtDisplay`：按 A4 正文宽度换算的有效字号；<8pt 记 minor，<6.5pt 记 major；

@@ -18,7 +18,7 @@ description: BidGenie 技术方案大纲编写（F5-1）。当项目处于 outli
 3. 每个一级标题来自技术评审因素（唯一例外：招标明确要求章节，score=0 并在 writingNotes 记依据）。
 4. 每个末级必须有 `criterionRefs`（≥1）、`contentRequirements`（≥1，逐条可验收）、`wordTarget`；特殊章节另有 `handling`（mode/materialType/requirements/userAction），`wordTarget` 100–300（默认 200），`figurePlan=[]`、`insertAnchors=[]`。
 5. 字数 Σ=expectedWordCount（±1%）：特殊章节固定 100–300，普通章节分摊剩余字数；图表规划：table/mermaid 不低于 `figureQuota`（下限、多出不返工）；terminal 为**参考值**（0=不生成，>0 可少规划，不强制凑数）；`figureQuota=0` 的类型规划数必须为 0。T4 guard 与 `bg_outline_validate` 同口径。
-6. 图表 type=table/mermaid/terminal；mermaid 必须带 `subtype`（flowchart/sequence/gantt/state/er/timeline/mindmap/block/architecture/quadrant/pie/xychart）；每末级 table ≤2、mermaid ≤2、terminal ≤4；terminal 同一场景多组命令可拆多张，但不得为凑数硬塞；`anchorId=fig-<chapterId>-<seq2>`；`caption` 纯题名（不带 ▼/▲）。特殊章节不规划图。
+6. 图表 type=table/mermaid/terminal；mermaid 必须带 `subtype`（flowchart/sequence/gantt/state/er/timeline/mindmap/block/architecture/quadrant/pie/xychart）；每末级 table ≤2、mermaid ≤2、terminal ≤4；terminal 同一场景多组命令可拆多张，但不得为凑数硬塞；`anchorId=fig-<chapterId>-<seq2>`；`caption` 纯题名（不带 ▼/▲；**不要以「数字+量词」开头**，如「3 条路段…」会和 `▼表` 连读成「表3」，改写为「各条路段…」「各类…」；`bg_outline_validate` 会报 `figure_caption_number_like` warning）。特殊章节不规划图。
 7. table 只规划为 Markdown 表格（不写 `BG:FIGURE`、不建 resources/tables）；补充表登记 `outline.supplementTables`；不创建 resources/network。
 8. 覆盖率 100%（每个 criterionId 至少 1 个末级覆盖）；无商务/报价章节；无模板化无关章节。
 

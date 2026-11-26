@@ -24,6 +24,8 @@ description: BidGenie 技术方案审查（F6）。当项目处于 review 阶段
 - 章节字数：目标 **90%–120%** 为 pass；60%–90% / 120%–140% 记 major；<60% / >140% 记 blocker。
 - 全包字数：`expectedWordCount` ±10% 内 pass，±10%–20% 记 major，>±20% 记 blocker。
 - summary 的 200–400 是**字符长度**（`len(str)`，含标点），不要与本脚本“字数”混用。
+- **未完成章节（R-14）**：`completion.status` 为 pending/writing 的章节单列 `pendingChapters`，不按空文档/字数报问题、全包字数不做偏差判定；写作中途 `--dry-run` 看到 `pendingChapters` 是正常中间态，**不等于审查通过**，写完后再跑。
+- **题注（R-13）**：以「数字+量词」开头（如「3 条路段…」）记 minor `caption_format`（会读成「表3」）；真正编号（`表1`/`1、`/`第1章`）仍是 major。
 
 ## 进入
 

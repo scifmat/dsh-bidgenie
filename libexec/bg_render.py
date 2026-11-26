@@ -617,6 +617,50 @@ def mermaid_layout_check(
     }
 
 
+def mermaid_rank_layout(node_ids: set[str], edge_pairs: Sequence[tuple[str, str]]) -> tuple[int, int]:
+    """返回 (最长链节点数, 单层最多节点数)；回边忽略，用于 TB 高宽比预估（R-12）。
+
+    真实布局由浏览器完成；这里只做“链长/层宽”近似，避免把 7 节点近线性 TB 链
+    误判为安全（真实案例：7 节点/1 判定/0 回边 → 高宽比 3.94、字号 13.7pt）。
+    """
+    adjacency: dict[str, list[str]] = {node: [] for node in node_ids}
+    for left, right in edge_pairs:
+        adjacency.setdefault(left, [])
+        adjacency.setdefault(right, [])
+        if right not in adjacency[left]:
+            adjacency[left].append(right)
+    state: dict[str, int] = {}
+    back_edges: set[tuple[str, str]] = set()
+    order: list[str] = []
+
+    def visit(node: str) -> None:
+        state[node] = 1
+        for nxt in adjacency.get(node, ()):
+            mark = state.get(nxt)
+            if mark == 1:
+                back_edges.add((node, nxt))
+                continue
+            if mark is None:
+                visit(nxt)
+        state[node] = 2
+        order.append(node)
+
+    for node in sorted(node_ids):
+        if state.get(node) is None:
+            visit(node)
+    rank = {node: 1 for node in node_ids}
+    for node in reversed(order):
+        for nxt in adjacency.get(node, ()):
+            if (node, nxt) in back_edges:
+                continue
+            rank[nxt] = max(rank[nxt], rank[node] + 1)
+    depth = max(rank.values(), default=0)
+    level_counts: dict[int, int] = {}
+    for value in rank.values():
+        level_counts[value] = level_counts.get(value, 0) + 1
+    return depth, max(level_counts.values(), default=0)
+
+
 def mermaid_static_preflight(text: str) -> dict[str, Any]:
     """N-02：渲染前按 mermaid 源静态预判节点/判定/回边/标签，先给可执行改写建议。
 
@@ -633,7 +677,12 @@ def mermaid_static_preflight(text: str) -> dict[str, Any]:
         ids.add(right)
     labels = re.findall(r"[\[\(\{]([^\]\)\}\n]+)[\]\)\}]", source)
     max_label = max((len(label.strip().strip('"\'')) for label in labels), default=0)
-    edge_pairs = re.findall(r"\b([A-Za-z_][\w-]*)\s*(?:-->|---|==>|-\.->)\s*(?:\|[^|\n]*\|\s*)?([A-Za-z_][\w-]*)", source)
+    # 边解析前先剥掉节点内联标签（`A[文本] --> B{判定}` 两端都带标签），否则会漏掉大多数边。
+    normalized_source = re.sub(r"([A-Za-z_][\w-]*)\s*(?:\[[^\]\n]*\]|\{[^}\n]*\}|\([^)\n]*\))", r"\1", source)
+    edge_pairs = re.findall(
+        r"\b([A-Za-z_][\w-]*)\s*(?:-->|---|==>|-\.->)\s*(?:\|[^|\n]*\|\s*)?([A-Za-z_][\w-]*)",
+        normalized_source,
+    )
     first_seen: dict[str, int] = {}
     for index, (left, right) in enumerate(edge_pairs):
         first_seen.setdefault(left, index * 2)
@@ -658,6 +707,25 @@ def mermaid_static_preflight(text: str) -> dict[str, Any]:
     if direction in ("LR", "RL") and node_count >= 12:
         warnings.append({"code": "preflight_long_lr_chain", "severity": "info", "message": f"{direction} 长链 {node_count} 节点，自动布局可能改 TB 后产出过扁图；先拆图或减节点"})
         fixes.append("LR 长链先拆图")
+    estimated_aspect_tall: float | None = None
+    if direction in ("TB", "TD", "BT") and node_count >= 4:
+        depth, max_level = mermaid_rank_layout(ids, edge_pairs)
+        node_width = max(120.0, max_label * 16.0 + 60.0)
+        level_width = max_level * node_width + max(0, max_level - 1) * 60.0
+        if level_width > 0:
+            estimated_aspect_tall = round(depth * 120.0 / level_width, 2)
+        if estimated_aspect_tall is not None and estimated_aspect_tall > 3.0:
+            warnings.append(
+                {
+                    "code": "preflight_tall_tb_chain",
+                    "severity": "info",
+                    "message": (
+                        f"{direction} 近线性链：预计高宽比≈{estimated_aspect_tall:.1f}（>3），"
+                        "渲染后有效字号可能 <15pt；建议改 flowchart LR（7–11 节点）或合并到 ≤6 节点/拆 2 张"
+                    ),
+                }
+            )
+            fixes.append("TB 长链改 LR/合并到 ≤6")
     suggestion = ""
     if warnings:
         suggestion = (
@@ -669,6 +737,7 @@ def mermaid_static_preflight(text: str) -> dict[str, Any]:
         "decisionCount": decision_count,
         "returnEdges": return_edges,
         "maxLabelChars": max_label,
+        "estimatedAspectTall": estimated_aspect_tall,
         "warnings": warnings,
         "rewriteSuggestion": suggestion,
     }
@@ -1600,6 +1669,30 @@ def run_selftest() -> dict[str, Any]:
     ):
         raise AssertionError(f"mermaid 静态预判不正确：{preflight}")
     checks.append("mermaid_static_preflight")
+    # R-12：TB 近线性链（7 节点/1 判定/0 回边）真实渲染高宽比 3.94，预判必须提前拦；
+    # 有并列分支（单层 2 节点）或 5 节点长标签时不应误报。
+    tb_linear = (
+        "flowchart TB\n"
+        "  A[放样与基础处理] --> B[立柱安装校正]\n  B --> C[护栏拼装与线形调整]\n"
+        "  C --> D{自检是否合格}\n  D -->|合格| E[报验移交]\n  E --> F[资料归档]\n  F --> G[交付确认]\n"
+    )
+    tb_preflight = mermaid_static_preflight(tb_linear)
+    tb_codes = {item["code"] for item in tb_preflight.get("warnings") or []}
+    if "preflight_tall_tb_chain" not in tb_codes or (tb_preflight.get("estimatedAspectTall") or 0) <= 3.0:
+        raise AssertionError(f"TB 近线性链未预判超高：{tb_preflight}")
+    tb_branched = (
+        "flowchart TB\n  A[开始] --> B[步骤一]\n  B --> C[步骤二]\n  C --> D{判定}\n"
+        "  D -->|合格| E[入库标识]\n  D -->|不合格| F[隔离退换]\n  F --> B\n  E --> G[放行移交]\n"
+    )
+    if any(item["code"] == "preflight_tall_tb_chain" for item in mermaid_static_preflight(tb_branched).get("warnings") or []):
+        raise AssertionError("有并列分支的 TB 链被误报超高")
+    tb_five = (
+        "flowchart TB\n  A[放样与基础处理] --> B[立柱安装校正]\n  B --> C[护栏拼装与线形调整]\n"
+        "  C --> D{自检是否合格}\n  D -->|不合格| C\n  D -->|合格| E[报验移交]\n"
+    )
+    if any(item["code"] == "preflight_tall_tb_chain" for item in mermaid_static_preflight(tb_five).get("warnings") or []):
+        raise AssertionError("5 节点 TB 图被误报超高")
+    checks.append("mermaid_preflight_tb_chain")
     tmp = Path(tempfile.mkdtemp(prefix="bidgenie-render-selftest-"))
     try:
         workspace, project_dir, package_dir, outline = _build_selftest_project(tmp)

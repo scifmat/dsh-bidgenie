@@ -29,7 +29,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, paths, state as state_lib
+from _lib import errors, jsonio, paths, state as state_lib, text as text_lib
 
 SCHEMA_VERSION = "1.0"
 FIGURE_TYPES: tuple[str, ...] = ("table", "mermaid", "network", "terminal")
@@ -583,6 +583,16 @@ def _validate_figures(
                     _add(findings, "figure_caption_missing", "blocker", f"{plan_pointer}/caption", "caption 不能为空")
                 elif caption.strip().startswith(("▼", "▲")):
                     _add(findings, "figure_caption_symbol", "blocker", f"{plan_pointer}/caption", "caption 必须是纯题名，不含 ▼/▲ 符号")
+                elif text_lib.caption_number_prefix(caption):
+                    stripped_caption = caption.strip()
+                    _add(
+                        findings,
+                        "figure_caption_number_like",
+                        "warning",
+                        f"{plan_pointer}/caption",
+                        f"题注「{stripped_caption[:24]}」以数字+量词开头，导出后会读成「表3」式编号",
+                        f"建议改为「{text_lib.rewrite_caption_number_prefix(stripped_caption)}」或「本包…」等概括说法",
+                    )
                 if not isinstance(plan.get("purpose"), str) or not str(plan.get("purpose")).strip():
                     _add(findings, "figure_purpose_missing", "blocker", f"{plan_pointer}/purpose", "purpose 不能为空")
                 status = plan.get("status", "planned")
@@ -1480,6 +1490,15 @@ def run_selftest() -> dict[str, Any]:
         if not base_result["valid"]:
             raise AssertionError(f"golden 大纲校验失败：{base_result['blockers']}")
         checks.append("golden_valid")
+
+        # R-13：题注以「数字+量词」开头会读成「表3」，给出 warning 与改写建议
+        caption_doc = copy.deepcopy(golden)
+        caption_doc["chapters"][0]["children"][0]["figurePlan"][0]["caption"] = "3 条路段设施供货清单"
+        caption_result = validate_document(caption_doc, package_meta, require_layout=True)
+        caption_warnings = {item.get("code") for item in caption_result.get("warnings") or []}
+        if "figure_caption_number_like" not in caption_warnings:
+            raise AssertionError(f"数字+量词题注未告警：{caption_result.get('warnings')}")
+        checks.append("figure_caption_number_like")
 
         def block(mutator: Any, expected_code: str) -> None:
             document = copy.deepcopy(golden)

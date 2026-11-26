@@ -46,3 +46,40 @@ def count_words(text: str, *, strip_comments: bool = True, strip_headings: bool 
 def count_body_words(text: str) -> int:
     """正文字数（剥离注释与标题行），审查/导出自检/概览统一用这个。"""
     return count_words(text, strip_comments=True, strip_headings=True)
+
+
+#: R-13（2026-11-26 定向续跑）：题注开头「数字+量词」在 `▼表`/`▲图` 之后会被读成编号，
+#: 例如 `▼表3 条路段设施供货清单与进场计划表` 读作「表 3 条路段…」。这里给
+#: 大纲校验/写作任务书/审查共用同一口径（「1包」「2026年」「1.5mm」等业务数字不算）。
+_CAPTION_NUMBER_PREFIX_RE = re.compile(r"^\s*(\d{1,3})\s*(条|个|项|段|处|类|种|套|台|批|份|户|家)")
+_CAPTION_MEASURE_REWRITE = {
+    "条": "各条",
+    "个": "各个",
+    "项": "各项",
+    "段": "各段",
+    "处": "各处",
+    "类": "各类",
+    "种": "各种",
+    "套": "各套",
+    "台": "各台",
+    "批": "各批",
+    "份": "各份",
+    "户": "各户",
+    "家": "各家",
+}
+
+
+def caption_number_prefix(caption: str) -> str:
+    """返回题注开头的「数字+量词」（如「3 条」）；没有则空串。"""
+    match = _CAPTION_NUMBER_PREFIX_RE.match(str(caption or ""))
+    return match.group(0).strip() if match else ""
+
+
+def rewrite_caption_number_prefix(caption: str) -> str:
+    """把「3 条路段…」改写为「各条路段…」；无前缀时原样返回（R-13 建议文案用）。"""
+    text = str(caption or "")
+    match = _CAPTION_NUMBER_PREFIX_RE.match(text)
+    if not match:
+        return text
+    replacement = _CAPTION_MEASURE_REWRITE.get(match.group(2), "各")
+    return replacement + text[match.end() :]

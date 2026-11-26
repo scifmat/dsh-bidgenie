@@ -88,6 +88,12 @@ BUSINESS_PATTERNS: tuple[tuple[str, str, str], ...] = (
 count_words = text_lib.count_body_words
 
 
+def caption_like_number(caption: str) -> bool:
+    """R-13：题注去掉 ▼表/▲图 前缀后以「数字+量词」开头（会读成「表3」式编号）。"""
+    body = re.sub(r"^[▼▲][表图]\s*", "", str(caption or ""))
+    return bool(text_lib.caption_number_prefix(body))
+
+
 def markdown_tables(text: str) -> list[dict[str, Any]]:
     """提取 GFM 表格：返回 {caption, line, rows, header}。"""
     lines = text.splitlines()
@@ -311,6 +317,7 @@ def review_a_layer(
             render_manifest = {}
     render_anchors = render_manifest.get("anchors") if isinstance(render_manifest.get("anchors"), Mapping) else {}
     chapter_rows: list[dict[str, Any]] = []
+    pending_chapters: list[dict[str, Any]] = []
     special_rows: list[dict[str, Any]] = []
     table_rows: list[dict[str, Any]] = []
     figure_rows: list[dict[str, Any]] = []
@@ -368,9 +375,43 @@ def review_a_layer(
                     "userAction": str(handling.get("userAction") or ""),
                 }
             )
+        completion = node.get("completion") if isinstance(node.get("completion"), Mapping) else {}
+        completion_status = str(completion.get("status") or "pending")
+        # R-14：写作中途 dry-run 不应把 pending 章节按空文档/字数不足报 blocker；
+        # 这些章节单列 pendingChapters，仅审已完成章节（写完后重跑审查）。
+        pending_chapter = completion_status not in ("done", "skipped")
         if not path.is_file():
+            if pending_chapter:
+                pending_chapters.append(
+                    {"chapterId": chapter_id, "status": completion_status, "title": str(node.get("title") or ""), "filePath": file_path, "wordCount": 0}
+                )
             continue
         text = path.read_text(encoding="utf-8-sig", errors="replace")
+        word_count = count_words(text)
+        word_total += word_count
+        if pending_chapter:
+            pending_chapters.append(
+                {
+                    "chapterId": chapter_id,
+                    "status": completion_status,
+                    "title": str(node.get("title") or ""),
+                    "filePath": file_path,
+                    "wordCount": word_count,
+                }
+            )
+            chapter_rows.append(
+                {
+                    "chapterId": chapter_id,
+                    "filePath": file_path,
+                    "wordCount": word_count,
+                    "wordTarget": target_word,
+                    "ratio": None,
+                    "judgement": "未完成（未审）",
+                    "special": special,
+                    "wordCheck": "skipped",
+                }
+            )
+            continue
         headings = heading_info(text)
         if headings:
             first = headings[0]
@@ -424,8 +465,6 @@ def review_a_layer(
                 evidence=f"正文长度 {len(compact)} 字符 < {min_body}（空/占位文档）",
                 suggestion="按 bg-special-chapters 模板补「要求 + 处理方式 + 请用户补充」" if special else "按 contentRequirements 补写正文",
             )
-        word_count = count_words(text)
-        word_total += word_count
         if special:
             ratio = None
             judgement = "special"
@@ -486,6 +525,16 @@ def review_a_layer(
                 collector.add("script", "table_missing", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"第 {table['line']} 行表格上方缺少「▼表」题注", suggestion="表格上方补独立题注行 `▼表<题名>`（不带编号）")
             elif CAPTION_NUMBERING_RE.match(caption):
                 collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"表题带编号：{caption[:60]}", suggestion="使用 `▼表<题名>`，不带编号（「1包」「2026年」等业务数字开头不算编号）")
+            elif caption_like_number(caption):
+                collector.add(
+                    "script",
+                    "caption_format",
+                    "minor",
+                    chapter_id=chapter_id,
+                    file_path=file_path,
+                    evidence=f"表题以数字+量词开头（读作表号）：{caption[:60]}",
+                    suggestion="改成「各条路段…」「各类…」等概括说法，避免「表3」歧义（R-13）",
+                )
             if not table["header"]:
                 collector.add("script", "table_mismatch", "major", chapter_id=chapter_id, file_path=file_path, evidence=f"第 {table['line']} 行表格无表头", suggestion="补齐可读表头")
         # 图表规划
@@ -533,6 +582,17 @@ def review_a_layer(
                     collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"标记下一行缺少「▲图」题注：{next_line[:60]}", suggestion="标记下一行写独立 `▲图<题名>`（不带编号）")
                 elif CAPTION_NUMBERING_RE.match(next_line):
                     collector.add("script", "caption_format", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence=f"图题带编号：{next_line[:60]}", suggestion="题注不带编号（「1包」「2026年」等业务数字开头不算编号）")
+                elif caption_like_number(next_line):
+                    collector.add(
+                        "script",
+                        "caption_format",
+                        "minor",
+                        chapter_id=chapter_id,
+                        file_path=file_path,
+                        anchor_id=anchor_id,
+                        evidence=f"图题以数字+量词开头（读作编号）：{next_line[:60]}",
+                        suggestion="改成「各…」等概括说法，避免读成「图3」（R-13）",
+                    )
             anchor_meta = render_anchors.get(anchor_id) if isinstance(render_anchors, Mapping) else None
             render_fallback = ""
             if figure_type == "mermaid":
@@ -590,8 +650,8 @@ def review_a_layer(
                 if not sources.is_file():
                     collector.add("script", "source_mismatch", "major", chapter_id=chapter_id, file_path=file_path, anchor_id=anchor_id, evidence="网络图缺少 sources.json 来源记录", suggestion="补来源 URL/许可/检索词")
             figure_rows.append(figure_row)
-    # 总字数
-    if expected_word > 0:
+    # 总字数：有未完成章节时为中间态，不做全包偏差判定（R-14）
+    if expected_word > 0 and not pending_chapters:
         delta = abs(word_total - expected_word) / expected_word
         if delta > 0.20:
             collector.add("script", "total_word_low" if word_total < expected_word else "total_word_high", "blocker", evidence=f"全包实际 {word_total} 字 vs expectedWordCount {expected_word}（偏差 {delta:.1%}）>±20%", suggestion="调整章节字数后重算")
@@ -628,6 +688,8 @@ def review_a_layer(
         "nodes": nodes,
         "leaves": leaves,
         "chapterRows": chapter_rows,
+        "pendingChapters": pending_chapters,
+        "totalWordChecked": bool(expected_word > 0 and not pending_chapters),
         "specialRows": special_rows,
         "tableRows": table_rows,
         "figureRows": figure_rows,
@@ -787,6 +849,15 @@ def render_report(
         judgement = "特殊章节（免字数检查）" if row.get("judgement") == "special" else row.get("judgement")
         lines.append(f"| {row.get('chapterId')} | {row.get('wordCount')} | {row.get('wordTarget')} | {ratio} | {judgement} |")
     lines.append(f"\n全包实际 {result.get('wordTotal')} 字 / expectedWordCount {result.get('expectedWord')}。")
+    pending_rows = result.get("pendingChapters") or []
+    if pending_rows:
+        ids = "、".join(str(item.get("chapterId")) for item in pending_rows[:12])
+        suffix = "…" if len(pending_rows) > 12 else ""
+        lines.append("")
+        lines.append(
+            f"> 未完成章节 **{len(pending_rows)}** 个（{ids}{suffix}）：本次只审已完成章节，"
+            "这些章节不计问题、全包字数不做偏差判定；写完后重跑审查。"
+        )
     special_rows = result.get("specialRows") or []
     if special_rows:
         lines.append("")
@@ -862,6 +933,16 @@ def run_selftest() -> dict[str, Any]:
         if not CAPTION_NUMBERING_RE.match(caption):
             raise AssertionError(f"真正的题注编号未拦截：{caption}")
     checks.append("caption_numbering")
+    # R-13：题注「数字+量词」开头虽不是编号，但会和 ▼表 连读成「表3」，审查记 minor
+    for caption in ("▼表3 条路段设施供货清单与进场计划表", "▲图5 类设施布置示意"):
+        if not caption_like_number(caption):
+            raise AssertionError(f"数字+量词题注未识别：{caption}")
+    for caption in ("▼表1包采购设施规格与预估量对照表", "▼表2026年设施清单", "▼表1.5mm标线参数"):
+        if caption_like_number(caption):
+            raise AssertionError(f"业务数字题注被误判为数字+量词：{caption}")
+    if text_lib.rewrite_caption_number_prefix("3 条路段设施供货清单") != "各条路段设施供货清单":
+        raise AssertionError("数字+量词题注改写不正确")
+    checks.append("caption_number_like")
     # P2-4：技术正文商务/报价混入机检
     business_hits = [bool(re.search(pattern, "价格评审按低价优先法，评标基准价…最高限价 130.86 万元，货款支付分两段 97%")) for pattern, _, _ in BUSINESS_PATTERNS]
     if not all(business_hits):
@@ -1125,11 +1206,15 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         "summary": summary,
         "blockerCount": blocker_count,
         "carryForward": carry_forward_info,
+        "pendingChapters": result.get("pendingChapters") or [],
+        "totalWordChecked": bool(result.get("totalWordChecked")),
         "issueIds": [issue["issueId"] for issue in issues],
         "issues": issues,
         "paths": paths_out,
         "stats": {
             "leafCount": len(result["leaves"]),
+            "pendingChapterCount": len(result.get("pendingChapters") or []),
+            "totalWordChecked": bool(result.get("totalWordChecked")),
             "wordTotal": result["wordTotal"],
             "expectedWordCount": result["expectedWord"],
             "figurePlanned": result["planned"],

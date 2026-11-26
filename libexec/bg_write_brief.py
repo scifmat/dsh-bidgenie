@@ -27,7 +27,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import errors, jsonio, logging as event_log, paths, state as state_lib  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, state as state_lib, text as text_lib  # noqa: E402
 import bg_outline_validate as outline_validate  # noqa: E402
 
 BATCH_DIR = "chapters/_batches"
@@ -205,7 +205,8 @@ def build_batch_payload(
         "writingRules": [
             "每章前两行必须逐字使用 heading.firstLine / heading.metaLine（首行 `#`×level，第二行 BG:CHAPTER）；不要改成 H1 或省略 meta。",
             "加载 bg-writing-style；正文不写跨章引用（如“详见第 3 章”）。",
-            "图表按 figurePlan 生成；table 不写 BG:FIGURE，mermaid/terminal 才写标记。flowchart 节点 6–7、判定 ≤3、回边 ≤1，超限先拆图（仅改 LR/TB 不够）。",
+            "图表按 figurePlan 生成；table 不写 BG:FIGURE，mermaid/terminal 才写标记。flowchart 节点 6–7、判定 ≤3、回边 ≤1，超限先拆图（仅改 LR/TB 不够）；TB 近线性链 7 节点以上/判定 ≤1 容易超高，优先改 LR 或合并到 ≤6。",
+            "图表题注不要以「数字+量词」开头（如「3 条路段…」在 ▼表 后会读成「表3」）；改写为「各条路段…」「各类…」等概括说法。",
             "特殊章节 handling 不为空时按 bg-special-chapters 模板写，不产图/表。",
             "只写本章 md 与 resources 源文件；不改 outline.json，不渲染 png。",
             "正文小节标题最多下探到章节层级+1（末级 level=2 时只用 ###，不要 ####/#####）。",
@@ -268,11 +269,16 @@ def render_batch_markdown(payload: Mapping[str, Any]) -> str:
         if figures:
             lines.append("- 图表计划：")
             for plan in figures:
+                caption = str(plan.get("caption") or "")
+                caption_hint = ""
+                if text_lib.caption_number_prefix(caption):
+                    caption_hint = f"；题注建议：{text_lib.rewrite_caption_number_prefix(caption)}"
                 lines.append(
                     f"  - `{plan.get('anchorId')}` {plan.get('type')}"
                     + (f"/{plan.get('subtype')}" if plan.get("subtype") else "")
-                    + f"：{plan.get('caption') or ''}（{plan.get('purpose') or ''}）"
+                    + f"：{caption}（{plan.get('purpose') or ''}）"
                     + (f"；{plan.get('layoutHint')}" if plan.get("layoutHint") else "")
+                    + caption_hint
                 )
         dep_summaries = (chapter.get("context") or {}).get("dependencySummaries") or {}
         if dep_summaries:
@@ -514,6 +520,17 @@ def run_selftest() -> dict[str, Any]:
     if f"`{heading['firstLine']}`" not in markdown or f"`{heading['metaLine']}`" not in markdown:
         raise AssertionError("任务书未内联可复制的首行/meta 模板")
     checks.append("payload_markdown")
+    # R-13：数字+量词题注在任务书里给改写建议，并写入写作规则
+    number_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    number_payload["chapters"][0]["figurePlan"] = [
+        {"anchorId": "fig-1-1-01", "type": "table", "caption": "3 条路段供货清单", "purpose": "清单"}
+    ]
+    number_markdown = render_batch_markdown(number_payload)
+    if "题注建议：各条路段供货清单" not in number_markdown:
+        raise AssertionError("数字+量词题注未给改写建议")
+    if not any("数字+量词" in str(rule) for rule in number_payload.get("writingRules") or []):
+        raise AssertionError("写作任务书缺少题注数字+量词规则")
+    checks.append("caption_number_hint")
     brief_item = summarize_brief(payload)
     if (
         brief_item.get("batch") != 1
