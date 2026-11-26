@@ -441,11 +441,13 @@ def init_project(
     bidder_id: str | None = None,
     project_name: str = "",
     dry_run: bool = False,
+    allow_new: bool = False,
     lock_timeout: float = jsonio.LOCK_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     """F2：创建项目目录 + project.json（仅键）+ state.json（初始态）+ registry.projects 登记。
 
     幂等（PRD 8.11 / F2.4）：同 bidderId 已有未完成项目，或同 projectName 已存在且未完成 → 复用不重建。
+    ``allow_new=True``（CLI `--new`）时跳过复用，强制新建（用户想重跑同一项目时使用）。
     """
     ws = paths.normalize_workspace(str(workspace))
     workspace_init = init_workspace(ws, lock_timeout=lock_timeout)
@@ -490,7 +492,7 @@ def init_project(
         )
     project_name_value = str(project_name or "").strip()
 
-    existing = _find_active_project(ws, registry, resolved_id, project_name_value)
+    existing = None if allow_new else _find_active_project(ws, registry, resolved_id, project_name_value)
     if existing is not None:
         existing_entry = existing["entry"]
         dir_name = str(existing_entry.get("dirName") or "")
@@ -514,7 +516,10 @@ def init_project(
             skipped=[dir_name],
             dry_run=dry_run,
             workspace_init=workspace_init,
-            warnings=[f"已存在未完成项目（currentStage={existing['stage']}），复用不重建"],
+            warnings=[
+                f"已存在未完成项目（currentStage={existing['stage']}），复用不重建；"
+                "如需重跑同一项目，加 --new 强制新建（旧项目保留，可 T11 abort 或 resume）"
+            ],
         )
 
     if dry_run:
@@ -590,7 +595,7 @@ def init_project(
         registry_file = paths.registry_path(ws)
         with jsonio.FileLock(registry_file, timeout=lock_timeout):
             latest = _read_registry(ws)
-            duplicate = _find_active_project(ws, latest, resolved_id, project_name_value)
+            duplicate = None if allow_new else _find_active_project(ws, latest, resolved_id, project_name_value)
             if duplicate is not None:
                 duplicate_entry = duplicate["entry"]
                 raise _ProjectExists(duplicate_entry, duplicate["state"])
@@ -773,7 +778,16 @@ def run_selftest() -> dict[str, Any]:
         again = init_project(ws)
         if not again.get("alreadyExists") or again.get("dirName") != project["dirName"]:
             raise AssertionError("重复 init-project 不幂等")
+        if not any("--new" in str(item) for item in again.get("warnings") or []):
+            raise AssertionError(f"复用提示未给出 --new 入口：{again.get('warnings')}")
+        # N-07：--new 强制新建（同投标人已有未完成项目时不再复用）
+        new_project = init_project(ws, project_name="自检项目", allow_new=True)
+        if new_project.get("alreadyExists") or new_project.get("dirName") == project.get("dirName"):
+            raise AssertionError(f"--new 未强制新建：{new_project}")
+        if len((jsonio.read_json(paths.registry_path(ws)).get("projects") or [])) != 2:
+            raise AssertionError("--new 未登记新项目")
         checks.append("init_project")
+        checks.append("init_project_new")
         return {
             "ok": True,
             "selftest": {
@@ -851,6 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--workspace", required=True, help="工作区根的绝对路径")
     init.add_argument("--bidder", help="投标人 bidderId（缺省读 user-settings.currentBidderId）")
     init.add_argument("--project-name", dest="project_name", help="项目名称（写入 project.json.projectName）")
+    init.add_argument("--new", action="store_true", help="强制新建项目（不复用同投标人未完成项目）")
     init.add_argument("--dry-run", action="store_true", help="只输出计划，不写任何文件")
 
     init_project_parser = subparsers.add_parser(
@@ -861,6 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_project_parser.add_argument("--workspace", required=True, help="工作区根的绝对路径")
     init_project_parser.add_argument("--bidder", help="投标人 bidderId（缺省读 user-settings.currentBidderId）")
     init_project_parser.add_argument("--project-name", dest="project_name", help="项目名称（写入 project.json.projectName）")
+    init_project_parser.add_argument("--new", action="store_true", help="强制新建项目（不复用同投标人未完成项目）")
     init_project_parser.add_argument("--dry-run", action="store_true", help="只输出计划，不写任何文件")
 
     prune = subparsers.add_parser("prune", help="清理 registry 中目录已不存在的幽灵项目（保留 archive/软删）")
@@ -890,6 +906,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                 bidder_id=bidder,
                 project_name=project_name or "",
                 dry_run=bool(getattr(args, "dry_run", False)),
+                allow_new=bool(getattr(args, "new", False)),
                 lock_timeout=lock_timeout,
             )
         return init_workspace(
@@ -903,6 +920,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             bidder_id=getattr(args, "bidder", None),
             project_name=getattr(args, "project_name", "") or "",
             dry_run=bool(getattr(args, "dry_run", False)),
+            allow_new=bool(getattr(args, "new", False)),
             lock_timeout=lock_timeout,
         )
     if args.command == "prune":

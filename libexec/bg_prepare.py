@@ -45,7 +45,7 @@ PACKAGE_DIR_RE = re.compile(r"^package-(\d+)-(\d{14})$")
 WORD_COUNT_TIERS = (50000, 100000, 150000)
 DEFAULT_FIGURE_QUOTA = {"table": 5, "mermaid": 5, "network": 0, "terminal": 5}
 FIGURE_KEYS = ("table", "mermaid", "network", "terminal")
-VALUE_SOURCE_VALUES = ("user", "agent-default", "extracted")
+VALUE_SOURCE_VALUES = ("user", "settings", "agent-default", "extracted")
 REQUIRED_PACKAGE_DIRS = (
     "chapters",
     "chapters/_results",
@@ -1147,7 +1147,7 @@ def build_auto_fill(
         "exportStyleProfile": style,
     }
     value_source = {
-        "expectedWordCount": "agent-default",
+        "expectedWordCount": "settings",
         "personnelPlan": personnel["valueSource"],
         "equipmentPlan": equipment["valueSource"],
         "schedulePlan": "extracted" if schedule_derived else "agent-default",
@@ -1320,7 +1320,7 @@ def build_package_meta(
     elif auto_values.get("expectedWordCount") is not None:
         expected_word_count = int(auto_values["expectedWordCount"])
         value_source["expectedWordCount"] = str(auto_sources.get("expectedWordCount") or "agent-default")
-        assumptions.append("auto 模式：字数采用 user-settings 默认档（agent-default）")
+        assumptions.append("auto 模式：字数采用 user-settings 默认档（settings）")
     elif required is not None:
         expected_word_count = max(required, default_tier)
         value_source["expectedWordCount"] = "extracted"
@@ -1329,12 +1329,13 @@ def build_package_meta(
         )
     else:
         expected_word_count = default_tier
-        assumptions.append(f"字数档：提取稿未识别字数要求，采用 user-settings 默认 {default_tier} 字（agent-default）")
+        value_source["expectedWordCount"] = "settings"
+        assumptions.append(f"字数档：提取稿未识别字数要求，采用 user-settings 默认 {default_tier} 字（settings）")
     # F-02（2026-11-25 轻量冒烟）：30000/60000 等非面板档位来自 user-settings 时，
     # 必须在 prepare 汇报与 package-meta 里显式标注，避免“字数档被静默改写”无从追溯。
     known_word_tiers = (50000, 100000, 150000)
     word_tier_known = expected_word_count in known_word_tiers
-    word_tier_source = str(value_source.get("expectedWordCount") or "agent-default")
+    word_tier_source = str(value_source.get("expectedWordCount") or "settings")
     if not word_tier_known and word_tier_source != "user":
         assumptions.append(
             f"字数档：{expected_word_count} 为自定义档（非面板 5/10/15 万档位），来源 {word_tier_source}；请确认篇幅预期"
@@ -2772,6 +2773,8 @@ def run_selftest() -> dict[str, Any]:
         custom_tier = (custom_meta.get("extensions") or {}).get("wordCountTier") or {}
         if custom_meta.get("expectedWordCount") != 30000 or custom_tier.get("knownTier") is not False or custom_tier.get("custom") is not True:
             raise AssertionError(f"自定义字数档未标注：word={custom_meta.get('expectedWordCount')} tier={custom_tier}")
+        if custom_tier.get("source") != "settings" or (custom_meta.get("valueSource") or {}).get("expectedWordCount") != "settings":
+            raise AssertionError(f"字数来源标签应为 settings：{custom_tier} / {(custom_meta.get('valueSource') or {}).get('expectedWordCount')}")
         if not any("自定义档" in str(item) for item in (custom_meta.get("extensions") or {}).get("assumptions") or []):
             raise AssertionError(f"自定义字数档未写入 assumptions：{(custom_meta.get('extensions') or {}).get('assumptions')}")
         checks.append("custom_word_tier")

@@ -77,7 +77,7 @@ PACKAGE_VALUE_SOURCE_KEYS: tuple[str, ...] = (
     "network",
     "terminal",
 )
-PACKAGE_VALUE_SOURCE_VALUES: tuple[str, ...] = ("user", "agent-default", "extracted")
+PACKAGE_VALUE_SOURCE_VALUES: tuple[str, ...] = ("user", "settings", "agent-default", "extracted")
 PACKAGE_META_REL = "package-meta.json"
 #: 图表类型（与 bg_outline_validate.FIGURE_TYPES 同序；T4 配额对账用）
 FIGURE_TYPES: tuple[str, ...] = ("table", "mermaid", "network", "terminal")

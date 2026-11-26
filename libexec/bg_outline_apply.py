@@ -681,6 +681,13 @@ ITEM_SCORE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*分")
 # P2-3：评分标准常用 ①②③ 分项；旧实现只拆 `1.`/`1、`，导致每个评分因素只有 1 个泛化末级。
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 CIRCLED_ITEM_RE = re.compile(rf"([{CIRCLED_NUMBERS}])\s*(.*?)(?=(?:[{CIRCLED_NUMBERS}])|$)")
+# N-01（2026-11-26 第二轮冒烟）：评分细则常分「一、评审内容」与「二、评审标准」两段。
+# 只有「评审内容」的 ①②③ 是可写作的章节；「评审标准」的符合度/完整性/合理性/针对性/科学性
+# 是打分维度，不能拆成末级章节。旧实现把两段一起拆，23 个末级里约 15 个不可直接写作。
+REVIEW_STANDARD_RE = re.compile(
+    r"(?:[一二三四五六七八九十]+[、.．]|（[一二三四五六七八九十]+）|\d{1,2}[.、])?\s*评审标准\s*[:：]"
+)
+REVIEW_CONTENT_MARKER = "评审内容"
 # P2-1：评分表末尾「合计/小计/总分」不是评审因素，不能生成一级章节。
 TOTAL_FACTORS = {"合计", "小计", "总分", "分值合计", "评分合计", "评审因素", "评分因素"}
 # P1-4：评分标准命中“需投标人提供证明材料”类关键词时，骨架自动拆出特殊章节，
@@ -774,11 +781,30 @@ def _itemize_criteria(clause: str, pattern: re.Pattern[str]) -> list[dict[str, A
     return items
 
 
+def _strip_review_standard_section(clause: str) -> tuple[str, int]:
+    """剥离「二、评审标准」段，返回 (评审内容段, 被跳过的标准维度数)。
+
+    仅当「评审标准」之前确实有「评审内容」或至少 2 个 ①②③ 时才切；否则保持原文，
+    避免把名为「评审标准」的独立评分因素误删。
+    """
+    text = str(clause or "")
+    match = REVIEW_STANDARD_RE.search(text)
+    if match is None:
+        return text, 0
+    head = text[: match.start()]
+    if REVIEW_CONTENT_MARKER not in head and len(re.findall(f"[{CIRCLED_NUMBERS}]", head)) < 2:
+        return text, 0
+    removed = text[match.start() :]
+    skipped = len(re.findall(f"[{CIRCLED_NUMBERS}]", removed)) or 1
+    return head, skipped
+
+
 def _split_criteria_items(clause: str) -> list[dict[str, Any]]:
-    """从评分标准里拆分项：优先 ①②③，其次 1./1、；保留分项内「X 分」。"""
-    items = _itemize_criteria(clause, CIRCLED_ITEM_RE)
+    """从评分标准里拆分项：优先 ①②③，其次 1./1、；只拆「评审内容」，不拆「评审标准」维度。"""
+    content, _skipped = _strip_review_standard_section(clause)
+    items = _itemize_criteria(content, CIRCLED_ITEM_RE)
     if not items:
-        items = _itemize_criteria(clause, NUMBERED_ITEM_RE)
+        items = _itemize_criteria(content, NUMBERED_ITEM_RE)
     return items
 
 
@@ -833,6 +859,13 @@ def _clean_title(text: str) -> str:
     - 末尾不留下「的/等/顿号」这类悬空字符。
     """
     title = re.sub(r"\s+", " ", str(text or "")).strip(" 。；;，,")
+    # N-01：去掉评分细则残留「。二、评审标准：」「评审标准：…」等半句/标点
+    title = re.sub(
+        r"[。；;，,]?\s*(?:[一二三四五六七八九十]+[、.．]|（[一二三四五六七八九十]+）|\d{1,2}[.、])?\s*评审标准\s*[:：]?.*$",
+        "",
+        title,
+    )
+    title = re.sub(r"[。；;，,、]\s*$", "", title).strip()
     title = re.sub(r"（[^）]*）", "", title).strip()
     title = re.sub(r"^对现有", "现有", title)
     for source, target in (("情况进行分析", "分析"), ("现状情况", "现状"), ("进行分析", "分析")):
@@ -1036,7 +1069,10 @@ def build_outline_draft(
 
     parent_nodes: list[dict[str, Any]] = []
     leaf_specs: list[dict[str, Any]] = []
+    standard_skipped = 0
     for crit_index, criterion in enumerate(criteria, start=1):
+        _content_clause, skipped_standard_items = _strip_review_standard_section(str(criterion.get("clause") or ""))
+        standard_skipped += skipped_standard_items
         items = _split_criteria_items(str(criterion.get("clause") or ""))
         items = _merge_items_to_cap(items, per_parent_cap)
         # 分项分值缺失时按“评分因素总分 / 分项数”等分
@@ -1222,6 +1258,7 @@ def build_outline_draft(
             "generatedAt": paths.iso_now(),
             "needsAgentReview": True,
             "titleSource": "skeleton",
+            "standardSectionSkipped": standard_skipped,
             "figurePrefill": {"table": table_quota, "mermaid": mermaid_quota, "terminal": terminal_quota},
             "note": "骨架按技术评分因素与分项生成；评分标准含检测报告/偏离表/说明书/承诺函/样品等材料要求时已自动生成特殊章节 handling。写作前请 Agent 按 06/09 补充事实、重难点，并检查标题/分项是否贴合本包。",
         },
@@ -1238,12 +1275,13 @@ def init_outline_draft(
     package_id: str | None,
     force: bool = False,
     with_terminal: bool = False,
+    preview: bool = False,
 ) -> dict[str, Any]:
     workspace_path, project_dir_path, target, package_dir, package_meta, state, project_doc = outline_validate.resolve_package_context(
         workspace, project_dir, package_id
     )
     target_draft = draft_path(package_dir)
-    if target_draft.exists() and not force:
+    if target_draft.exists() and not force and not preview:
         raise errors.BgError(
             errors.E_GUARD_FAILED,
             f"大纲草稿已存在：{paths.rel_posix(package_dir, target_draft)}",
@@ -1257,9 +1295,30 @@ def init_outline_draft(
         project=project_doc,
         with_terminal=with_terminal,
     )
+    validation = outline_validate.validate_document(draft, package_meta, require_layout=False)
+    leaf_count = validation.get("summary", {}).get("leafCount") or sum(
+        1 for _node in outline_validate.iter_preorder(draft.get("chapters") or []) if not (isinstance(_node.get("children"), list) and _node.get("children"))
+    )
+    standard_skipped = int((draft.get("extensions") or {}).get("standardSectionSkipped") or 0)
+    if preview:
+        return {
+            "ok": True,
+            "command": "outline_init_draft",
+            "preview": True,
+            "projectId": project_doc.get("projectId"),
+            "packageId": target,
+            "draftPath": None,
+            "wouldWritePath": paths.rel_posix(project_dir_path, target_draft),
+            "criterionCount": len(draft.get("criterionIndex") or []),
+            "parentCount": len(draft.get("chapters") or []),
+            "leafCount": leaf_count,
+            "standardSectionSkipped": standard_skipped,
+            "note": f"预览：将生成 {len(draft.get('chapters') or [])} 个一级 / {leaf_count} 个末级，"
+            f"其中 {standard_skipped} 个「评审标准」维度已自动跳过；确认后去掉 --preview 落盘。",
+            "validation": validation,
+        }
     outline_dir(package_dir, create=True)
     jsonio.write_json_atomic(target_draft, draft)
-    validation = outline_validate.validate_document(draft, package_meta, require_layout=False)
     event_log_event(
         workspace_path,
         "outline.draft_initialized",
@@ -1268,7 +1327,8 @@ def init_outline_draft(
         detail={
             "criterionCount": len(draft.get("criterionIndex") or []),
             "parentCount": len(draft.get("chapters") or []),
-            "leafCount": sum(1 for _node in outline_validate.iter_preorder(draft.get("chapters") or []) if not (isinstance(_node.get("children"), list) and _node.get("children"))),
+            "leafCount": leaf_count,
+            "standardSectionSkipped": standard_skipped,
             "valid": bool(validation.get("valid")),
         },
     )
@@ -1280,9 +1340,8 @@ def init_outline_draft(
         "draftPath": paths.rel_posix(project_dir_path, target_draft),
         "criterionCount": len(draft.get("criterionIndex") or []),
         "parentCount": len(draft.get("chapters") or []),
-        "leafCount": validation.get("summary", {}).get("leafCount") or sum(
-            1 for _node in outline_validate.iter_preorder(draft.get("chapters") or []) if not (isinstance(_node.get("children"), list) and _node.get("children"))
-        ),
+        "leafCount": leaf_count,
+        "standardSectionSkipped": standard_skipped,
         "validation": validation,
         "note": draft["extensions"]["note"],
         "next": "Agent 编辑 outline.draft.json（补充事实/重难点/特殊章节）后，运行 --strict 校验 → --materialize → T4",
@@ -1311,6 +1370,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", help="指定草稿文件（缺省 <packageDir>/chapters/_outline/outline.draft.json；包根旧布局文件在缺省路径下会自动迁移）")
     parser.add_argument("--init-draft", action="store_true", help="P1-4：从 07 技术评分标准 + package-meta 生成 outline.draft.json 骨架")
     parser.add_argument("--force-draft", action="store_true", help="--init-draft 时覆盖已有 outline.draft.json")
+    parser.add_argument("--preview", action="store_true", help="--init-draft 时只预览父/末级数量与跳过的评审标准维度，不写草稿")
     parser.add_argument("--with-terminal", action="store_true", help="--init-draft 时按 terminal 配额预填终端图（默认不预填）")
     parser.add_argument("--materialize", action="store_true", help="按 outline 创建 chapters 文件夹/末级 .md（已存在不覆盖，除非 --force）")
     parser.add_argument("--force", action="store_true", help="materialize 时覆盖已存在章节文件")
@@ -1354,6 +1414,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             package_id=args.package,
             force=bool(getattr(args, "force_draft", False)),
             with_terminal=bool(getattr(args, "with_terminal", False)),
+            preview=bool(getattr(args, "preview", False)),
         )
     if getattr(args, "cleanup", False):
         return cleanup_outline(workspace=workspace, project_dir=project_dir, package_id=args.package, keep=max(1, int(getattr(args, "keep", 5) or 5)))
@@ -1614,6 +1675,21 @@ def run_selftest() -> dict[str, Any]:
         ):
             raise AssertionError("init-draft 叶子缺少 extensions.titleSource=skeleton")
         checks.append("init_draft_figure_caption")
+        # N-01：只拆「评审内容」①②③，不把「评审标准」的符合度/完整性/合理性等打分维度
+        # 拆成末级章节；标题末尾残留「。二、评审标准：」要清掉。
+        n01_clause = (
+            "一、评审内容：包括以下评审内容：①供货方案（4 分）；②安装方案（4 分）；③调试方案（4 分）。"
+            "二、评审标准：①符合度：是否进行充分响应；②完整性：方案满足采购文件需求；"
+            "③合理性：符合项目具体情况；④针对性：针对性的方案或建议；⑤科学性：贴合采购人实际情况。"
+        )
+        n01_items = _split_criteria_items(n01_clause)
+        if [item["title"] for item in n01_items] != ["供货方案", "安装方案", "调试方案"]:
+            raise AssertionError(f"N-01 评审内容/评审标准未正确拆分：{n01_items}")
+        if _strip_review_standard_section(n01_clause)[1] != 5:
+            raise AssertionError("N-01 未统计跳过的评审标准维度")
+        if _clean_title("调试方案、验收交付方案。二、评审标准：") != "调试方案、验收交付方案":
+            raise AssertionError(f"N-01 标题残句未清洗：{_clean_title('调试方案、验收交付方案。二、评审标准：')!r}")
+        checks.append("init_draft_review_standard_stripped")
         # N7：真实 07 常用「…评价：1. …；2. …」编号列表，首个分项不能被漏掉；
         # 同时覆盖「1.应急保障分类 2.…」仅空格分隔、以及「。2.」句号后继续编号的情况。
         stage3_07 = (

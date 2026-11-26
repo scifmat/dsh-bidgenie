@@ -147,7 +147,10 @@ def build_batch_payload(
             if str(item.get("type") or "") == "mermaid":
                 # F-06：纵向 flowchart 节点过多会渲染成超高图（高宽比失败）；
                 # 在任务书阶段就给出可执行约束，而不是等 bg_render 失败后返工。
-                item["layoutHint"] = "flowchart 节点 >=8 时用 `flowchart LR` 或拆成两张图；避免纵向 >6 层（高宽比过大）"
+                item["layoutHint"] = (
+                    "flowchart 节点控制在 6–7（判定 ≤3、回边 ≤1、箭头文字 ≤6 字、节点标签 ≤12 字）；"
+                    "超过 7 个节点先拆成 2 张图，不要只靠改 LR/TB 硬塞（渲染前 bg_render 会做静态预判）"
+                )
             figure_plan.append(item)
         chapters.append(
             {
@@ -202,7 +205,7 @@ def build_batch_payload(
         "writingRules": [
             "每章前两行必须逐字使用 heading.firstLine / heading.metaLine（首行 `#`×level，第二行 BG:CHAPTER）；不要改成 H1 或省略 meta。",
             "加载 bg-writing-style；正文不写跨章引用（如“详见第 3 章”）。",
-            "图表按 figurePlan 生成；table 不写 BG:FIGURE，mermaid/terminal 才写标记。flowchart 节点 >=8 时用 `flowchart LR` 或拆图（避免纵向超高）。",
+            "图表按 figurePlan 生成；table 不写 BG:FIGURE，mermaid/terminal 才写标记。flowchart 节点 6–7、判定 ≤3、回边 ≤1，超限先拆图（仅改 LR/TB 不够）。",
             "特殊章节 handling 不为空时按 bg-special-chapters 模板写，不产图/表。",
             "只写本章 md 与 resources 源文件；不改 outline.json，不渲染 png。",
             "正文小节标题最多下探到章节层级+1（末级 level=2 时只用 ###，不要 ####/#####）。",

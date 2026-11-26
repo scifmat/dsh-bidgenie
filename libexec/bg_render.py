@@ -617,6 +617,63 @@ def mermaid_layout_check(
     }
 
 
+def mermaid_static_preflight(text: str) -> dict[str, Any]:
+    """N-02：渲染前按 mermaid 源静态预判节点/判定/回边/标签，先给可执行改写建议。
+
+    不替代浏览器真实布局；目的是在渲染前拦住明显会超宽/超高/字太小的图，
+    避免 Agent 每轮 20–40 秒试错。
+    """
+    source = str(text or "")
+    first = next((line.strip() for line in source.splitlines() if line.strip() and not line.strip().startswith("%%")), "")
+    direction_match = re.match(r"^(?:flowchart|graph)\s+(LR|RL|TB|BT|TD)\b", first, re.IGNORECASE)
+    direction = direction_match.group(1).upper() if direction_match else ""
+    ids = set(re.findall(r"\b([A-Za-z_][\w-]*)\s*(?=[\[\(\{])", source))
+    for left, right in re.findall(r"\b([A-Za-z_][\w-]*)\s*(?:-->|---|==>|-\.->)\s*(?:\|[^|\n]*\|\s*)?([A-Za-z_][\w-]*)", source):
+        ids.add(left)
+        ids.add(right)
+    labels = re.findall(r"[\[\(\{]([^\]\)\}\n]+)[\]\)\}]", source)
+    max_label = max((len(label.strip().strip('"\'')) for label in labels), default=0)
+    edge_pairs = re.findall(r"\b([A-Za-z_][\w-]*)\s*(?:-->|---|==>|-\.->)\s*(?:\|[^|\n]*\|\s*)?([A-Za-z_][\w-]*)", source)
+    first_seen: dict[str, int] = {}
+    for index, (left, right) in enumerate(edge_pairs):
+        first_seen.setdefault(left, index * 2)
+        first_seen.setdefault(right, index * 2 + 1)
+    return_edges = sum(1 for left, right in edge_pairs if first_seen.get(right, 0) < first_seen.get(left, 0))
+    node_count = len(ids)
+    decision_count = source.count("{")
+    warnings: list[dict[str, str]] = []
+    fixes: list[str] = []
+    if node_count > 10:
+        warnings.append({"code": "preflight_too_many_nodes", "severity": "info", "message": f"源含 {node_count} 个节点（建议 6–7；>10 易超高/超宽）"})
+        fixes.append("节点 ≤7 或拆 2 张")
+    if decision_count > 4:
+        warnings.append({"code": "preflight_too_many_decisions", "severity": "info", "message": f"判定节点 {decision_count} 个（建议 ≤3）"})
+        fixes.append("判定 ≤3")
+    if return_edges >= 3:
+        warnings.append({"code": "preflight_return_edges", "severity": "info", "message": f"回边 {return_edges} 条（建议 ≤1，回边多会迫使布局拉宽/拉高）"})
+        fixes.append("回边 ≤1")
+    if max_label > 24:
+        warnings.append({"code": "preflight_long_label", "severity": "info", "message": f"最长标签 {max_label} 字（建议 ≤12 字，长标签用 <br/> 折行）"})
+        fixes.append("标签 ≤12 字")
+    if direction in ("LR", "RL") and node_count >= 12:
+        warnings.append({"code": "preflight_long_lr_chain", "severity": "info", "message": f"{direction} 长链 {node_count} 节点，自动布局可能改 TB 后产出过扁图；先拆图或减节点"})
+        fixes.append("LR 长链先拆图")
+    suggestion = ""
+    if warnings:
+        suggestion = (
+            f"渲染前建议：{'；'.join(fixes)}（当前 {node_count} 节点/{decision_count} 判定/{return_edges} 回边/最长标签 {max_label} 字）"
+        )
+    return {
+        "direction": direction,
+        "nodeCount": node_count,
+        "decisionCount": decision_count,
+        "returnEdges": return_edges,
+        "maxLabelChars": max_label,
+        "warnings": warnings,
+        "rewriteSuggestion": suggestion,
+    }
+
+
 def terminal_layout_check(metrics: Mapping[str, Any]) -> dict[str, Any]:
     """终端图机检：行数/列宽/折行；折行本身可接受，但行数过多要提示拆图。"""
     warnings: list[dict[str, Any]] = []
@@ -896,6 +953,7 @@ def render_resources(
     skipped: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    preflight_warnings: list[dict[str, Any]] = []
     temp_residues: list[dict[str, str]] = []
     marker_checks = {"required": 0, "found": 0, "missing": 0, "tableSkipped": 0}
     changed = False
@@ -982,6 +1040,15 @@ def render_resources(
             if not extracted_marker:
                 warnings.append({"anchorId": anchor_id, "code": "figure_marker_missing", "message": "源码从 md 代码块提取，但缺少插入标记"})
         source_sha = sha256_file(source_path)
+        static_preflight: dict[str, Any] | None = None
+        if figure_type == "mermaid":
+            try:
+                static_preflight = mermaid_static_preflight(source_path.read_text(encoding="utf-8"))
+            except OSError:
+                static_preflight = None
+            for preflight_warning in (static_preflight or {}).get("warnings") or []:
+                # 只进 preflightWarnings，不混入 review 读取的 warnings（避免已知可渲染的图被记 minor）
+                preflight_warnings.append({"anchorId": anchor_id, **preflight_warning})
         cached = manifest["anchors"].get(anchor_id) if isinstance(manifest["anchors"], Mapping) else None
         current_profile = {
             "version": RENDER_PROFILE_VERSION,
@@ -1074,8 +1141,19 @@ def render_resources(
             except (RenderFallback, subprocess.TimeoutExpired, OSError) as exc:
                 fallback_reason = str(exc)[:300]
                 if fallback != "pillow":
-                    failed.append(item_result(plan, node, "failed", reason=fallback_reason))
-                    warnings.append({"anchorId": anchor_id, "code": "render_failed", "message": fallback_reason})
+                    preflight_suggestion = str((static_preflight or {}).get("rewriteSuggestion") or "")
+                    fail_reason = fallback_reason + (f"；{preflight_suggestion}" if preflight_suggestion else "")
+                    failed.append(
+                        item_result(
+                            plan,
+                            node,
+                            "failed",
+                            reason=fail_reason,
+                            layoutPreflight=static_preflight,
+                            rewriteSuggestion=preflight_suggestion,
+                        )
+                    )
+                    warnings.append({"anchorId": anchor_id, "code": "render_failed", "message": fail_reason})
                     continue
                 render_meta = render_placeholder_png(
                     str(plan.get("caption") or anchor_id),
@@ -1138,7 +1216,19 @@ def render_resources(
                             )
                     if invalid_layout.get("warnings"):
                         invalid_reason += "；" + str(invalid_layout["warnings"][0].get("message") or "")
-            failed.append(item_result(plan, node, "failed", reason=invalid_reason))
+            preflight_suggestion = str((static_preflight or {}).get("rewriteSuggestion") or "")
+            if preflight_suggestion:
+                invalid_reason += "；" + preflight_suggestion
+            failed.append(
+                item_result(
+                    plan,
+                    node,
+                    "failed",
+                    reason=invalid_reason,
+                    layoutPreflight=static_preflight,
+                    rewriteSuggestion=preflight_suggestion,
+                )
+            )
             warnings.append({"anchorId": anchor_id, "code": "png_invalid", "message": invalid_reason})
             continue
         layout: dict[str, Any] | None = None
@@ -1185,6 +1275,8 @@ def render_resources(
                 layout.setdefault("warnings", []).append(
                     {"code": "figure_subtype_mismatch", "severity": "major", "message": mismatch}
                 )
+        if layout is not None and static_preflight:
+            layout["staticPreflight"] = static_preflight
         if layout:
             for layout_warning in layout.get("warnings") or []:
                 warnings.append(
@@ -1220,6 +1312,7 @@ def render_resources(
             "physicalWidthCm": validation.get("physicalWidthCm"),
             "physicalHeightCm": validation.get("physicalHeightCm"),
             "layout": layout or {},
+            "layoutPreflight": static_preflight or {},
             "renderProfile": current_profile,
         }
         changed = True
@@ -1239,6 +1332,7 @@ def render_resources(
             physicalWidthCm=validation.get("physicalWidthCm"),
             physicalHeightCm=validation.get("physicalHeightCm"),
             layout=layout or {},
+            layoutPreflight=static_preflight or {},
         )
         if fallback_reason:
             result["fallbackReason"] = fallback_reason
@@ -1305,6 +1399,7 @@ def render_resources(
         "rendered": rendered,
         "skipped": skipped,
         "failed": failed,
+        "preflightWarnings": preflight_warnings,
         "warnings": warnings,
         "manifestPath": rel(project_dir_path, manifest_path),
         "manifestUpdated": changed,
@@ -1485,6 +1580,26 @@ def run_selftest() -> dict[str, Any]:
     if subtype_mismatch_message("\ufeffflowchart TB\nA-->B", "flowchart"):
         raise AssertionError("BOM 触发 figure_subtype_mismatch 误报")
     checks.append("bom_subtype")
+    # N-02：渲染前静态预判（节点/判定/回边/长标签）要能给出可执行建议
+    preflight_source = (
+        "flowchart LR\n"
+        "  A[开始节点] --> B{判定一}\n  B -->|通过| C[处理步骤一]\n  C --> D{判定二}\n"
+        "  D -->|通过| E[处理步骤二]\n  E --> F{判定三}\n  F -->|通过| G[处理步骤三]\n"
+        "  G --> H{判定四}\n  H -->|通过| I[处理步骤四]\n  I --> J[处理步骤五]\n  J --> K[处理步骤六]\n  K --> L[结束节点]\n"
+        "  L --> A\n  L --> C\n"
+    )
+    preflight = mermaid_static_preflight(preflight_source)
+    preflight_codes = {item["code"] for item in preflight.get("warnings") or []}
+    if (
+        preflight.get("nodeCount") != 12
+        or preflight.get("decisionCount") != 4
+        or preflight.get("returnEdges") < 1
+        or "preflight_too_many_nodes" not in preflight_codes
+        or "preflight_long_lr_chain" not in preflight_codes
+        or not preflight.get("rewriteSuggestion")
+    ):
+        raise AssertionError(f"mermaid 静态预判不正确：{preflight}")
+    checks.append("mermaid_static_preflight")
     tmp = Path(tempfile.mkdtemp(prefix="bidgenie-render-selftest-"))
     try:
         workspace, project_dir, package_dir, outline = _build_selftest_project(tmp)

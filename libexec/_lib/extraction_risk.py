@@ -171,10 +171,13 @@ def detect_fallback_review_risks(project_dir: str | Path) -> list[dict[str, Any]
                     entry[key].append(item)
     risks: list[dict[str, Any]] = []
     for entry in grouped.values():
-        entry["fields"] = sorted({str(item) for item in entry.get("fields") or [] if str(item)})
         entry["pages"] = sorted({int(item) for item in entry.get("pages") or [] if isinstance(item, int)})
         entry["sources"] = [item for item in entry.get("sources") or [] if item]
-        entry["excerpts"] = [item for item in entry.get("excerpts") or [] if item][:5]
+        entry["excerpts"] = [item for item in entry.get("excerpts") or [] if item][:10]
+        # N-06：fields 必须与展示给用户的 excerpts 对得上；旧实现取所有命中行的并集，
+        # excerpts 只保留前 5 条时会出现「fields 有、摘录里看不到」的误读。
+        visible = " ".join(entry["excerpts"])
+        entry["fields"] = sorted({field for field in CRITICAL_FIELDS if field in visible})
         risks.append(entry)
         if len(risks) >= MAX_RISKS:
             break

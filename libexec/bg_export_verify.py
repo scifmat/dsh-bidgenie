@@ -442,6 +442,25 @@ def verify_docx(
     except Exception:  # noqa: BLE001
         toc_present = False
     checks["tocFieldPresent"] = toc_present
+    page_break_after_toc = False
+    if toc_present:
+        from docx.oxml.ns import qn as _qn
+
+        toc_index = None
+        for index, paragraph in enumerate(document.paragraphs):
+            if any("TOC" in (node.text or "").upper() for node in paragraph._p.xpath(".//w:instrText")):
+                toc_index = index
+                break
+        if toc_index is not None:
+            for paragraph in document.paragraphs[toc_index + 1 :]:
+                if any(br.get(_qn("w:type")) == "page" for br in paragraph._p.xpath(".//w:br")):
+                    page_break_after_toc = True
+                    break
+                if paragraph.text.strip():
+                    break
+    checks["pageBreakAfterToc"] = page_break_after_toc
+    if toc_present and not page_break_after_toc:
+        warnings.append("tech docx 目录后没有分页符；正文可能紧接目录，建议重新导出（当前版本已默认插入分页符）")
     # tech 模式允许 TOC 域（--with-toc）；缺 TOC 时已在上面记 warning，不视为失败。
     # keyinfo/overview 仍在各自分支禁止 TOC（见 mode in ("keyinfo","overview") 分支）。
 

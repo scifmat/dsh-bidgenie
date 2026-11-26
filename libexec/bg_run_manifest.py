@@ -639,6 +639,15 @@ def run_selftest() -> dict[str, Any]:
         ):
             raise AssertionError(f"_latest.json（finalize）不正确：{pointer_finalize}")
         checks.append("single_run_id")
+        # N-04：--brief 必须去掉 plugin.files/eventFiles/envCheck.items 等大明细
+        brief = brief_run_result(finalized)
+        if (
+            "files" in (brief.get("manifest", {}).get("plugin") or {})
+            or "eventFiles" in (brief.get("manifest") or {})
+            or len(json.dumps(brief, ensure_ascii=False)) >= len(json.dumps(finalized, ensure_ascii=False))
+        ):
+            raise AssertionError(f"--brief 未折叠大明细：keys={sorted((brief.get('manifest') or {}))}")
+        checks.append("brief_output")
         checks.append("latest_pointer_finalize")
         # 再次记录：仍复用同一 runId，快照文件名可区分（不同 ts14）
         time.sleep(1.05)
@@ -697,6 +706,57 @@ def run_selftest() -> dict[str, Any]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def brief_run_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """N-04：--brief 只回运行标识/产物路径/摘要，不带 plugin.files 等十万字节明细。"""
+    keys = (
+        "ok",
+        "command",
+        "runId",
+        "runIdSource",
+        "manifestPath",
+        "runManifestPath",
+        "markdownPath",
+        "snapshotPath",
+        "latestPath",
+        "staleLockRemoved",
+        "versionDrift",
+        "warning",
+        "exitCode",
+    )
+    brief = {key: result.get(key) for key in keys if key in result}
+    brief["brief"] = True
+    manifest = result.get("manifest")
+    if isinstance(manifest, Mapping):
+        plugin = manifest.get("plugin") if isinstance(manifest.get("plugin"), Mapping) else {}
+        brief["summary"] = {
+            "projectId": manifest.get("projectId"),
+            "projectDir": manifest.get("projectDir"),
+            "runId": manifest.get("runId"),
+            "docxCount": len(manifest.get("docx") or []),
+            "eventFileCount": len(manifest.get("eventFiles") or []),
+            "pluginFileCount": plugin.get("fileCount"),
+            "pluginRootHash": plugin.get("rootHash"),
+        }
+        brief["manifest"] = {
+            key: manifest.get(key)
+            for key in (
+                "schemaVersion",
+                "runId",
+                "generatedAt",
+                "projectId",
+                "projectDir",
+                "writingPackages",
+                "state",
+                "hostVersion",
+                "pluginHash",
+                "scriptsHash",
+                "envHash",
+            )
+        }
+        brief["manifest"]["plugin"] = {"fileCount": plugin.get("fileCount"), "rootHash": plugin.get("rootHash")}
+    return brief
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = errors.CliParser(prog="bg_run_manifest.py", description="生成验收运行记录（只读）")
     errors.add_common_args(parser)
@@ -710,7 +770,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.selftest:
         result = run_selftest()
-        errors.emit(result, bool(getattr(args, "json", False)))
+        errors.emit(result, bool(getattr(args, "json", False)), bool(getattr(args, "brief", False)))
         return 0
     if not args.workspace:
         raise errors.BgError(errors.E_USAGE, "缺少 --workspace", hint="需要工作区")
@@ -718,7 +778,9 @@ def main(argv: list[str] | None = None) -> int:
         workspace = Path(args.workspace).expanduser().resolve()
         project_dir = state_lib.resolve_project_context(args.project, workspace)[1] if args.project else None
         result = start_run(workspace=workspace, project_dir=project_dir)
-        errors.emit(result, bool(getattr(args, "json", False)))
+        if args.brief:
+            result = brief_run_result(result)
+        errors.emit(result, bool(getattr(args, "json", False)), bool(getattr(args, "brief", False)))
         return 0
     if not args.project:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="生成 manifest 需要项目")
@@ -730,12 +792,16 @@ def main(argv: list[str] | None = None) -> int:
             start_run_id = str((start_doc or {}).get("runId") or "")
             out_path = run_manifests_dir(workspace) / (f"{start_run_id}.json" if start_run_id else f"RUN-{paths.timestamp14()}.json")
         result = finalize_run(workspace=workspace, project_dir=project_dir, out_path=out_path.resolve())
-        errors.emit(result, bool(getattr(args, "json", False)))
+        if args.brief:
+            result = brief_run_result(result)
+        errors.emit(result, bool(getattr(args, "json", False)), bool(getattr(args, "brief", False)))
         return int(result.get("exitCode") or 0)
     # 记录导出步骤（P1-6）：复用 start 的 runId，产物写 <runId>.snapshot-<ts>.json，不新造 runId
     out_path = Path(args.out).expanduser() if args.out else None
     result = record_snapshot(workspace=workspace, project_dir=project_dir, out_path=out_path)
-    errors.emit(result, bool(getattr(args, "json", False)))
+    if args.brief:
+        result = brief_run_result(result)
+    errors.emit(result, bool(getattr(args, "json", False)), bool(getattr(args, "brief", False)))
     return 0
 
 

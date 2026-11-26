@@ -8,7 +8,7 @@ description: BidGenie 项目初始化（F2）。当用户上传招标文件后�
 1. **先读偏好**：`dsh/config/user-settings.json.interactionMode`；已设置 guided/auto 就一句确认，**不问「自动还是逐步」**；缺失才问一次。
 2. **环境自检**：`bg_env_check.py --report`；必需项失败终止，非必需项记录降级/豁免；需要装依赖时只给命令与影响，等用户确认。
 3. **初始化工作区**：`bg_workspace.py init`（幂等，只补缺失，不重建）。
-4. **创建项目**：`bg_workspace.py init-project`（脚本生成目录/project.json/state.json/registry 与事件；幂等；用户说继续已有项目时不新建）。
+4. **创建项目**：`bg_workspace.py init-project`（脚本生成目录/project.json/state.json/registry 与事件；幂等；用户说继续已有项目时不新建）。**用户明确要“重新跑一次/新建一个”时加 `--new` 强制新建**（旧项目保留，可 T11 abort 或 resume）；不加 `--new` 时若复用未完成项目，按 warning 提示用户可 `--new` 或先 T11。
 5. **一致性自检**：创建项目后跑一次 `bg_state.py doctor --project <项目>`（只读；输出当前阶段、包目录、建议命令）；不可用则标注跳过。
 6. **投标人完整度提示（T1 前）**：读当前投标人 completeness/资格资料缺口；低完整度或缺证书/业绩/简介 → guided 提示确认（可稍后补，不阻断），auto 记 warning；不因完整度阻止迁移。
 7. **T1**：`bg_state.py check --to info_extract` 通过后 `transition --to info_extract --package package-1`；成功才算 F2 完成，随后加载 `bg-extract`；`bg-extract` 未注册时如实停在 `info_extract`。

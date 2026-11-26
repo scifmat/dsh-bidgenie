@@ -80,9 +80,18 @@ def _log_transition(
 # 命令实现
 # ---------------------------------------------------------------------------
 def command_status(args: argparse.Namespace) -> dict[str, Any]:
-    """status：只读输出状态摘要 + allowedNext。"""
+    """status：只读输出状态摘要 + allowedNext；--brief 折叠 envCheckSummary 明细。"""
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
-    return state_lib.status_summary(workspace, project_dir)
+    result = state_lib.status_summary(workspace, project_dir)
+    if getattr(args, "brief", False):
+        env = result.get("envCheckSummary") if isinstance(result.get("envCheckSummary"), dict) else {}
+        result["envCheckSummary"] = {
+            key: env.get(key)
+            for key in ("requiredPassed", "requiredTotal", "optionalPassed", "optionalTotal", "checklistVersion", "checkedAt")
+            if key in env
+        }
+        result["brief"] = True
+    return result
 
 
 def command_check(args: argparse.Namespace) -> dict[str, Any]:
@@ -566,6 +575,9 @@ def run_selftest() -> dict[str, Any]:
         status = state_lib.status_summary(workspace, project_dir)
         if status["currentStage"] != "project_init" or status["allowedNext"] != ["info_extract"]:
             raise AssertionError(f"初始状态不正确：{status['currentStage']} {status['allowedNext']}")
+        brief_status = command_status(argparse.Namespace(project=str(project_dir), workspace=str(workspace), brief=True))
+        if (brief_status.get("envCheckSummary") or {}).get("items"):
+            raise AssertionError("--brief 未折叠 envCheckSummary.items")
         checks.append("status")
         projects = command_projects(argparse.Namespace(workspace=str(workspace)))
         doctor = command_doctor(argparse.Namespace(project=str(project_dir), workspace=str(workspace), package=None))
@@ -718,7 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--workspace", help="工作区根绝对路径（--project 传 projectId 时必填）")
         return sub
 
-    add_sub("status", "只读输出状态摘要与 allowedNext")
+    status = add_sub("status", "只读输出状态摘要与 allowedNext（--brief 折叠 envCheckSummary）")
     check = add_sub("check", "只读校验一次迁移（guard 失败仍 exit 0，pass=false）")
     check.add_argument("--to", required=True, help="目标阶段")
     check.add_argument("--package", help="包标识 package-<N>（包级迁移用）")

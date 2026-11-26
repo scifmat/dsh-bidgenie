@@ -1540,6 +1540,23 @@ def _caveat_source_lines(text: str) -> list[str]:
     return lines
 
 
+def split_resolved_caveats(caveats: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """N-06：把「已由其他章节明确/无需处理」类 caveat 折叠到 resolved，减少 27 条噪声。
+
+    只折叠明确的“已解决/无需”措辞；不确定的一律留在 actionable，避免丢失真实待确认项。
+    """
+    resolved: list[dict[str, Any]] = []
+    actionable: list[dict[str, Any]] = []
+    markers = ("已由第一章明确", "已另见第一章", "已由其他章节明确", "已在其他章节明确", "无需处理", "无需提供", "不涉及", "已明确表述")
+    for item in caveats:
+        text = str(item.get("text") or "")
+        if any(marker in text for marker in markers):
+            resolved.append({**item, "resolvedByOtherSection": True})
+        else:
+            actionable.append(item)
+    return actionable, resolved
+
+
 def collect_extraction_caveats(project_dir: Path) -> list[dict[str, Any]]:
     """从提取稿收集 caveats（转换说明/需用户确认/疑似缺失/原文缺失），去重合并后机读写 project.extensions。"""
     extraction_dir = project_dir / "extraction"
@@ -1663,11 +1680,18 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                 "blockers": blockers[:50],
                 "warnings": warnings[:50],
                 "summary": summary,
-                "fallbackReview": report.get("fallbackReview"),
+                # N-08：异常 detail 只回摘要（完整 risks/excerpts 已写 reportPath），
+                # 避免 Host script.error 事件写进十几 KB。
+                "fallbackReview": {
+                    "required": bool((report.get("fallbackReview") or {}).get("required")),
+                    "riskCount": len((report.get("fallbackReview") or {}).get("risks") or []),
+                    "riskCodes": sorted({str(item.get("code") or "") for item in (report.get("fallbackReview") or {}).get("risks") or []}),
+                },
                 "written": written,
             },
         )
-    caveats = collect_extraction_caveats(project_dir)
+    caveats_all = collect_extraction_caveats(project_dir)
+    caveats, resolved_caveats = split_resolved_caveats(caveats_all)
     caveat_stats = caveats_by_package(caveats)
     caveats_written = ""
     if not getattr(args, "check", False):
@@ -1681,6 +1705,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             "packages": summary.get("packages"),
             "warningCount": len(warnings),
             "caveatCount": len(caveats),
+            "caveatsResolved": len(resolved_caveats),
             "caveatsByPackage": caveat_stats,
         },
     )
@@ -1696,6 +1721,8 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         "warnings": warnings,
         "extractionCaveats": caveats,
         "caveatCount": len(caveats),
+        "resolvedCaveats": resolved_caveats,
+        "resolvedCaveatCount": len(resolved_caveats),
         "caveatsByPackage": caveat_stats,
         "caveatsWritten": caveats_written,
         "fallbackReview": report.get("fallbackReview"),

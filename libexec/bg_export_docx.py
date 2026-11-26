@@ -550,6 +550,12 @@ class KeyInfoDocBuilder:
         end = OxmlElement("w:fldChar")
         end.set(qn("w:fldCharType"), "end")
         end_run._r.append(end)
+        # 用户要求：目录与正文之间插入分页符，正文从新页开始。
+        from docx.enum.text import WD_BREAK
+
+        page_break = self.doc.add_paragraph()
+        page_break.add_run().add_break(WD_BREAK.PAGE)
+        self.counter["paragraphs"] += 1
         # 打开 Word 时自动更新域（w:updateFields），避免用户看到空目录
         settings = self.doc.settings.element
         if settings.find(qn("w:updateFields")) is None:
@@ -1367,6 +1373,7 @@ def export_tech(
         "tableMarkers": builder.table_marker_warnings,
         "warnings": style_warnings,
         "tocFieldPresent": bool(with_toc),
+        "pageBreakAfterToc": bool(with_toc),
         "cover": False,
         "sanitizedXml": sanitized_xml,
         "cleanup": cleanup,
@@ -1414,6 +1421,7 @@ def export_tech(
         "tableMarkers": report.get("tableMarkers") or [],
         "warnings": report["warnings"],
         "tocFieldPresent": bool(report.get("tocFieldPresent")),
+        "pageBreakAfterToc": bool(report.get("pageBreakAfterToc")),
         "durationMs": report["durationMs"],
         "reportPath": paths.rel_posix(project_dir, report_path),
     }
@@ -1631,6 +1639,11 @@ def export_keyinfo(workspace: Path, project_dir: Path, *, out_path: str | None =
     project["updatedAt"] = now
     schema.raise_if_errors(schema.validate_project(project), filename="project.json")
     jsonio.write_json_atomic(project_file, project)
+    chapters_by_class: dict[str, int] = {}
+    for section in sections:
+        key = str(section.get("packageId") or "common")
+        chapters_by_class[key] = chapters_by_class.get(key, 0) + 1
+    covered_templates = sorted({str(section.get("templateId") or "") for section in sections if section.get("templateId")})
     return {
         "ok": True,
         "command": "export_docx",
@@ -1642,6 +1655,9 @@ def export_keyinfo(workspace: Path, project_dir: Path, *, out_path: str | None =
         "absolutePath": str(target),
         "exportedAt": now,
         "cleanup": cleanup,
+        "chapterCount": len(chapters),
+        "chaptersByClass": chapters_by_class,
+        "templatesCovered": f"{len(covered_templates)}/9",
         "chapters": chapters,
         "paragraphs": builder.counter["paragraphs"],
         "headings": builder.counter["headings"],

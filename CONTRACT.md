@@ -69,7 +69,7 @@ python bg_bidder.py validate --workspace <abs> [--bidder <id>] [--json]
 - `--data` 文件结构：`{bidder:{...7.7.1}, certificates?:{items:[]}, performance?:{items:[]}, awardsPenalties?:{awards:[],penalties:[]}}`。
 - 输出 `{ok:true,...}` 或 `{ok:false,error,message,hint}`；退出码 0/2/3/4/5/7。
 - 命名：`dsh/bidders/<slug>-<ts14>-<rand4>/`；文件 `bidder.json`/`certificates.json`/`performance.json`/`awards-penalties.json`/`profile.md`/`meta.json`/`attachments/`。
-- 写入：原子写 + 文件锁（`_lib/jsonio.py`）；更新 `dsh/registry.json` 与 `dsh/config/user-settings.json`；追加事件 `dsh/logs/events-<YYYYMMDD>.jsonl`；敏感字段默认脱敏只在 API 返回层做，文件中保留原值。
+- 写入：原子写 + 文件锁（`_lib/jsonio.py`）；更新 `dsh/registry.json` 与 `dsh/config/user-settings.json`；追加事件 `dsh/logs/events-<YYYYMMDD>.jsonl`；敏感字段默认脱敏只在 API 返回层做，文件中保留原值。事件为 UTF-8（无 BOM）JSONL；PowerShell 读取请用 `Get-Content -Encoding utf8`，不要依赖控制台默认编码。异常事件 detail 只存摘要/报告路径（完整清单在 `extraction/common/_extraction-report.json` 等落盘文件），避免 script.error 单条过大。
 - 幂等：`create` 以 bidderId 去重；重复 `init` 不重建；删除为软删除（`.trash/<dir>-<ts>/`）。
 
 ## 5. 投标人数据（M1 最小字段）
