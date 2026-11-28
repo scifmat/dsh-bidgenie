@@ -5,6 +5,7 @@
 **把复杂的技术标交给它：解析、大纲、正文到定稿，一步步走完。**
 
 [![version](https://img.shields.io/github/package-json/v/scifmat/dsh-bidgenie?label=version&color=EC661A&style=flat-square)](https://github.com/scifmat/dsh-bidgenie/blob/main/package.json)
+[![npm](https://img.shields.io/npm/v/dsh-bidgenie?label=npm&color=CB3837&style=flat-square)](https://www.npmjs.com/package/dsh-bidgenie)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2B-0B1220?style=flat-square)
 ![host](https://img.shields.io/badge/host-DSH%200.2.x-4D6BFE?style=flat-square)
 ![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-8A9AB8?style=flat-square)
@@ -45,13 +46,13 @@ BidGenie 是 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek
 
 要求：Windows 10 或更高；DSH Desktop 或 Web 0.2.x。无需预装 Python / Node.js，插件使用 DSH 自带运行时。
 
-1. 打开 DSH 的「插件」→「添加插件」，填写仓库地址：
+1. 打开 DSH 的「插件」→「添加插件」，填写 npm 包名：
 
    ```text
-   https://github.com/scifmat/dsh-bidgenie
+   dsh-bidgenie
    ```
 
-   安装完成后重启 DSH。
+   或填写仓库地址 `https://github.com/scifmat/dsh-bidgenie`（两种安装方式都能用；**npm 安装才能在面板里看到「更新」提示**，GitHub 安装需手动 `git pull` 更新）。安装完成后重启 DSH。
 
 2. 首次安装后，在插件目录运行一次依赖修复工具（安装 PDF、Word 相关依赖，约 100 MB）：
 
