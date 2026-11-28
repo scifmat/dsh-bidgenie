@@ -27,7 +27,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import errors, jsonio, logging as event_log, paths, state as state_lib, text as text_lib  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, state as state_lib, text as text_lib, tempdir  # noqa: E402
 import bg_outline_validate as outline_validate  # noqa: E402
 
 BATCH_DIR = "chapters/_batches"
@@ -543,7 +543,7 @@ def run_selftest() -> dict[str, Any]:
     checks.append("brief_summary")
     import tempfile
 
-    with tempfile.TemporaryDirectory(prefix="bidgenie-write-brief-") as tmp:
+    with tempdir.temporary_directory(prefix="bidgenie-write-brief-") as tmp:
         package_dir = Path(tmp)
         update_batch_state(package_dir, payload, configured_batch_size=4)
         state_path = _batch_state_path(package_dir)

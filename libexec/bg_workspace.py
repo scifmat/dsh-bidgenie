@@ -32,7 +32,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import errors, jsonio, logging as event_log, paths, schema  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, schema, tempdir  # noqa: E402
 
 #: dsh/ 下必须存在的目录（PRD 3.4.1 / CONTRACT §4 / §9.2/§9.3 v2：官方样式隔离目录）
 DSH_SUBDIRS: tuple[str, ...] = (
@@ -680,7 +680,7 @@ class _ProjectExists(Exception):
 def run_selftest() -> dict[str, Any]:
     """脚本自检：目录树、幂等、读写、命名与事件日志（临时目录，不碰真实工作区）。"""
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-ws-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-ws-selftest-")
     try:
         ws = tmp / "ws"
         ws.mkdir()

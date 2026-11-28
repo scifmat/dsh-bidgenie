@@ -29,7 +29,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, paths, schema, state as state_lib
+from _lib import errors, jsonio, paths, schema, state as state_lib, tempdir
 import bg_outline_validate as outline_validate
 
 SCHEMA_VERSION = outline_validate.SCHEMA_VERSION
@@ -1446,7 +1446,7 @@ def _selftest_golden() -> dict[str, Any]:
 
 def run_selftest() -> dict[str, Any]:
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-outline-apply-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-outline-apply-selftest-")
     try:
         workspace = tmp / "ws"
         for rel in ("dsh/logs", "dsh/config", "dsh/bidders"):

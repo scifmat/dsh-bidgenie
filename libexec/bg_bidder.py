@@ -36,7 +36,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import bg_workspace  # noqa: E402  - 自检复用 init_workspace
-from _lib import errors, jsonio, logging as event_log, paths, schema  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, schema, tempdir  # noqa: E402
 
 #: profile.md 空骨架（PRD 7.7.5 建议结构；仅用户/Agent 阅读补充）
 PROFILE_SKELETON = """# 投标人简介素材
@@ -1217,7 +1217,7 @@ def validate_workspace(
 def run_selftest() -> dict[str, Any]:
     """脚本自检：临时工作区跑 create→list→update→set-current→validate→delete。"""
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-bidder-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-bidder-selftest-")
     try:
         ws = tmp / "ws"
         ws.mkdir()

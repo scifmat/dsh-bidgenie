@@ -2578,6 +2578,12 @@ def check_transition(
     )
     guard = evaluate_guard(context)
     next_writing, _selected, _current, effective, recovered = _t13_progress(project, state)
+    next_scope = _transition_scope(state, transition, context)
+    effects = transition.effects_note
+    current_scope = str(state.get("currentScope") or "")
+    if next_scope and next_scope != current_scope:
+        # D4（第三轮冒烟）：check 的 scope 是迁移前；把迁移后的包写清楚，避免 Agent 误判
+        effects = f"{effects}；将切换 currentScope/currentPackage 到 {next_scope}"
     return {
         "ok": True,
         "command": "state_check",
@@ -2585,13 +2591,14 @@ def check_transition(
         "from": state.get("currentStage"),
         "to": to_stage,
         "scope": state.get("currentScope"),
+        "nextScope": next_scope,
         "currentPackage": state.get("currentPackage"),
         "nextWritingPackage": next_writing,
         "t13EffectiveCurrent": effective if transition.id == "T13" else None,
         "t13PreSwitchRecovered": recovered if transition.id == "T13" else False,
         "pass": guard["pass"],
         "guard": guard,
-        "effects": transition.effects_note,
+        "effects": effects,
         "allowedNext": allowed_next(state, project),
     }
 

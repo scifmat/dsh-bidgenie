@@ -28,7 +28,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import errors, jsonio, paths, schema, state as state_lib  # noqa: E402
+from _lib import errors, jsonio, paths, schema, state as state_lib, tempdir  # noqa: E402
 
 PLUGIN_ROOT = _SCRIPT_DIR.parent
 SCHEMA_VERSION = "1.0"
@@ -570,7 +570,7 @@ def run_selftest() -> dict[str, Any]:
     global _plugin_files, _scripts_hash
 
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-run-manifest-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-run-manifest-selftest-")
     # 插件哈希改为固定桩：自检不依赖「并行开发时 plugin/ 目录内容是否稳定」
     original_plugin_files = _plugin_files
     original_scripts_hash = _scripts_hash

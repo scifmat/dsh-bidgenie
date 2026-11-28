@@ -35,7 +35,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, tempdir  # noqa: E402
 
 #: F3 允许回填的 project.json 顶层字段（PRD F3.4 / 4.5）
 FIELD_WHITELIST: tuple[str, ...] = (
@@ -473,7 +473,7 @@ def run_selftest() -> dict[str, Any]:
     import tempfile
 
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-project-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-project-selftest-")
     try:
         workspace = tmp / "ws"
         (workspace / "dsh" / "logs").mkdir(parents=True)

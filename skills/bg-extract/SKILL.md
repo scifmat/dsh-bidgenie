@@ -36,7 +36,7 @@ description: BidGenie 招标文件关键信息提取（F3，人读模板版 v4�
 
 - 主技能路由而来：项目 `state.currentStage == info_extract`。
 - 源文件就绪：`<projectDir>/sources/conversion-manifest.json` 存在，主招标文件已转换。
-  **由 Agent 语义分类并复制**（不改原文件、原件留在 `sources/raw/`）为固定命名：
+  **转换器已把原件复制到 `sources/raw/`**（见 `conversion-manifest.files[].rawCopyPath`，`--no-copy-raw` 可关闭）；**由 Agent 语义分类并复制 converted md** 为固定命名：
   `sources/01-bidding-documents.md`（主招标文件）、`02-technical-requirements.md`（技术要求）、
   `03-procurement-list.md`（采购清单）、`04-evaluation-criteria.md`（评审标准）、
   `05-construction-instructions.md`（施工说明）、`06-proposed-plan.md`（方案建议书）、

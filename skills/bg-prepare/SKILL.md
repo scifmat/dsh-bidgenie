@@ -12,7 +12,7 @@ description: BidGenie 撰写前准备（F4）。当项目处于 package_prepare 
 - 7 项 = 字数/人员/设备/工期/表格/示意图（Mermaid）/终端图参考值；**导出样式不是提问项**，默认取 `styleProfiles.tech` → `styleProfile` → `official-tech` 写 `exportStyleProfile`。
 - 工期字段语义分开（P2-9）：`schedulePlan.servicePeriod` = 合同履行期限/服务期（如「1 年」）；`schedulePlan.constructionPlan` = 施工/供货/交付工期；`startDate`/`deliveryDate` = 具体日期（YYYY-MM-DD，不编造）。auto 只在对应期限明确时填对应字段，`autoFill.autoBasis.schedulePlan` 记录映射来源；写作任务书不要引用 `constructionPlan` 当服务期。
 - 字数默认**动态**：`user-settings.defaultWordCountTier`（缺省 50000），提问卡显示实际值，并与提取要求下限取大值，不写死。
-- 图表配额：table/mermaid 是下限、上不封顶；terminal 是参考值（0=不生成，少规划不报错）；人员/设备/工期 guided 每包必须有答案或「用默认」。
+- 图表配额：table/mermaid 是下限、上不封顶；terminal 是参考值（0=不生成，少规划不报错）；**施工/供货类项目通常不需要终端图（terminal 可设 0），软件/系统/接口/数据库类才需要**。人员/设备/工期 guided 每包必须有答案或「用默认」。
 - `qualificationGaps` 是 **资格/证书要求提示（商务部分，供用户核对）**，`blocking=false`：按 02/08/09 资格硬项比对投标人资料，**按“第N包/第1—3包/第4、5包”过滤当前包，跳过“不适用于本包/本包未要求”**；每包 ≤5 条、`missingTokens` 为整条短语；**不阻断 F4/T3，技术方案不据此判定、不要求 Agent 补材料**。
 
 ## 偏好与选包（只问一次）

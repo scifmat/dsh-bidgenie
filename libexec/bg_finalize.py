@@ -22,7 +22,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, logging as event_log, paths, state as state_lib
+from _lib import errors, jsonio, logging as event_log, paths, state as state_lib, tempdir
 import bg_outline_validate as outline_validate
 
 SCHEMA_VERSION = "1.0"
@@ -457,7 +457,7 @@ def run_selftest() -> dict[str, Any]:
     import tempfile
 
     checks: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="bidgenie-finalize-selftest-") as tmp:
+    with tempdir.temporary_directory(prefix="bidgenie-finalize-selftest-") as tmp:
         package_dir = Path(tmp) / "package-1-20261111120000"
         (package_dir / "chapters" / "_outline").mkdir(parents=True)
         (package_dir / "chapters" / "1-1").mkdir(parents=True)
@@ -501,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--status", action="store_true", help="只读锁定/清单状态")
     action.add_argument("--cleanup", action="store_true", help="清理旧导出/.lock/.tmp/_frozen 归档（保留 --keep 份）")
     parser.add_argument("--keep", type=int, default=5, help="cleanup 保留份数（默认 5）")
-    parser.add_argument("--reason", default="", help="锁定/解锁原因（审计）")
+    parser.add_argument("--reason", default="", help="锁定/解锁原因（审计；用户明确确认时写「用户确认定稿」）")
     parser.add_argument("--force", action="store_true", help="解锁时必须显式确认（R4）")
     parser.add_argument("--actor", default="script:bg_finalize.py", help="操作者标识")
     parser.add_argument("--selftest", action="store_true", help="脚本自检")
@@ -515,7 +515,7 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         raise errors.BgError(errors.E_USAGE, "缺少 --project", hint="传入项目目录或 projectId")
     workspace, project_dir = state_lib.resolve_project_context(args.project, args.workspace)
     if args.lock:
-        return lock_project(workspace=workspace, project_dir=project_dir, package_id=args.package, reason=args.reason or "用户确认定稿", actor=args.actor)
+        return lock_project(workspace=workspace, project_dir=project_dir, package_id=args.package, reason=args.reason or "定稿锁定（Agent 执行）", actor=args.actor)
     if args.verify:
         return verify_project(workspace=workspace, project_dir=project_dir, package_id=args.package)
     if args.unlock:

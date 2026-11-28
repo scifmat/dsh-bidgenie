@@ -37,7 +37,7 @@ _PLUGIN_ROOT = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, tempdir  # noqa: E402
 import bg_outline_validate as outline_validate  # noqa: E402
 
 EXPORT_STYLE_PROFILE = "keyinfo"
@@ -1704,7 +1704,7 @@ def run_selftest() -> dict[str, Any]:
     import platform
 
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-export-v2-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-export-v2-selftest-")
     try:
         import bg_extract_validate as extract_validate
 

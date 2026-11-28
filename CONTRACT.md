@@ -193,8 +193,8 @@ python bg_convert.py --workspace <ws> --project <projectDir> --files <abs>[,<abs
 ```
 
 - 输入：`.docx`（python-docx 解析标题/段落/表格→md）、`.doc`（Word COM 转 docx 再解析；无 Word/COM → `E_DEP_MISSING` 降级提示）、`.pdf`（pymupdf4llm 转 md）、`.md`/`.txt`（复制/直转）；其他格式 → `E_USAGE`。
-- 输出：`<project>/sources/converted/<原文件名>.md`；`<project>/sources/conversion-manifest.json`：
-  `{schemaVersion, generatedAt, converter, files:[{sourcePath, sourceName, sourceType, sizeBytes, convertedPath, mdChars, headings, tables, warnings, status}], sources:[...同 files 数据]}`, `sources[]` 为 PRD 7.6/T2 guard 兼容别名
+- 输出：`<project>/sources/converted/<原文件名>.md`；原件默认复制到 `<project>/sources/raw/<原文件名>`（`--no-copy-raw` 关闭）；`<project>/sources/conversion-manifest.json`：
+  `{schemaVersion, generatedAt, converter, files:[{sourcePath, sourceName, sourceType, sizeBytes, convertedPath, rawCopyPath, mdChars, headings, tables, warnings, status}], sources:[...同 files 数据]}`, `sources[]` 为 PRD 7.6/T2 guard 兼容别名；`rawCopyPath` 为项目目录相对 POSIX 路径（如 `sources/raw/x.pdf`），复制失败时为空并在 `warnings` 记 `raw_copy_failed:<原因>`
 - 依赖：`plugin/pylibs`（`_lib/deps.ensure_dependency_path()`）；不允许联网/改源文件。
 - 幂等：同一源文件重复转换覆盖 md、manifest 去重更新；失败文件不写半成品（临时文件+替换）。
 - **分类与固定命名由 Agent（bg-extract）完成**：`sources/converted/*.md` 是原始转换结果；Agent 按 PRD F3.2 判定主招标文件/技术要求/采购清单/评审标准/施工说明/方案建议/其他，复制（不修改原文件）为 `sources/01-bidding-documents.md`、`02-technical-requirements.md`、`03-procurement-list.md`、`04-evaluation-criteria.md`、`05-construction-instructions.md`、`06-proposed-plan.md`、`07-<内容描述>.md`…；原件保留在 `sources/raw/`（脚本不自动分类，避免误判）。

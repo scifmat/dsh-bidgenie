@@ -37,7 +37,7 @@ _PLUGIN_ROOT = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, tempdir  # noqa: E402
 
 SCHEMA_VERSION = "1.0"
 PACKAGE_ID_RE = re.compile(r"^package-(\d+)$")
@@ -920,6 +920,82 @@ def build_requirement_summary(texts: Mapping[str, str], package_id: str) -> dict
 AUTO_BAD_WORDS = ("评分", "得分", "证明材料", "复印件", "证书编号", "身份证", "社保", "姓名", "车牌", "账号")
 AUTO_UNITS = ("人", "名", "台", "套", "辆", "个", "项", "部")
 CROSS_PACKAGE_RE = re.compile(r"第\s*\d+\s*包|package-\d+")
+#: D2（第三轮冒烟）：auto 计划描述只接受「像角色/像设备」的短语，避免把
+#: 「充足」的定性要求」「身份关系」这类句子碎片写进 package-meta 与任务书。
+AUTO_QUOTE_CHARS = ('"', "“", "”", "「", "」", "『", "』")
+AUTO_BAD_ROLE_FRAGMENTS = (
+    "定性要求",
+    "至少包含",
+    "需用户补充",
+    "未给出",
+    "投标方案需",
+    "满足招标",
+    "评分",
+    "得分",
+    "证明材料",
+    "招标文件",
+)
+AUTO_EQUIPMENT_TOKENS = (
+    "设备",
+    "车辆",
+    "车",
+    "机",
+    "仪",
+    "工具",
+    "终端",
+    "系统",
+    "平台",
+    "装置",
+    "设施",
+    "器具",
+    "升降",
+    "施划",
+    "清除",
+    "喷涂",
+    "发电",
+    "检测",
+    "测量",
+    "运输",
+)
+AUTO_PERSON_SUFFIXES = ("人员", "工程师", "负责人", "经理", "班组", "团队", "工", "员", "师")
+
+
+def _auto_role_sane(name: str) -> bool:
+    value = str(name or "").strip()
+    if len(value) < 2 or len(value) > 24:
+        return False
+    if any(ch in value for ch in AUTO_QUOTE_CHARS):
+        return False
+    if any(token in value for token in AUTO_BAD_ROLE_FRAGMENTS):
+        return False
+    if re.search(r"[，。；;：:、]$", value):
+        return False
+    return True
+
+
+def _auto_equipment_role_ok(name: str) -> bool:
+    value = str(name or "").strip()
+    if not _auto_role_sane(value):
+        return False
+    return any(token in value for token in AUTO_EQUIPMENT_TOKENS)
+
+
+def _auto_person_role_ok(name: str) -> bool:
+    value = str(name or "").strip()
+    if not _auto_role_sane(value):
+        return False
+    return "人员" in value or value.endswith(AUTO_PERSON_SUFFIXES)
+
+
+def _auto_value_sane(value: str) -> bool:
+    """引号/括号配平 + 非空（D2：生成值不得出现孤立「」）。"""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    for left, right in (("「", "」"), ("“", "”"), ("『", "』"), ("（", "）"), ("(", ")"), ("[", "]")):
+        if text.count(left) != text.count(right):
+            return False
+    return True
 
 
 def _auto_clean(text: str, *, limit: int = 80) -> str:
@@ -969,7 +1045,7 @@ def _auto_equipment_requirements(texts: Mapping[str, str], *, multi_package: boo
                 if match:
                     explicit.append({"name": name, "count": int(match.group(1)), "unit": match.group(2)})
                     found = True
-                else:
+                elif _auto_equipment_role_ok(name):
                     roles.append(name)
                     found = True
         for line in text.splitlines():
@@ -995,7 +1071,12 @@ def _auto_equipment_requirements(texts: Mapping[str, str], *, multi_package: boo
                     phrase = _auto_clean(match.group(1), limit=60)
                     for part in re.split(r"[、和及与]", phrase):
                         part = _auto_clean(re.sub(r"等.*$", "", part), limit=24)
-                        if part and not _auto_is_business_material(part) and not any(token in part for token in person_tokens):
+                        if (
+                            part
+                            and _auto_equipment_role_ok(part)
+                            and not _auto_is_business_material(part)
+                            and not any(token in part for token in person_tokens)
+                        ):
                             roles.append(part)
                             found = True
         if found:
@@ -1041,7 +1122,7 @@ def _auto_plan_description(
             count = int(count_match.group(1)) if count_match else (int(entry.get("count") or 0) if int(entry.get("count") or 0) > 1 else 0)
             if count:
                 explicit.append({"name": role, "count": count, "unit": "人"})
-            else:
+            elif _auto_person_role_ok(role):
                 roles.append(role)
         for item in source_texts:
             if "：" not in item:
@@ -1060,8 +1141,9 @@ def _auto_plan_description(
             match = re.search(r"(\d+)\s*(?:人|名)", detail)
             if role and match and not _auto_is_business_material(item):
                 explicit.append({"name": role, "count": int(match.group(1)), "unit": "人"})
-                roles.append(role)
-            elif role and not _auto_is_business_material(item):
+                if _auto_person_role_ok(role):
+                    roles.append(role)
+            elif role and not _auto_is_business_material(item) and _auto_person_role_ok(role):
                 roles.append(role)
         text_prefix = "拟投入"
         capability_word = "岗位人员"
@@ -1080,7 +1162,20 @@ def _auto_plan_description(
         if key not in seen_explicit and not CROSS_PACKAGE_RE.search(item["name"]):
             seen_explicit.add(key)
             deduped.append(item)
-    roles = [role for role in dict.fromkeys(roles) if role and not CROSS_PACKAGE_RE.search(role)][:8]
+    roles = [
+        role
+        for role in dict.fromkeys(roles)
+        if role
+        and not CROSS_PACKAGE_RE.search(role)
+        and (_auto_person_role_ok(role) if field == "personnelPlan" else _auto_equipment_role_ok(role))
+    ][:8]
+
+    def commitment_value() -> dict[str, Any]:
+        if field == "personnelPlan":
+            text = "按招标文件要求和履约需要配置人员，具体清单进场前报采购人确认"
+        else:
+            text = "按招标文件要求和履约需要配置设备，具体清单进场前报采购人确认"
+        return {"value": text, "basis": "无明确要求", "valueSource": "agent-default", "tier": "commitment", "counts": []}
 
     if deduped:
         mirrored = "、".join(f"{item['name']}{item['count']}{item['unit']}" for item in deduped[:8])
@@ -1088,17 +1183,17 @@ def _auto_plan_description(
         total = derive_personnel_total(texts, multi_package=multi_package) if field == "personnelPlan" else 0
         total_suffix = f"，合计{total}人" if total > 0 else ""
         value = f"{text_prefix}{mirrored}{total_suffix}，满足招标文件要求"
+        if not _auto_value_sane(value):
+            return commitment_value()
         basis = "、".join(sources) or "提取稿要求"
         return {"value": value, "basis": basis, "valueSource": "extracted", "tier": "explicit", "counts": deduped[:8]}
     if roles:
         value = f"按招标文件要求配置{'、'.join(roles[:6])}等{capability_word}，满足招标文件最低要求"
+        if not _auto_value_sane(value):
+            return commitment_value()
         basis = "、".join(sources) or "提取稿要求"
         return {"value": value, "basis": basis, "valueSource": "extracted", "tier": "capability", "counts": []}
-    if field == "personnelPlan":
-        value = "按招标文件要求和履约需要配置人员，具体清单进场前报采购人确认"
-    else:
-        value = "按招标文件要求和履约需要配置设备，具体清单进场前报采购人确认"
-    return {"value": value, "basis": "无明确要求", "valueSource": "agent-default", "tier": "commitment", "counts": []}
+    return commitment_value()
 
 
 def _auto_schedule_basis(plan: Mapping[str, Any]) -> str:
@@ -2722,7 +2817,7 @@ def run_selftest() -> dict[str, Any]:
     import tempfile
 
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-prepare-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-prepare-selftest-")
     try:
         workspace, project_dir = _build_selftest_project(tmp)
         result = prepare_project(workspace, project_dir)

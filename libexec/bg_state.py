@@ -36,7 +36,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 import bg_bidder  # noqa: E402  - --selftest 用（创建投标人）
 import bg_workspace  # noqa: E402  - --selftest 用（初始化工作区/项目）
-from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, tempdir  # noqa: E402
 
 ACTORS = ("agent", "user", "script")
 
@@ -550,7 +550,7 @@ def _fill_t2_fixture(project_dir: Path) -> None:
 def run_selftest() -> dict[str, Any]:
     """脚本自检：建项目 → status → T1 → 重复/非法/T2 guard → T2 → abort/resume → 损坏 state。"""
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-state-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-state-selftest-")
     try:
         workspace = tmp / "ws"
         workspace.mkdir()

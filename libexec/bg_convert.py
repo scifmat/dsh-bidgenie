@@ -53,7 +53,7 @@ _PLUGIN_ROOT = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import deps, errors, jsonio, logging as event_log, paths, state as state_lib  # noqa: E402
+from _lib import deps, errors, jsonio, logging as event_log, paths, state as state_lib, tempdir  # noqa: E402
 
 SCHEMA_VERSION = "1.0"
 MANIFEST_REL = "sources/conversion-manifest.json"
@@ -1352,6 +1352,32 @@ def _converter_table(used: set[str]) -> dict[str, str]:
     return {key: value for key, value in table.items() if key in used} or table
 
 
+def _copy_raw_source(project_dir: Path, source: Path, source_hash: str) -> tuple[str, str]:
+    """D3（第三轮冒烟）：把原件复制到 `sources/raw/`，返回 (rawCopyPath, warning)。
+
+    项目要自包含：源盘（如 E:\\）不可用时仍能追溯/重转，且 `bg_project.py fields`
+    要求 sourceFiles[].rawPath 是项目相对路径。复制失败不阻断转换，只给 warning。
+    """
+    raw_dir = project_dir / "sources" / "raw"
+    try:
+        resolved_source = source.resolve()
+        try:
+            relative = resolved_source.relative_to(project_dir.resolve())
+            if relative.parts[:2] == ("sources", "raw"):
+                return relative.as_posix(), ""
+        except ValueError:
+            pass
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        target = raw_dir / source.name
+        if target.exists() and _sha256_file(target) != source_hash:
+            digest = source_hash.split(":")[-1][:8]
+            target = raw_dir / f"{source.stem}-{digest}{source.suffix}"
+        shutil.copy2(resolved_source, target)
+        return paths.rel_posix(project_dir, target), ""
+    except OSError as exc:
+        return "", f"raw_copy_failed:{exc.strerror or type(exc).__name__}"
+
+
 def _allocate_converted_path(project_dir: Path, source: Path, manifest: Mapping[str, Any]) -> str:
     """为源文件分配 `sources/converted/<stem>.md`（已有条目优先保持原路径；冲突加 -2/-3）。"""
     source_key = str(source)
@@ -1421,7 +1447,7 @@ def _convert_workdir(workspace: Path | None, project_dir: Path) -> Any:
     def manager():
         base = (workspace / "dsh" / "tmp") if workspace is not None else (project_dir / "dsh" / "tmp")
         base.mkdir(parents=True, exist_ok=True)
-        work = Path(tempfile.mkdtemp(prefix="bg-convert-", dir=str(base)))
+        work = tempdir.mkdtemp(prefix="bg-convert-", dir=str(base))
         try:
             yield work
         finally:
@@ -1436,6 +1462,7 @@ def convert_files(
     *,
     force: bool = False,
     no_backup: bool = False,
+    copy_raw: bool = True,
     per_file_timeout: float = PER_FILE_TIMEOUT_SEC,
     workspace: Path | None = None,
 ) -> dict[str, Any]:
@@ -1470,6 +1497,7 @@ def convert_files(
             relative = planned_paths.get(source_key) or _allocate_converted_path(project_dir, source, manifest)
             planned_paths[source_key] = relative
             target = project_dir / relative
+            raw_copy_path, raw_copy_warning = _copy_raw_source(project_dir, source, source_hash) if copy_raw else ("", "")
             existing = existing_map.get(source_key)
             entry: dict[str, Any] = {
                 "sourcePath": source_key,
@@ -1477,6 +1505,7 @@ def convert_files(
                 "sourceType": source_type,
                 "sizeBytes": source.stat().st_size,
                 "convertedPath": relative,
+                "rawCopyPath": raw_copy_path or str((existing or {}).get("rawCopyPath") or ""),
                 "mdChars": int(existing.get("mdChars") or 0) if existing else 0,
                 "headings": int(existing.get("headings") or 0) if existing else 0,
                 "tables": int(existing.get("tables") or 0) if existing else 0,
@@ -1501,6 +1530,8 @@ def convert_files(
                 "fallbackNote": str(existing.get("fallbackNote") or "") if existing else "",
                 "tableRecheck": dict(existing.get("tableRecheck") or {}) if existing and isinstance(existing.get("tableRecheck"), Mapping) else {},
             }
+            if raw_copy_warning:
+                entry["warnings"] = sorted(set(list(entry.get("warnings") or []) + [raw_copy_warning]))
             if (
                 not force
                 and existing is not None
@@ -1689,6 +1720,7 @@ def convert_files(
         "skipped": skipped,
         "failed": failed,
         "files": results,
+        "rawCopies": [str(entry.get("rawCopyPath") or "") for entry in results if entry.get("rawCopyPath")],
         "quality": quality_map,
         "manifest": MANIFEST_REL,
         "generatedAt": generated_at,
@@ -1910,7 +1942,7 @@ def run_selftest() -> dict[str, Any]:
     """脚本自检：docx/pdf/md/txt 转换、manifest、幂等 skip、变更备份、负例。"""
     checks: list[str] = []
     pdf_available = _pdf_stack_available()
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-convert-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-convert-selftest-")
     try:
         project_dir = tmp / "project"
         (project_dir / "sources").mkdir(parents=True)
@@ -1994,6 +2026,16 @@ def run_selftest() -> dict[str, Any]:
             raise AssertionError("manifest 缺少 updatedAt")
         checks.append("manifest")
         checks.append("manifest_sources")
+        # D3：原件复制进 sources/raw/，manifest 记录项目相对 rawCopyPath
+        for entry in manifest["files"]:
+            raw_rel = str(entry.get("rawCopyPath") or "")
+            if not raw_rel.startswith("sources/raw/"):
+                raise AssertionError(f"manifest 缺少 rawCopyPath：{entry.get('sourceName')}")
+            if not (project_dir / raw_rel).is_file():
+                raise AssertionError(f"rawCopyPath 指向的文件不存在：{raw_rel}")
+        if not any((project_dir / "sources" / "raw").glob("*")):
+            raise AssertionError("sources/raw 为空")
+        checks.append("raw_copy")
         # P2-11：PDF 回退页标记 + 表格复核元数据（构造小样，不解析真实大 PDF）
         if pdf_available:
             pdf_entry = next(entry for entry in manifest["files"] if entry.get("sourceName") == "示例文件.pdf")
@@ -2123,6 +2165,7 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--list", dest="list_mode", action="store_true", help="只读列出现有 conversion-manifest")
     parser.add_argument("--force", action="store_true", help="忽略未变化判定，强制重新转换")
     parser.add_argument("--no-backup", dest="no_backup", action="store_true", help="不创建 sources/.backup-<ts>/")
+    parser.add_argument("--no-copy-raw", dest="no_copy_raw", action="store_true", help="不把原件复制到 sources/raw/（默认复制，保证项目自包含）")
     return parser
 
 
@@ -2146,6 +2189,7 @@ def handle(args: Any) -> dict[str, Any]:
         files,
         force=bool(getattr(args, "force", False)),
         no_backup=bool(getattr(args, "no_backup", False)),
+        copy_raw=not bool(getattr(args, "no_copy_raw", False)),
         per_file_timeout=per_file_timeout,
         workspace=workspace,
     )

@@ -578,6 +578,23 @@ def evaluate_pass(document: Mapping[str, Any], outline: Mapping[str, Any] | None
         reasons.append(f"本轮三层审查未全部执行：layersRun={layers_run}")
     if not coverage_ok:
         reasons.append(f"reviewState.coverage 非全部 pass/notApplicable：{coverage_gaps[:10]}")
+    # D5（第三轮冒烟）：直接给可执行修复命令，避免 Agent 自己从台账拼步骤
+    remediation: list[str] = []
+    round_no = int(document.get("round") or 0)
+    for item in blockers:
+        remediation.append(f"先修复 blocker {item.get('issueId')}，再重跑第 {round_no} 轮审查；blocker 必须 verified 才能通过")
+    for item in majors_open:
+        issue_id = item.get("issueId")
+        if item.get("status") == "fixed":
+            remediation.append(f'bg_review_issues.py close --issue {issue_id} --status verified --review --note "<复审依据>"')
+        else:
+            remediation.append(f'先修复 {issue_id}（当前 {item.get("status")}）→ close --issue {issue_id} --status fixed --note "<修复说明>"，下一轮复审写 verified')
+    for item in minors_open:
+        remediation.append(f'bg_review_issues.py close --issue {item.get("issueId")} --status fixed --note "<修复说明>"（或 wontfix --user-confirmed）')
+    if not layers_ok:
+        remediation.append("补齐 B/C 层：bg_review_issues.py merge --layer coverage|graphic --input <问题JSON>（无新问题传 issues:[]）")
+    if not coverage_ok:
+        remediation.append(f"bg_review_issues.py coverage --round {round_no} --default pass（保留已有 weak/missing；需重置加 --force）")
     per_type = {key: summary[key] for key in ("blocker", "major", "minor")}
     open_by_severity = {
         "blocker": len(blockers),
@@ -587,6 +604,7 @@ def evaluate_pass(document: Mapping[str, Any], outline: Mapping[str, Any] | None
     result = {
         "pass": not reasons,
         "reasons": reasons,
+        "remediation": remediation,
         "summary": summary,
         "summaryScope": "all",
         "openBySeverity": open_by_severity,
@@ -1211,6 +1229,7 @@ def verify_issues(
         "reviewLoop": review_loop,
         "pass": result["pass"],
         "reasons": result["reasons"],
+        "remediation": result.get("remediation") or [],
         "layersRun": result["layersRun"],
         "layersOk": result["layersOk"],
         "coverageOk": result["coverageOk"],
@@ -1293,6 +1312,12 @@ def run_selftest() -> dict[str, Any]:
     if not result2["pass"]:
         raise AssertionError(f"全部 verified 后应通过：{result2}")
     checks.append("pass_criteria")
+    # D5：verify 失败时直接给可执行命令（major fixed → close --review）
+    fixed_document = {"round": 2, "layersRun": ["script", "coverage", "graphic"], "issues": [{**issues[0], "status": "fixed"}]}
+    fixed_result = evaluate_pass(fixed_document, outline=None)
+    if not any("close --issue RV-2-0001 --status verified --review" in item for item in fixed_result.get("remediation") or []):
+        raise AssertionError(f"verify remediation 未给出 close --review 命令：{fixed_result.get('remediation')}")
+    checks.append("verify_remediation")
     bad = validate_issue({"layer": "coverage", "type": "bad_type", "severity": "major", "evidence": "x"})
     if not bad:
         raise AssertionError("非法 type 未被发现")

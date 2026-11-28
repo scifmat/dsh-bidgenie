@@ -38,7 +38,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, paths, runtime as runtime_env, schema, state as state_lib
+from _lib import errors, jsonio, paths, runtime as runtime_env, schema, state as state_lib, tempdir
 import bg_outline_validate as outline_validate
 
 SCHEMA_VERSION = "1.0"
@@ -130,7 +130,7 @@ def make_render_scratch() -> Path:
     都会落在本目录内，渲染结束可整体删除，不会污染系统 TEMP 或会话 TEMP
     （例如 `<workspace>/dsh/tmp`）。
     """
-    return Path(tempfile.mkdtemp(prefix=RENDER_SCRATCH_PREFIX))
+    return tempdir.mkdtemp(prefix=RENDER_SCRATCH_PREFIX)
 
 
 def cleanup_render_scratch(scratch: Path, *, attempts: int = 10) -> list[dict[str, str]]:
@@ -577,8 +577,8 @@ def mermaid_layout_check(
                 "code": "figure_too_tall",
                 "severity": "minor",
                 "message": (
-                    f"图高/宽={aspect_tall:.2f}（>{MERMAID_ASPECT_TALL:g}）：建议合并节点到 ≤6 个、"
-                    "拆成 2 张图，或改用 flowchart LR；改 LR 后必须复检宽高比与字号（避免变成太扁/字太小）"
+                    f"图高/宽={aspect_tall:.2f}（>{MERMAID_ASPECT_TALL:g}）：建议合并节点到 ≤6 个或拆成 2 张图；"
+                    "长链改 LR 常会被自动回退 TB（尺寸不变），不要只靠改方向"
                 ),
             }
         )
@@ -595,7 +595,7 @@ def mermaid_layout_check(
         )
     recommendation = ""
     if aspect_tall > MERMAID_ASPECT_TALL:
-        recommendation = "合并节点到 ≤6 个或拆成 2 张图；改 flowchart LR 后复检字号"
+        recommendation = "合并节点到 ≤6 个或拆成 2 张图；长链改 LR 会被自动回退，不要只改方向"
     elif aspect_wide > 4.0:
         recommendation = "合并节点到 ≤6 个或拆成 2 张图；改 flowchart TB，避免横向拉长导致字小"
     return {
@@ -708,24 +708,33 @@ def mermaid_static_preflight(text: str) -> dict[str, Any]:
         warnings.append({"code": "preflight_long_lr_chain", "severity": "info", "message": f"{direction} 长链 {node_count} 节点，自动布局可能改 TB 后产出过扁图；先拆图或减节点"})
         fixes.append("LR 长链先拆图")
     estimated_aspect_tall: float | None = None
+    lr_auto_revert = False
     if direction in ("TB", "TD", "BT") and node_count >= 4:
         depth, max_level = mermaid_rank_layout(ids, edge_pairs)
         node_width = max(120.0, max_label * 16.0 + 60.0)
         level_width = max_level * node_width + max(0, max_level - 1) * 60.0
         if level_width > 0:
             estimated_aspect_tall = round(depth * 120.0 / level_width, 2)
+        # D9：LR 版宽度/高度也会触发 should_try_auto_layout 的「过宽/过扁」→ 自动回退 TB，
+        # 此时提示「改 LR」没有意义（实测尺寸逐像素不变）。
+        lr_width = depth * node_width + max(0, depth - 1) * 40.0
+        lr_height = max(1.0, max_level * 120.0)
+        lr_auto_revert = lr_width > 1200 or (lr_width / lr_height) > 4.0
         if estimated_aspect_tall is not None and estimated_aspect_tall > 3.0:
+            if lr_auto_revert:
+                suggestion_text = "改 LR 也会因过宽/过扁被渲染器自动回退 TB（实测尺寸不变），请直接合并到 ≤6 节点或拆 2 张"
+                fix_text = "TB 长链合并到 ≤6/拆图（LR 会自动回退）"
+            else:
+                suggestion_text = "可尝试 flowchart LR（7–11 节点）或合并到 ≤6 节点/拆 2 张"
+                fix_text = "TB 长链改 LR/合并到 ≤6"
             warnings.append(
                 {
                     "code": "preflight_tall_tb_chain",
                     "severity": "info",
-                    "message": (
-                        f"{direction} 近线性链：预计高宽比≈{estimated_aspect_tall:.1f}（>3），"
-                        "渲染后有效字号可能 <15pt；建议改 flowchart LR（7–11 节点）或合并到 ≤6 节点/拆 2 张"
-                    ),
+                    "message": f"{direction} 近线性链：预计高宽比≈{estimated_aspect_tall:.1f}（>3），渲染后有效字号可能 <15pt；{suggestion_text}",
                 }
             )
-            fixes.append("TB 长链改 LR/合并到 ≤6")
+            fixes.append(fix_text)
     suggestion = ""
     if warnings:
         suggestion = (
@@ -738,6 +747,7 @@ def mermaid_static_preflight(text: str) -> dict[str, Any]:
         "returnEdges": return_edges,
         "maxLabelChars": max_label,
         "estimatedAspectTall": estimated_aspect_tall,
+        "lrAutoRevert": lr_auto_revert,
         "warnings": warnings,
         "rewriteSuggestion": suggestion,
     }
@@ -1693,7 +1703,7 @@ def run_selftest() -> dict[str, Any]:
     if any(item["code"] == "preflight_tall_tb_chain" for item in mermaid_static_preflight(tb_five).get("warnings") or []):
         raise AssertionError("5 节点 TB 图被误报超高")
     checks.append("mermaid_preflight_tb_chain")
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-render-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-render-selftest-")
     try:
         workspace, project_dir, package_dir, outline = _build_selftest_project(tmp)
         first = render_resources(workspace=workspace, project_dir=project_dir, browser="auto")

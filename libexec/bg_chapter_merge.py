@@ -42,7 +42,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib
+from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, tempdir
 from _lib import text as text_lib
 import bg_outline_validate as outline_validate
 
@@ -1346,7 +1346,7 @@ def _build_selftest_project(base: Path) -> tuple[Path, Path, Path, dict[str, Any
 
 def run_selftest() -> dict[str, Any]:
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-chapter-merge-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-chapter-merge-selftest-")
     try:
         workspace, project_dir, package_dir, outline = _build_selftest_project(tmp)
         leaves = leaf_nodes(outline)
@@ -1499,7 +1499,7 @@ def run_selftest() -> dict[str, Any]:
         checks.append("status")
         # N6/N8：计划表按 chapter-result.tables[].anchorId 同步 done（题注可改写）；
         # 无结果时仍兼容正文 `▼表<计划题注>`；两张表一张有结果、一张没结果，验证不会误标。
-        with tempfile.TemporaryDirectory(prefix="bidgenie-figure-index-") as fig_tmp:
+        with tempdir.temporary_directory(prefix="bidgenie-figure-index-") as fig_tmp:
             fig_package_dir = Path(fig_tmp)
             (fig_package_dir / "chapters").mkdir()
             (fig_package_dir / "chapters" / "_results").mkdir()
@@ -1536,7 +1536,7 @@ def run_selftest() -> dict[str, Any]:
                 raise AssertionError(f"N8 figurePlan 未同步 done：{fig_outline['chapters'][0]['figurePlan']}")
         checks.append("figure_index_table_status")
         # P0-1：--batch k 只读本批清单（不再退化成全部）；旧 figures.status 别名归一为 produced
-        with tempfile.TemporaryDirectory(prefix="bidgenie-batch-select-") as batch_tmp:
+        with tempdir.temporary_directory(prefix="bidgenie-batch-select-") as batch_tmp:
             batch_package = Path(batch_tmp)
             (batch_package / "chapters" / "_results").mkdir(parents=True)
             (batch_package / "chapters" / "_batches").mkdir(parents=True)

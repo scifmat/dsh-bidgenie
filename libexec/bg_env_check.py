@@ -41,7 +41,7 @@ _PLUGIN_ROOT = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import deps, errors, jsonio, logging as event_log, paths, runtime as runtime_env  # noqa: E402
+from _lib import deps, errors, jsonio, logging as event_log, paths, runtime as runtime_env, tempdir  # noqa: E402
 
 CHECKLIST_PATH = _SCRIPT_DIR / "checklist.json"
 ENV_CHECK_SCHEMA_VERSION = "1.0"
@@ -62,6 +62,8 @@ SCRIPT_SELFTEST_TIMEOUT_SEC = 60.0
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?")
 _KEBAB_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+#: D1（第三轮冒烟）：沙箱/文件权限被拒的典型报错（Windows AppContainer + 0700 DACL）。
+_PERMISSION_ERROR_RE = re.compile(r"WinError 5|拒绝访问|Access is denied|PermissionError|Permission denied", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +476,8 @@ def check_scripts_integrity(ctx: Mapping[str, Any]) -> dict[str, Any]:
                 payload = _extract_last_json(completed.stdout)
             if completed.returncode != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
                 problems.append(f"{name} --selftest 未通过（exit={completed.returncode}）")
+                combined_output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+                permission_denied = bool(_PERMISSION_ERROR_RE.search(combined_output))
                 problem_details.append(
                     {
                         "script": name,
@@ -481,7 +485,12 @@ def check_scripts_integrity(ctx: Mapping[str, Any]) -> dict[str, Any]:
                         "payload": payload if isinstance(payload, dict) else None,
                         "stdoutTail": (completed.stdout or "")[-800:],
                         "stderrTail": (completed.stderr or "")[-800:],
-                        "cause": "selftest_json_broken" if payload is None and completed.stdout.strip() else "selftest_failed",
+                        "permissionDenied": permission_denied,
+                        "cause": (
+                            "sandbox_permission"
+                            if permission_denied
+                            else ("selftest_json_broken" if payload is None and completed.stdout.strip() else "selftest_failed")
+                        ),
                     }
                 )
                 continue
@@ -489,7 +498,24 @@ def check_scripts_integrity(ctx: Mapping[str, Any]) -> dict[str, Any]:
             skipped_no_selftest.append(name)
         checked.append(name)
     if problems:
-        return _result(STATUS_FAILED, "；".join(problems), {"checked": checked, "problems": problems, "problemDetails": problem_details, "discovered": scripts, "pluginHash": plugin_hash, "cause": "selftest_json_broken" if problem_details and all(item.get("cause") == "selftest_json_broken" for item in problem_details) else "script_selftest_failed"})
+        permission_denied = any(bool(item.get("permissionDenied")) for item in problem_details)
+        cause = "sandbox_permission" if permission_denied else ("selftest_json_broken" if problem_details and all(item.get("cause") == "selftest_json_broken" for item in problem_details) else "script_selftest_failed")
+        evidence = "；".join(problems)
+        if permission_denied:
+            evidence += "（疑似沙箱/文件权限限制：WinError 5；可将 DSH 文件策略切为「完全权限」后重跑）"
+        return _result(
+            STATUS_FAILED,
+            evidence,
+            {
+                "checked": checked,
+                "problems": problems,
+                "problemDetails": problem_details,
+                "discovered": scripts,
+                "pluginHash": plugin_hash,
+                "permissionDenied": permission_denied,
+                "cause": cause,
+            },
+        )
     return _result(
         STATUS_PASSED,
         f"{len(checked)}/{len(scripts)} 脚本动态发现、无 BOM、可编译、自检通过",
@@ -1109,6 +1135,14 @@ def failure_diagnosis(item_id: str, detail: Mapping[str, Any] | None) -> dict[st
     errors = detail.get("errors") if isinstance(detail.get("errors"), Mapping) else {}
     binary = detail.get("binaryIntegrity") if isinstance(detail.get("binaryIntegrity"), Mapping) else {}
     if item_id == "scripts_integrity":
+        if detail.get("permissionDenied") or detail.get("cause") == "sandbox_permission":
+            return {
+                "cause": "sandbox_permission",
+                "causeDetail": "脚本自检被文件权限拒绝（WinError 5/拒绝访问），疑似 DSH 沙箱或临时目录 ACL 限制",
+                "remediable": "manual",
+                "repairAction": "",
+                "hint": "把 DSH 文件策略切为「完全权限」（danger-full-access）后重跑 bg_env_check --apply；如仍失败，设置 BIDGENIE_TEMP_DIR 指向可写目录",
+            }
         cause = "selftest_json_broken" if detail.get("cause") == "selftest_json_broken" else "script_selftest_failed"
         problems = "；".join(str(problem) for problem in (detail.get("problems") or []))[:300]
         if cause == "selftest_json_broken":
@@ -1221,7 +1255,19 @@ def build_report(
     if failed_items:
         error_text = " ".join(str(item.get("detail")) for item in failed_items)
         diagnoses = [item["detail"] for item in failed_items]
-        if all(diagnosis.get("remediable") == "plugin_defect" for diagnosis in diagnoses):
+        sandbox_failed = [item for item in failed_items if item["detail"].get("cause") == "sandbox_permission"]
+        if sandbox_failed:
+            root_cause = {
+                "code": "sandbox_permission",
+                "message": "脚本自检被文件权限拒绝（WinError 5/拒绝访问），疑似 DSH 沙箱限制；请把文件策略切为「完全权限」后重跑环境检查",
+                "items": [item["id"] for item in sandbox_failed],
+                "hint": "DSH 会话设置 → 文件访问策略 → 完全权限；或在可写环境设置 BIDGENIE_TEMP_DIR 后重试",
+                "diagnoses": [
+                    {"id": item["id"], **{key: item["detail"].get(key) for key in ("cause", "causeDetail", "remediable", "hint")}}
+                    for item in sandbox_failed
+                ],
+            }
+        elif all(diagnosis.get("remediable") == "plugin_defect" for diagnosis in diagnoses):
             root_cause = {
                 "code": "plugin_defect",
                 "message": "插件自检/脚本输出问题，不是依赖缺失；请修脚本或重装插件",
@@ -1272,7 +1318,8 @@ def build_report(
                 "source": diagnostic.get("source") or "",
                 "candidates": diagnostic.get("candidates") or [],
             }
-        install_hint = f"pip install --target <DSH_HOME>/data/bidgenie/pylibs -r <plugin>/libexec/requirements.txt（或设置 BIDGENIE_PYLIBS 指向完整 pylibs）"
+        if root_cause.get("code") != "sandbox_permission":
+            install_hint = f"pip install --target <DSH_HOME>/data/bidgenie/pylibs -r <plugin>/libexec/requirements.txt（或设置 BIDGENIE_PYLIBS 指向完整 pylibs）"
     payload: dict[str, Any] = {
         "ok": True,
         "command": command,
@@ -1302,6 +1349,7 @@ def build_report(
         "skipped": [],
         "rootCause": root_cause,
         "installHint": install_hint,
+        "sandboxHint": str((root_cause or {}).get("hint") or "") if (root_cause or {}).get("code") == "sandbox_permission" else "",
         "dependencyDiagnostics": diagnostic,
     }
     if run is not None:
@@ -1399,7 +1447,7 @@ def apply_env_check(
 def run_selftest() -> dict[str, Any]:
     """脚本自检：基线、调度覆盖、跳过规则、env-check 读写（临时工作区）。"""
     checks: list[str] = []
-    tmp = Path(__import__("tempfile").mkdtemp(prefix="bidgenie-env-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-env-selftest-")
     try:
         checklist = load_checklist()
         items = checklist_items(checklist)

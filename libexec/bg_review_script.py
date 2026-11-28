@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, text as text_lib
+from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, text as text_lib, tempdir
 import bg_outline_validate as outline_validate
 import bg_review_issues as review_issues
 
@@ -92,6 +92,43 @@ def caption_like_number(caption: str) -> bool:
     """R-13：题注去掉 ▼表/▲图 前缀后以「数字+量词」开头（会读成「表3」式编号）。"""
     body = re.sub(r"^[▼▲][表图]\s*", "", str(caption or ""))
     return bool(text_lib.caption_number_prefix(body))
+
+
+#: D7（第三轮冒烟）：跨章数量索引用的「名词 + 数量 + 单位」模式（只做索引，不判问题）。
+QUANTITY_RE = re.compile(
+    r"([\u4e00-\u9fa5A-Za-z]{2,10})\s*[^\d\n。；;，,、]{0,6}?(\d+(?:\.\d+)?)\s*"
+    r"(套|根|个|台|辆|项|块|处|段|人|班|夜|天|个日历日|㎡|m²|平方米|米|公里|千米|吨|件|份)"
+)
+
+
+def build_quantity_index(chapter_texts: Mapping[str, str], *, limit: int = 30) -> list[dict[str, Any]]:
+    """把各章「同类指标」的数值并列出来供 B 层核对（D7；不生成问题，避免误报）。"""
+    seen: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for chapter_id, text in chapter_texts.items():
+        body = body_text(text)
+        for match in QUANTITY_RE.finditer(body):
+            noun = match.group(1).strip()
+            value = match.group(2)
+            unit = match.group(3)
+            if len(noun) < 2 or noun in ("合计", "共计", "其中", "上述"):
+                continue
+            seen.setdefault((noun, unit), {}).setdefault(chapter_id, set()).add(value)
+    rows: list[dict[str, Any]] = []
+    for (noun, unit), by_chapter in seen.items():
+        if len(by_chapter) < 2:
+            continue
+        values = {value for chapter_values in by_chapter.values() for value in chapter_values}
+        if len(values) < 2:
+            continue
+        rows.append(
+            {
+                "label": f"{noun}（{unit}）",
+                "chapterCount": len(by_chapter),
+                "chapters": {chapter_id: sorted(chapter_values) for chapter_id, chapter_values in by_chapter.items()},
+            }
+        )
+    rows.sort(key=lambda item: (-int(item.get("chapterCount") or 0), str(item.get("label") or "")))
+    return rows[:limit]
 
 
 def markdown_tables(text: str) -> list[dict[str, Any]]:
@@ -318,6 +355,7 @@ def review_a_layer(
     render_anchors = render_manifest.get("anchors") if isinstance(render_manifest.get("anchors"), Mapping) else {}
     chapter_rows: list[dict[str, Any]] = []
     pending_chapters: list[dict[str, Any]] = []
+    chapter_texts: dict[str, str] = {}
     special_rows: list[dict[str, Any]] = []
     table_rows: list[dict[str, Any]] = []
     figure_rows: list[dict[str, Any]] = []
@@ -412,6 +450,7 @@ def review_a_layer(
                 }
             )
             continue
+        chapter_texts[chapter_id] = text
         headings = heading_info(text)
         if headings:
             first = headings[0]
@@ -689,6 +728,7 @@ def review_a_layer(
         "leaves": leaves,
         "chapterRows": chapter_rows,
         "pendingChapters": pending_chapters,
+        "quantityIndex": build_quantity_index(chapter_texts),
         "totalWordChecked": bool(expected_word > 0 and not pending_chapters),
         "specialRows": special_rows,
         "tableRows": table_rows,
@@ -878,6 +918,20 @@ def render_report(
     for row in result.get("figureRows") or []:
         lines.append(f"| {row.get('chapterId')} | {row.get('anchorId')} | {row.get('type')} | {'✓' if row.get('marker') else '-'} | {row.get('status')} | {row.get('detail') or ''} |")
     lines.append(f"\n计划：{result.get('planned')}；产出：{result.get('produced')}；配额：{result.get('quota')}。")
+    quantity_rows = result.get("quantityIndex") or []
+    if quantity_rows:
+        lines.append("")
+        lines.append("## 跨章数量索引（B 层核对用，不判问题）")
+        lines.append("")
+        lines.append("同一指标在 ≥2 章出现且数值不同时列出（可能包含分项/合计的正常差异，需 B 层结合上下文判断）。")
+        lines.append("")
+        lines.append("| 指标 | 出现章节 | 各章数值 |")
+        lines.append("|---|---|---|")
+        for row in quantity_rows:
+            chapters = "；".join(
+                f"{chapter_id}: {'/'.join(values)}" for chapter_id, values in (row.get("chapters") or {}).items()
+            )
+            lines.append(f"| {str(row.get('label') or '').replace('|', '/')} | {row.get('chapterCount')} | {chapters.replace('|', '/')} |")
     lines.append("")
     lines.append("## 覆盖率矩阵（criterionId × chapterId，A 层计划引用）")
     lines.append("")
@@ -943,6 +997,14 @@ def run_selftest() -> dict[str, Any]:
     if text_lib.rewrite_caption_number_prefix("3 条路段设施供货清单") != "各条路段设施供货清单":
         raise AssertionError("数字+量词题注改写不正确")
     checks.append("caption_number_like")
+    # D7：跨章数量索引（只列不同值，不判问题）
+    quantity_rows = build_quantity_index({"1-1": "隔离柱 103 根，护栏 1863 套", "2-1": "隔离柱 245 根，护栏 1863 套"})
+    labels = {str(row.get("label")) for row in quantity_rows}
+    if not any(label.startswith("隔离柱") for label in labels):
+        raise AssertionError(f"跨章数量索引未列出不同值：{quantity_rows}")
+    if any(label.startswith("护栏") for label in labels):
+        raise AssertionError(f"跨章数量索引误列同值指标：{quantity_rows}")
+    checks.append("quantity_index")
     # P2-4：技术正文商务/报价混入机检
     business_hits = [bool(re.search(pattern, "价格评审按低价优先法，评标基准价…最高限价 130.86 万元，货款支付分两段 97%")) for pattern, _, _ in BUSINESS_PATTERNS]
     if not all(business_hits):
@@ -1033,7 +1095,7 @@ def run_selftest() -> dict[str, Any]:
         raise AssertionError(f"跨轮排序不正确：{sorted_ids}")
     checks.append("carry_forward")
     # P0-1：chapters/_batches 等元数据目录不得参与章节树对账
-    with tempfile.TemporaryDirectory(prefix="bidgenie-review-tree-") as tmp:
+    with tempdir.temporary_directory(prefix="bidgenie-review-tree-") as tmp:
         package_dir = Path(tmp)
         chapters_dir = package_dir / "chapters"
         (chapters_dir / "1-项目理解").mkdir(parents=True)

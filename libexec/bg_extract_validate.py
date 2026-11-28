@@ -46,7 +46,7 @@ _PLUGIN_ROOT = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib  # noqa: E402
+from _lib import errors, jsonio, logging as event_log, paths, schema, state as state_lib, tempdir  # noqa: E402
 from _lib import extraction_risk  # noqa: E402
 
 SCHEMA_VERSION = "1.0"
@@ -1064,7 +1064,7 @@ def run_selftest() -> dict[str, Any]:
     import tempfile
 
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-validate-v2-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-validate-v2-selftest-")
     try:
         project_dir = tmp / "project"
         build_selftest_project(project_dir)

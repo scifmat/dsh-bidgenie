@@ -29,7 +29,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, paths, state as state_lib, text as text_lib
+from _lib import errors, jsonio, paths, state as state_lib, text as text_lib, tempdir
 
 SCHEMA_VERSION = "1.0"
 FIGURE_TYPES: tuple[str, ...] = ("table", "mermaid", "network", "terminal")
@@ -1479,7 +1479,7 @@ def _build_document_and_expected(require_layout: bool = True) -> tuple[dict[str,
 def run_selftest() -> dict[str, Any]:
     """大纲校验自检：golden 通过 + 层级/覆盖/字数/图表/anchor/依赖/路径/文件树负例。"""
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-outline-validate-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-outline-validate-selftest-")
     try:
         workspace, project_dir, package_dir, package_meta = build_selftest_package(tmp)
         from bg_outline_apply import normalize_outline

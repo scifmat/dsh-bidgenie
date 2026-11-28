@@ -27,7 +27,7 @@ from typing import Any, Mapping, Sequence
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _lib import errors, jsonio, logging as event_log, paths, state as state_lib
+from _lib import errors, jsonio, logging as event_log, paths, state as state_lib, tempdir
 from _lib import text as text_lib
 import bg_outline_validate as outline_validate
 
@@ -915,7 +915,7 @@ def _build_selftest_project(base: Path) -> tuple[Path, Path, Path, int]:
 def run_selftest() -> dict[str, Any]:
     """离线自检：概览实际字数按审查口径复算（P2-10）+ md/docx 产出。"""
     checks: list[str] = []
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-overview-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-overview-selftest-")
     try:
         workspace, project_dir, package_dir, measured_total = _build_selftest_project(tmp)
         out_dir = tmp / "out"

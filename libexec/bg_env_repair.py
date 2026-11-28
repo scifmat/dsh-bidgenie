@@ -30,7 +30,7 @@ for _entry in (str(_VENDOR), str(_PLUGIN_ROOT)):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
 
-from _lib import deps, errors, jsonio, paths  # noqa: E402
+from _lib import deps, errors, jsonio, paths, tempdir  # noqa: E402
 
 SCHEMA_VERSION = "1.0"
 ACTIONS_FILE = _VENDOR / "env-actions.json"
@@ -378,7 +378,7 @@ def rollback_repair(workspace: str | Path) -> dict[str, Any]:
 
 
 def run_selftest() -> dict[str, Any]:
-    tmp = Path(tempfile.mkdtemp(prefix="bidgenie-env-repair-selftest-"))
+    tmp = tempdir.mkdtemp(prefix="bidgenie-env-repair-selftest-")
     checks: list[dict[str, Any]] = []
     try:
         workspace = paths.normalize_workspace(tmp)
