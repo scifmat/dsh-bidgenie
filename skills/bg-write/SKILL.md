@@ -21,6 +21,7 @@ description: BidGenie 技术方案正文撰写（F5-2）。当项目处于 draft
 3. **优先用生成器**：`bg_write_brief.py --batch <k>` 输出 `chapters/_batches/batch-<k>.md/.json`（含本批章节、criterionRefs、contentRequirements、figurePlan、projectFacts、dependencySummaries、maxBodyHeadingLevel），直接把 md 交给子智能体，不再手工拼 prompt；`--all` 可一次生成全部批次（默认 `--brief` 只回批次摘要与路径，加 `--full` 才回完整 chapters），`--no-write` 只预览。批次按大纲 `seq` 连续切分，生成器同时维护 `_batch-state.json` 台账（含实际 batchSize）。
 4. 批间并发受 `maxParallelWriters`/DSH 并发上限限制；每批结束调 `bg_chapter_merge.py` 合并本批结果，再下一批。
 5. 中断恢复：先用 `bg_state.py doctor` 看 `staleResults`/待做章节；读 `_batches/_batch-state.json` 与 `pending`；**优先 `send_message` 唤醒原批次子代理**（保留已读原文上下文，省重读成本），原会话不可用再重派；`writing` 超 30 分钟无更新视为失败，重置 pending。
+6. **批次复用（可选，验过有效）**：同一包内第 1 批完成后，可用 `send_message` 唤醒同一写作子智能体承接第 2/3 批——它保留已读的提取稿、前批章节与文风口径，省掉重读；同一子智能体连续复用建议 **2–3 批**，换包/换阶段或上下文过长（子代理报告记忆/长度压力）再新派。DSH 子智能体完成后可被重新唤醒（上下文保留），但不要把它当跨天/跨会话的持久记忆。
 
 ## 子智能体交付（逐章）
 

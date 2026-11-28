@@ -42,6 +42,7 @@ description: BidGenie 技术方案审查（F6）。当项目处于 review 阶段
 ## 轮次与台账
 
 - 每轮固定四条产物：`reviews/issues.json`（单一台账）、`reviews/rounds/round-<k>.issues.json`（当轮快照）、`reviews/review-report.md`（含 carry-forward 复检表）、`reviews/rounds/round-<k>.optimization.json`（本轮优化记录）。
+- **复审复用（可选）**：同一包的多轮复审优先 `send_message` 唤醒同一审查子智能体（保留上轮问题、已读章节与判断依据）；换包或问题主题变化大时再新派。子智能体上下文过长时以它的“记忆压力”提示为准，不要硬撑。
 - 带入条目新增字段：`carriedFrom`（首次带入前的轮次）、`lastRound`（最近参与轮次）、`recheck{round, previousStatus, result, note}`；`result` 取值：`verified` / `recurred` / `still-open` / `regressed` / `verified-previously` / `pending-semantic` / `carried-open` / `wontfix-carried`。后续 `close` 会补 `recheck.resolvedStatus/resolvedAt`（当前状态以 `status` 为准，报告复检表为带入时点结论）。
 - 本轮新问题分配 `RV-<k>-<seq4>`；带入条目**沿用旧 ID**（如 `RV-1-0001`），同条件不再生成新副本。
 - 旧版本脚本把台账整体重写后的修复：`bg_review_issues.py carry-forward --round <k>`（从 `rounds/round-<k-1>.issues.json` 补回，幂等，可 `--dry-run`）。
