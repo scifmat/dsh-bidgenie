@@ -889,6 +889,36 @@ def _caption_base(title: str, *, limit: int = 24) -> str:
     return base.strip("、，；。的等") or "本章"
 
 
+def _rewrite_leaf_titles(children: list[dict[str, Any]], parent_title: str) -> list[str]:
+    """BUG-04（VM 冒烟）：骨架叶子标题与父级同名/兄弟重名时补后缀，减少 Agent 逐条改写。
+
+    返回需要 Agent 优先改写的叶子 id（与父级同名或重名）。
+    """
+    duplicates: list[str] = []
+    used: set[str] = set()
+    for child in children:
+        base = _clean_title(str(child.get("title") or ""))
+        if base == parent_title:
+            duplicates.append(str(child.get("id") or ""))
+            base = f"{base}（分项响应）"
+        elif base in used:
+            base = f"{base}（{int(child.get('order') or 0)}）"
+        child["title"] = base
+        used.add(base)
+    return duplicates
+
+
+def _figure_purpose(caption: str, plan_type: str) -> str:
+    """BUG-04：图表 purpose 按类型写成可执行说明，不再统一「集中呈现…支撑可读性」。"""
+    if plan_type == "table":
+        return f"用表格逐项列出「{caption}」的响应内容与关键指标，便于评审对照"
+    if plan_type == "mermaid":
+        return f"用流程图说明「{caption}」的处理步骤、责任岗位与关键判定节点"
+    if plan_type == "terminal":
+        return f"用终端示意图展示「{caption}」的操作入口或输出示例"
+    return f"用示意图说明「{caption}」的关键关系"
+
+
 def _figure_caption(title: str, plan_type: str) -> str:
     """F-04：按章节标题语义给图表题注，而不是统一「XX相关要点表/相关流程」。
 
@@ -1070,6 +1100,7 @@ def build_outline_draft(
     parent_nodes: list[dict[str, Any]] = []
     leaf_specs: list[dict[str, Any]] = []
     standard_skipped = 0
+    duplicate_title_ids: list[str] = []
     for crit_index, criterion in enumerate(criteria, start=1):
         _content_clause, skipped_standard_items = _strip_review_standard_section(str(criterion.get("clause") or ""))
         standard_skipped += skipped_standard_items
@@ -1136,6 +1167,8 @@ def build_outline_draft(
                 child["criterionRefs"][0]["score"] = round(weight_value, 2)
         # P1-4：评分标准要求提供检测报告/偏离表/说明书/承诺函/样品等材料时，
         # 自动增加特殊章节（handling），避免写作阶段编造“已提供/已具备”。
+        parent_title = _clean_title(criterion["factor"])
+        duplicate_title_ids.extend(_rewrite_leaf_titles(children, parent_title))
         special_candidate = _special_material_candidate(criterion)
         if special_candidate is not None:
             children.append(
@@ -1219,11 +1252,12 @@ def build_outline_draft(
             if not leaf_specs:
                 return
             leaf = leaf_specs[offset % len(leaf_specs)]
+            caption = _figure_caption(str(leaf["title"]), plan_type)
             plan = {
                 "anchorId": f"fig-{leaf['id']}-{len(leaf['figurePlan']) + 1:02d}",
                 "type": plan_type,
-                "purpose": f"用{'表格' if plan_type == 'table' else '图'}集中呈现「{leaf['title']}」的关键信息，支撑正文可读性",
-                "caption": _figure_caption(str(leaf["title"]), plan_type),
+                "purpose": _figure_purpose(caption, plan_type),
+                "caption": caption,
                 "status": "planned",
             }
             if subtype:
@@ -1265,6 +1299,22 @@ def build_outline_draft(
     }
     # 先按同一套归一化规则分配精确字数/重算 coveredBy，避免生成后再 --strict 才发现
     # 父级分值和、字数 Σ、criterion coveredBy 等基础错误。
+    skeleton_leaf_ids = [
+        str(child.get("id") or "")
+        for parent in parent_nodes
+        for child in parent.get("children") or []
+        if not outline_validate.is_special_chapter(child)
+    ]
+    figure_count = sum(len(child.get("figurePlan") or []) for parent in parent_nodes for child in parent.get("children") or [])
+    draft["extensions"]["rewriteHints"] = {
+        "leafTitleCount": len(skeleton_leaf_ids),
+        "figureCount": figure_count,
+        "duplicateParentTitleIds": duplicate_title_ids,
+        "note": (
+            "骨架标题/图表题注均需按本包 06/09 事实改写；duplicateParentTitleIds 为与父级同名"
+            "（已临时补「分项响应」，仍建议改写）；图表 purpose/caption 为骨架建议，按正文实际调整"
+        ),
+    }
     return normalize_outline(draft, package_meta=package_meta, project_name=project_name, package_id=package_id)
 
 
@@ -1300,6 +1350,7 @@ def init_outline_draft(
         1 for _node in outline_validate.iter_preorder(draft.get("chapters") or []) if not (isinstance(_node.get("children"), list) and _node.get("children"))
     )
     standard_skipped = int((draft.get("extensions") or {}).get("standardSectionSkipped") or 0)
+    rewrite_hints = (draft.get("extensions") or {}).get("rewriteHints") or {}
     if preview:
         return {
             "ok": True,
@@ -1313,8 +1364,11 @@ def init_outline_draft(
             "parentCount": len(draft.get("chapters") or []),
             "leafCount": leaf_count,
             "standardSectionSkipped": standard_skipped,
+            "rewriteHints": rewrite_hints,
             "note": f"预览：将生成 {len(draft.get('chapters') or [])} 个一级 / {leaf_count} 个末级，"
-            f"其中 {standard_skipped} 个「评审标准」维度已自动跳过；确认后去掉 --preview 落盘。",
+            f"其中 {standard_skipped} 个「评审标准」维度已自动跳过；"
+            f"{int(rewrite_hints.get('leafTitleCount') or 0)} 个标题 / {int(rewrite_hints.get('figureCount') or 0)} 个图表题注为骨架、需 Agent 改写；"
+            "确认后去掉 --preview 落盘。",
             "validation": validation,
         }
     outline_dir(package_dir, create=True)
@@ -1342,6 +1396,7 @@ def init_outline_draft(
         "parentCount": len(draft.get("chapters") or []),
         "leafCount": leaf_count,
         "standardSectionSkipped": standard_skipped,
+        "rewriteHints": rewrite_hints,
         "validation": validation,
         "note": draft["extensions"]["note"],
         "next": "Agent 编辑 outline.draft.json（补充事实/重难点/特殊章节）后，运行 --strict 校验 → --materialize → T4",

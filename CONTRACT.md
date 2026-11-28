@@ -67,6 +67,7 @@ python bg_bidder.py validate --workspace <abs> [--bidder <id>] [--json]
 ```
 
 - `--data` 文件结构：`{bidder:{...7.7.1}, certificates?:{items:[]}, performance?:{items:[]}, awardsPenalties?:{awards:[],penalties:[]}}`。
+- `--brief`（所有脚本通用）：大数组只保留头 3 + 尾 1，并附 `<key>Count` 显式总数（如 `chapters` → `chaptersCount`），避免把截断样本误读成实际条数；明细仍完整落盘。
 - 输出 `{ok:true,...}` 或 `{ok:false,error,message,hint}`；退出码 0/2/3/4/5/7。
 - 命名：`dsh/bidders/<slug>-<ts14>-<rand4>/`；文件 `bidder.json`/`certificates.json`/`performance.json`/`awards-penalties.json`/`profile.md`/`meta.json`/`attachments/`。
 - 写入：原子写 + 文件锁（`_lib/jsonio.py`）；更新 `dsh/registry.json` 与 `dsh/config/user-settings.json`；追加事件 `dsh/logs/events-<YYYYMMDD>.jsonl`；敏感字段默认脱敏只在 API 返回层做，文件中保留原值。事件为 UTF-8（无 BOM）JSONL；PowerShell 读取请用 `Get-Content -Encoding utf8`，不要依赖控制台默认编码。异常事件 detail 只存摘要/报告路径（完整清单在 `extraction/common/_extraction-report.json` 等落盘文件），避免 script.error 单条过大。
@@ -125,6 +126,7 @@ plugin/skills/bg-init/SKILL.md         # 项目初始化（F2）
 - `GET /bidgenie/env-check?workspace=` → `{ok,status:'not-run'|'ready',checklistVersion,items:[{id,label,required,status,evidence,remediation,degraded}],requiredPassed,requiredTotal}`。
 - `POST /bidgenie/env-check/run` body `{workspace,itemIds?}` → 调 `--apply`（超时 10 分钟；不自动安装依赖），返回同上 + `checkedAt`。
 - 版本化跳过：`checklistVersion`+`itemVersion`+`status=passed` → 跳过；结果可重复执行。
+- 沙箱权限：`_lib/deps` 读取 pylibs 被文件权限拒绝时不抛 traceback，返回 `sandboxDenied/deniedPaths`；env-check 失败项 `detail.cause=sandbox_permission`，报告 `rootCause.code=sandbox_permission` + `sandboxHint`（提示会话切「完全权限」，**不是依赖缺失**，`installHint` 为空）。
 
 ### 8.3 项目初始化与状态机（M2）
 
@@ -215,6 +217,8 @@ python bg_extract_validate.py --workspace <ws> --project <projectDir> [--json]
 
 - 校验：9 文件存在、每个文件 H1 唯一且等于 manifest.title、`expectedSections` 齐全、禁止机器表头与 frontmatter 字段表、07 评分表三列+`## 分值合计`（合计与声明满分 ±0.5）、正文/表格非空；包数一致。
 - 输出 `_extraction-report.json`（files 含 expected/found/missingSections/blockers/warnings）；blocker→exit4 `E_VALIDATE_FAILED`，warning→0。
+- 回退风险：`fallbackReview` 含 `required/risks/confirmedAt`，并新增 `summary`（`riskCount/newRiskCount/annotatedRiskCount/items/userPrompt`）——区分「转换清单新发现」与「提取稿已按 §5.1 标注」，`userPrompt` 可直接作为给用户的 3 行摘要。
+- 共用文件：`sharedExtractionFiles` 列出多包内容逐字节相同的包类提取文件（如两包共用 07 评分标准），仅提示可复用、不阻断。
 
 ### 10.4 关键信息导出（`bg_export_docx.py --mode keyinfo`，v2）
 
@@ -248,6 +252,7 @@ python bg_export_docx.py --workspace <ws> --project <projectDir> --mode keyinfo 
 
 - 大纲文件统一放 `<packageDir>/chapters/_outline/`：`outline.json`、`outline.draft.json`、`outline.json.bak-<ts>`、锁文件；`_outline/` 是元数据目录，不参与章节树校验。
 - F5-1 大纲输入：`extraction/common/01-Basic-Information.md`、`extraction/packages/package-<N>/06-Procurement-Content.md`、`07-Evaluation-Criteria.md`、`09-Technical-Requirements.md` + `package-meta.json` 用户回答；不读 05/08 等商务/资格全文。
+- 节点 `reviewState.coverage` 取值：`unreviewed|pass|weak|missing|notApplicable`；`notApplicable` 用于特殊章节/不适用的末级，审查侧可写、`bg_outline_validate` 与 `bg_finalize --lock` 均接受（不得再报 `review_coverage_invalid`）。
 - F5-2 正文输入：本章 `contentRequirements`/`criterionRefs`/`figurePlan`、`package-meta.json` 用户回答、01/06/07/09 中与本章相关片段；不读商务/资格类全文，减少上下文。
 - 以上输入范围是硬约束；技能/脚本不得自行扩大读取范围。
 

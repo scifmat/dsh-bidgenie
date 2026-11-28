@@ -2,6 +2,29 @@
 
 本文件记录 `dsh-bidgenie` 每个对外发布版本的变更。版本号规则见开发工作区 `docs/BidGenie-版本号与发布计划-20261128.md`；历史以 git tag + 本文件为准。
 
+## [0.1.0-alpha.2] - 2026-11-28
+
+修复 VM 流程冒烟（0.1.0-alpha.1）发现的 2 个 P0 与若干体验问题。
+
+### Added
+
+- 环境检查识别「依赖目录被 DSH 沙箱拒绝」（`sandbox_permission`）：给出「切完全权限」的明确处置，不再抛 traceback、不再误判为依赖缺失。
+- 提取校验新增 `fallbackReview.summary`（区分转换清单新发现 / 提取稿已标注风险，含 3 行摘要）与 `sharedExtractionFiles`（多包共用文件可复用提示）。
+- `--init-draft` 返回 `rewriteHints`（需改写标题/图表题注数量、与父级同名清单）。
+- `--all-selected` 返回 `autoPlan`（各包人员/设备推导粒度差异）。
+- run-manifest 与 `_latest.json` 增加 `runStatus`（进行中 / 已收尾）。
+
+### Changed
+
+- 沙箱权限处理改为技能引导：识别到 `WinError 5/拒绝访问` 时请求用户把会话切「完全权限」后重跑；不重装依赖、不逐条升级授权。
+- `--init-draft` 的叶子标题与父级同名时自动补「（分项响应）」；图表 purpose 改为按图类型的具体说明。
+- auto 模式按项目类型给终端图参考值：施工/货物类默认 0，软件/系统类保持默认。
+
+### Fixed
+
+- 特殊章节 `coverage=notApplicable` 不再被 `bg_finalize --lock` 误挡（`REVIEW_COVERAGE` 已纳入）。
+- `--brief` 截断数组时补 `<key>Count`，避免 `chapters: [4 项]` 被误读成只有 4 章。
+
 ## [0.1.0-alpha.1] - 2026-11-28
 
 首个带 tag 的内测版本（Alpha），基线为 `0.1.0-alpha.0`。包含第三轮冒烟修复与发布资料整改。

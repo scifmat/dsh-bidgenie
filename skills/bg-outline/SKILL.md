@@ -25,6 +25,7 @@ description: BidGenie 技术方案大纲编写（F5-1）。当项目处于 outli
 ## 流程
 
 1. 读输入并确认字数/配额；抽技术评审因素 → `criterionIndex[]`（稳定 criterionId）。可先跑 `bg_outline_apply.py --init-draft` 从 07 技术评分表生成骨架（一级=评分因素、分项=末级、criterionIndex/分值/字数/图表配额预填；分值列 `15` 或 `15分` 均可，自动跳过「合计/小计/总分」，按 ①②③ 拆末级并受总字数 floor 约束合并；**只拆「一、评审内容」的 ①②③，「二、评审标准」的符合度/完整性/合理性/针对性/科学性维度自动跳过**；先用 `--preview` 看“将生成 N 个末级、M 个评审标准维度已跳过”再落盘），再人工/Agent 补充 06/09 事实与重难点；已有草稿时用 `--force-draft` 覆盖。**init-draft 的章节标题和图表题注只是骨架（叶子带 `extensions.titleSource="skeleton"`；图表题注已按标题语义给「参数对照表/施工流程图」等具体后缀，仍可能偏泛），F5-1 必须按本包 06/09 实际改写为通顺短语，不能直接交付半句标题。**
+   - **按 `rewriteHints` 定点改写（BUG-04）**：init-draft 返回 `rewriteHints`（`leafTitleCount / figureCount / duplicateParentTitleIds`）。`duplicateParentTitleIds` 是脚本已补「分项响应」仍建议改写的叶子；优先把它们改成「对象+动作」的具体标题（如「各路段热熔标线参数响应」），图表 purpose/caption 改为「本章实际要展示什么」，不要保留「集中呈现…可读性」这类骨架话。
 2. 拆章节树（按语义拆子项、分值拆分）；计算 scoreWeight/priority/dependsOn/relatedChapters。
 3. **识别特殊章节（加载 `bg-special-chapters`）**：命中证书/检测报告/偏离表/承诺函/样品等，末级写 `handling`、`wordTarget=200`、`figurePlan=[]`；普通技术方案不标记。
 4. 字数分配：特殊章节固定 200（100–300），普通章节按 share→floor→取整百分摊剩余，Σ=expectedWordCount；写 `wordTarget` + basis。

@@ -7,6 +7,9 @@
 
 约定：
 - 只读环境、幂等，不下载/安装任何东西；
+- **不因权限错误抛异常**：DSH ``workspace-write`` 沙箱会拒绝读取 ``%USERPROFILE%\\.dsh\\data``
+  等目录（WinError 5），这里统一捕获并返回 ``sandboxDenied`` 结构化状态，由
+  env-check / 技能提示用户切「完全权限」，避免 traceback 打断首次启动；
 - pywin32 的 DLL（``pywin32_system32``）与含 `.pyd`/`.dll` 的子目录通过 ``os.add_dll_directory`` 加入；
 - 诊断输出实际目录、来源、候选目录与 key imports，便于 env-check rootCause。
 """
@@ -64,14 +67,63 @@ def pylibs_dir() -> Path:
     return plugin_pylibs_dir()
 
 
+def probe_dir(path: Path) -> tuple[bool, str]:
+    """安全判断目录是否存在。
+
+    Windows 下 ``Path.is_dir()`` 对 ACL 拒绝的目录会抛 ``PermissionError``；这里
+    统一返回 ``(exists, error)``，让调用方决定是「缺失」还是「被沙箱拒绝」。
+    """
+    try:
+        return bool(path.is_dir()), ""
+    except OSError as exc:  # PermissionError / WinError 5 等
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _probe_file(path: Path) -> bool:
+    """安全判断文件是否存在（权限错误按不存在处理，避免遍历时中断）。"""
+    try:
+        return bool(path.is_file())
+    except OSError:
+        return False
+
+
+def _denied(candidates: list[dict[str, str]], source: str, path: Path, error: str) -> None:
+    item = {"source": source, "path": str(path), "error": error}
+    if item not in candidates:
+        candidates.append(item)
+
+
 def active_pylibs() -> dict[str, Any]:
-    """返回实际使用的 pylibs 目录/来源（优先已存在目录；env 显式目录也保留）。"""
+    """返回实际使用的 pylibs 目录/来源；被沙箱拒绝时返回 ``sandboxDenied``。"""
     candidates = candidate_pylibs_dirs()
+    denied: list[dict[str, str]] = []
     for candidate in candidates:
         path = Path(candidate["path"])
-        if path.is_dir():
-            return {"path": str(path), "source": candidate["source"], "exists": True, "candidates": candidates}
-    return {"path": "", "source": "missing", "exists": False, "candidates": candidates}
+        exists, error = probe_dir(path)
+        if exists:
+            return {
+                "path": str(path),
+                "source": candidate["source"],
+                "exists": True,
+                "candidates": candidates,
+                "sandboxDenied": bool(denied),
+                "deniedCandidates": denied,
+            }
+        if error:
+            _denied(denied, candidate["source"], path, error)
+    return {
+        "path": "",
+        "source": "missing",
+        "exists": False,
+        "candidates": candidates,
+        "sandboxDenied": bool(denied),
+        "deniedCandidates": denied,
+    }
+
+
+def sandbox_denied() -> bool:
+    """当前 pylibs 是否因文件权限（DSH 沙箱）读不到。"""
+    return bool(active_pylibs().get("sandboxDenied"))
 
 
 def _remove_existing(entry: str) -> None:
@@ -95,15 +147,45 @@ def _add_dll_dir(directory: Path, dll_dirs: list[str]) -> None:
 
 
 def ensure_dependency_path(*, prepend: bool = True, base: str | Path | None = None) -> dict[str, Any]:
-    """把生效的 pylibs（及 pywin32 子目录/DLL 目录）加入当前进程；幂等。"""
+    """把生效的 pylibs（及 pywin32 子目录/DLL 目录）加入当前进程；幂等，不抛权限异常。"""
     active = active_pylibs()
+    denied: list[dict[str, str]] = list(active.get("deniedCandidates") or [])
     selected = Path(base) if base is not None else Path(active["path"]) if active["path"] else None
-    if selected is None or not selected.is_dir():
-        return {"pylibs": str(selected) if selected else "", "source": active["source"], "exists": False, "added": [], "dllDirs": [], "candidates": active["candidates"]}
+    if selected is not None:
+        exists, error = probe_dir(selected)
+        if not exists:
+            if error:
+                _denied(denied, active["source"], selected, error)
+            if base is None:
+                return {
+                    "pylibs": str(selected),
+                    "source": active["source"],
+                    "exists": False,
+                    "added": [],
+                    "dllDirs": [],
+                    "candidates": active["candidates"],
+                    "sandboxDenied": bool(denied),
+                    "deniedPaths": denied,
+                }
+    if selected is None or not probe_dir(selected)[0]:
+        return {
+            "pylibs": str(selected) if selected else "",
+            "source": active["source"],
+            "exists": False,
+            "added": [],
+            "dllDirs": [],
+            "candidates": active["candidates"],
+            "sandboxDenied": bool(denied),
+            "deniedPaths": denied,
+        }
     added: list[str] = []
     for relative in _PYLIBS_SUBPATHS:
         directory = selected / relative if relative else selected
-        if not directory.is_dir():
+        exists, error = probe_dir(directory)
+        if error:
+            _denied(denied, active["source"], directory, error)
+            continue
+        if not exists:
             continue
         text = str(directory)
         if text in sys.path:
@@ -118,26 +200,77 @@ def ensure_dependency_path(*, prepend: bool = True, base: str | Path | None = No
     if os.name == "nt":
         _add_dll_dir(selected, dll_dirs)
         system32 = selected / "pywin32_system32"
-        if system32.is_dir():
+        exists, error = probe_dir(system32)
+        if error:
+            _denied(denied, active["source"], system32, error)
+        elif exists:
             _add_dll_dir(system32, dll_dirs)
-        for child in sorted(selected.iterdir()):
-            if child.is_dir() and any(item.suffix.lower() in (".pyd", ".dll") for item in child.iterdir() if item.is_file()):
+        try:
+            children = sorted(selected.iterdir())
+        except OSError as exc:
+            _denied(denied, active["source"], selected, f"{type(exc).__name__}: {exc}")
+            children = []
+        for child in children:
+            if not probe_dir(child)[0]:
+                continue
+            try:
+                child_files = list(child.iterdir())
+            except OSError as exc:
+                _denied(denied, active["source"], child, f"{type(exc).__name__}: {exc}")
+                continue
+            if any(_probe_file(item) and item.suffix.lower() in (".pyd", ".dll") for item in child_files):
                 _add_dll_dir(child, dll_dirs)
-    return {"pylibs": str(selected), "source": active["source"], "exists": True, "added": added, "dllDirs": dll_dirs, "candidates": active["candidates"]}
+    return {
+        "pylibs": str(selected),
+        "source": active["source"],
+        "exists": True,
+        "added": added,
+        "dllDirs": dll_dirs,
+        "candidates": active["candidates"],
+        "sandboxDenied": bool(denied),
+        "deniedPaths": denied,
+    }
 
 
 def binary_integrity() -> dict[str, Any]:
-    """检查生效目录的 .pyd/.so 数量与 RECORD 中声明的二进制是否缺失。"""
+    """检查生效目录的 .pyd/.so 数量与 RECORD 中声明的二进制是否缺失（不抛权限异常）。"""
     active = active_pylibs()
     base = Path(active["path"]) if active["path"] else None
-    result: dict[str, Any] = {"pylibs": str(base) if base else "", "source": active["source"], "binaryCount": 0, "declared": 0, "missing": [], "ok": False}
-    if base is None or not base.is_dir():
+    result: dict[str, Any] = {
+        "pylibs": str(base) if base else "",
+        "source": active["source"],
+        "binaryCount": 0,
+        "declared": 0,
+        "missing": [],
+        "ok": False,
+        "sandboxDenied": bool(active.get("sandboxDenied")),
+        "deniedPaths": list(active.get("deniedCandidates") or []),
+    }
+    if base is None:
         result["reason"] = "pylibs 目录不存在"
         return result
-    binaries = [path for path in base.rglob("*") if path.is_file() and path.suffix.lower() in (".pyd", ".so")]
+    exists, error = probe_dir(base)
+    if not exists:
+        if error:
+            result["sandboxDenied"] = True
+            result["deniedPaths"] = [*result["deniedPaths"], {"source": active["source"], "path": str(base), "error": error}]
+            result["reason"] = "pylibs 目录被文件权限拒绝（疑似 DSH 沙箱）；切「完全权限」后重试"
+        else:
+            result["reason"] = "pylibs 目录不存在"
+        return result
+    try:
+        binaries = [path for path in base.rglob("*") if _probe_file(path) and path.suffix.lower() in (".pyd", ".so")]
+    except OSError as exc:
+        result["sandboxDenied"] = True
+        result["reason"] = f"pylibs 目录遍历被拒绝（{type(exc).__name__}）；切「完全权限」后重试"
+        return result
     result["binaryCount"] = len(binaries)
     declared: list[str] = []
-    for record in base.glob("*.dist-info/RECORD"):
+    try:
+        records = list(base.glob("*.dist-info/RECORD"))
+    except OSError:
+        records = []
+    for record in records:
         try:
             for line in record.read_text(encoding="utf-8", errors="replace").splitlines():
                 rel = line.split(",", 1)[0]
@@ -146,7 +279,7 @@ def binary_integrity() -> dict[str, Any]:
         except OSError:
             continue
     result["declared"] = len(declared)
-    missing = [rel for rel in declared if not (base / rel).is_file()]
+    missing = [rel for rel in declared if not _probe_file(base / rel)]
     result["missing"] = missing[:50]
     result["ok"] = bool(binaries) and not missing
     if not binaries:
@@ -179,12 +312,15 @@ def dependency_report() -> dict[str, Any]:
             imports[module_name] = {"status": "ok"}
         except Exception as exc:  # noqa: BLE001 - 诊断只记录结果
             imports[module_name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "module": str(getattr(exc, "name", "") or "")}
+    binary = binary_integrity()
     return {
         "pylibs": active["path"],
         "source": active["source"],
         "exists": active["exists"],
         "candidates": active["candidates"],
+        "sandboxDenied": bool(active.get("sandboxDenied") or binary.get("sandboxDenied")),
+        "deniedPaths": active.get("deniedCandidates") or binary.get("deniedPaths") or [],
         "sysPathEntries": on_path,
         "imports": imports,
-        "binaryIntegrity": binary_integrity(),
+        "binaryIntegrity": binary,
     }

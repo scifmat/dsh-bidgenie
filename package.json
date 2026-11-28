@@ -1,6 +1,6 @@
 {
   "name": "dsh-bidgenie",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "type": "module",
   "description": "标代精灵（BidGenie）DSH 插件：投标技术方案自动化。",
   "icon": "assets/brand/bidgenie-logo.svg",

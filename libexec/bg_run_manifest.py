@@ -111,6 +111,9 @@ def write_latest_pointer(
         "schemaVersion": SCHEMA_VERSION,
         "runId": run_id,
         "kind": kind,
+        # P3-2（VM 冒烟）：多包未 finalize 时 _latest.json 也指向 snapshot，验收方容易误判已收尾；
+        # 显式标注运行状态，finalize 后才是 finalized。
+        "runStatus": "finalized" if kind == "finalize" else "in_progress",
         "updatedAt": paths.iso_now(),
         "startPath": _rel(workspace, start_path),
         "manifestPath": _rel(workspace, manifest_path),
@@ -184,6 +187,7 @@ def start_run(*, workspace: Path, project_dir: Path | None, out_path: Path | Non
     start = {
         "schemaVersion": SCHEMA_VERSION,
         "runId": run_id,
+        "runStatus": "in_progress",
         "startedAt": paths.iso_now(),
         "workspace": str(workspace),
         "projectId": str(project.get("projectId") or ""),
@@ -340,6 +344,7 @@ def generate(
     manifest = {
         "schemaVersion": SCHEMA_VERSION,
         "runId": run_id or f"RUN-{paths.timestamp14()}",
+        "runStatus": "in_progress",
         "generatedAt": paths.iso_now(),
         "workspace": str(workspace),
         "projectId": str(project.get("projectId") or ""),
@@ -500,6 +505,7 @@ def finalize_run(*, workspace: Path, project_dir: Path, out_path: Path) -> dict[
         warnings.append("start 早于最新环境快照 checkedAt（仅告警）")
     manifest["envRefreshedAfterStart"] = env_refreshed_after_start
     manifest["envSnapshotAfterStart"] = env_snapshot_after_start
+    manifest["runStatus"] = "finalized"
     manifest["versionDrift"] = any(drift.values())
     manifest["versionDriftDetail"] = drift
     manifest["warnings"] = warnings
@@ -713,6 +719,7 @@ def brief_run_result(result: Mapping[str, Any]) -> dict[str, Any]:
         "command",
         "runId",
         "runIdSource",
+        "runStatus",
         "manifestPath",
         "runManifestPath",
         "markdownPath",
@@ -732,6 +739,7 @@ def brief_run_result(result: Mapping[str, Any]) -> dict[str, Any]:
             "projectId": manifest.get("projectId"),
             "projectDir": manifest.get("projectDir"),
             "runId": manifest.get("runId"),
+            "runStatus": manifest.get("runStatus"),
             "docxCount": len(manifest.get("docx") or []),
             "eventFileCount": len(manifest.get("eventFiles") or []),
             "pluginFileCount": plugin.get("fileCount"),

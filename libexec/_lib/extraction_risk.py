@@ -46,6 +46,20 @@ REVIEW_MARKERS: tuple[str, ...] = (
 AMBIGUOUS_TOKENS: tuple[str, ...] = ("复选框", "勾选", "方框", "符号丢失", "符号不可辨")
 TABLE_TOKENS: tuple[str, ...] = ("跨页", "合并单元格", "断行", "行列错位", "表格可能丢失")
 MANIFEST_REL = "sources/conversion-manifest.json"
+#: BUG-07（VM 冒烟）：风险来源区分「转换清单新发现」与「提取稿按 §5.1 已标注」，
+#: 便于 Agent 给用户一份简明摘要，而不是把两大段原文直接甩给用户。
+ORIGIN_MANIFEST = "conversion_manifest"
+ORIGIN_ANNOTATION = "extraction_annotation"
+RISK_LABELS: dict[str, str] = {
+    "fallback_page": "回退页关键字段",
+    "ambiguous_symbol": "复选框/符号不可辨",
+    "table_structure": "跨页/合并单元格表格",
+}
+RISK_CHECKPOINTS: dict[str, str] = {
+    "fallback_page": "核对回退页的关键字段（项目编号/预算/分包/截止时间/工期等）是否与 PDF 原件一致",
+    "ambiguous_symbol": "核对复选框/勾选符号对应的选项是否识别正确（是否响应/是否满足）",
+    "table_structure": "核对跨页或合并单元格表格的行列、数量/金额是否完整",
+}
 
 
 def _excerpt(text: str, limit: int = 240) -> str:
@@ -85,6 +99,7 @@ def _manifest_fallback_risks(project_dir: Path) -> list[dict[str, Any]]:
         risks.append(
             {
                 "code": "fallback_page",
+                "origin": ORIGIN_MANIFEST,
                 "source": MANIFEST_REL,
                 "pages": page_list,
                 "fields": [],
@@ -123,6 +138,7 @@ def _extraction_line_risks(project_dir: Path) -> list[dict[str, Any]]:
             risks.append(
                 {
                     "code": code,
+                    "origin": ORIGIN_ANNOTATION,
                     "source": source,
                     "pages": [],
                     "fields": fields,
@@ -151,6 +167,7 @@ def detect_fallback_review_risks(project_dir: str | Path) -> list[dict[str, Any]
         if entry is None:
             grouped[code] = {
                 **risk,
+                "origins": [str(risk.get("origin") or ORIGIN_ANNOTATION)],
                 "sources": [str(risk.get("source") or "")],
                 "fields": list(risk.get("fields") or []),
                 "pages": list(risk.get("pages") or []),
@@ -159,6 +176,9 @@ def detect_fallback_review_risks(project_dir: str | Path) -> list[dict[str, Any]
             }
             continue
         entry["occurrences"] = int(entry.get("occurrences") or 1) + 1
+        origin = str(risk.get("origin") or ORIGIN_ANNOTATION)
+        if origin not in entry.setdefault("origins", []):
+            entry["origins"].append(origin)
         for key in ("sources", "fields", "pages", "excerpts"):
             if key == "sources":
                 values = [str(risk.get("source") or "")]
@@ -178,10 +198,64 @@ def detect_fallback_review_risks(project_dir: str | Path) -> list[dict[str, Any]
         # excerpts 只保留前 5 条时会出现「fields 有、摘录里看不到」的误读。
         visible = " ".join(entry["excerpts"])
         entry["fields"] = sorted({field for field in CRITICAL_FIELDS if field in visible})
+        origins = [str(item) for item in entry.get("origins") or []]
+        entry["origin"] = origins[0] if origins else ORIGIN_ANNOTATION
+        entry["kind"] = (
+            "mixed"
+            if ORIGIN_MANIFEST in origins and ORIGIN_ANNOTATION in origins
+            else ("new" if ORIGIN_MANIFEST in origins else "annotated")
+        )
+        entry["alreadyAnnotated"] = entry["kind"] == "annotated"
         risks.append(entry)
         if len(risks) >= MAX_RISKS:
             break
     return risks
+
+
+def risk_summary(risks: list[dict[str, Any]]) -> dict[str, Any]:
+    """BUG-07：把合并后的风险压成用户可读的简明摘要（新风险 / 已标注 / 核对点）。"""
+    items: list[dict[str, Any]] = []
+    new_count = 0
+    annotated_count = 0
+    for risk in risks:
+        code = str(risk.get("code") or "")
+        kind = str(risk.get("kind") or ("annotated" if risk.get("alreadyAnnotated") else "new"))
+        if ORIGIN_MANIFEST in (risk.get("origins") or []) or kind == "new":
+            new_count += 1
+        if ORIGIN_ANNOTATION in (risk.get("origins") or []) or kind == "annotated":
+            annotated_count += 1
+        items.append(
+            {
+                "code": code,
+                "label": RISK_LABELS.get(code, code),
+                "kind": kind,
+                "occurrences": int(risk.get("occurrences") or 1),
+                "pages": list(risk.get("pages") or [])[:10],
+                "fields": list(risk.get("fields") or [])[:10],
+                "sourcesCount": len(risk.get("sources") or []),
+                "checkpoint": RISK_CHECKPOINTS.get(code, "核对相关原文与 PDF 原件是否一致"),
+            }
+        )
+    lines: list[str] = []
+    for index, item in enumerate(items, start=1):
+        pages = f"第 {'、'.join(str(page) for page in item['pages'])} 页" if item["pages"] else ""
+        fields = f"字段：{'、'.join(item['fields'])}" if item["fields"] else ""
+        scope = "；".join(part for part in (pages, fields) if part)
+        suffix = f"（{scope}）" if scope else ""
+        tagged = "（提取稿已按 §5.1 标注）" if item["kind"] == "annotated" else ""
+        lines.append(f"{index}. {item['label']}{tagged}：{item['occurrences']} 处{suffix}；{item['checkpoint']}")
+    prompt = (
+        f"检测到 {len(risks)} 类转换风险（转换清单新发现 {new_count} 类 / 提取稿已标注 {annotated_count} 类）：\n"
+        + "\n".join(lines)
+        + "\n已标注的风险只需核对，不代表新增缺陷；请用户确认后运行 --confirm-fallback --note \"<核对结论>\"。"
+    )
+    return {
+        "riskCount": len(risks),
+        "newRiskCount": new_count,
+        "annotatedRiskCount": annotated_count,
+        "items": items,
+        "userPrompt": prompt,
+    }
 
 
 def review_from_project(project: Mapping[str, Any]) -> Mapping[str, Any]:

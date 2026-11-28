@@ -244,6 +244,11 @@ def _brief_value(value: Any, path: str, notes: dict[str, Any]) -> Any:
                 tail = item[-1:]
                 kept = [*head, *_brief_value(tail, f"{child_path}[]", notes)]
                 result[key_text] = kept
+                # BUG-08（VM 冒烟）：截断数组同时给出显式总数，避免 `chapters: [4 项]` 被误读成
+                # 只有 4 章（实际 20）。字段名沿用 <key>Count，已存在同名键时不覆盖。
+                count_key = f"{key_text}Count"
+                if count_key not in value:
+                    result[count_key] = len(item)
                 notes[child_path] = {"count": len(item), "kept": len(kept), "head": 3, "tail": 1}
                 continue
             result[key_text] = _brief_value(item, child_path, notes)
@@ -297,7 +302,11 @@ def _os_error_to_bg(exc: OSError) -> BgError:
         return BgError(
             E_IO,
             "权限不足或文件正被占用",
-            hint="关闭占用该文件的程序，或检查工作区是否可写",
+            hint=(
+                "若这是 DSH 会话：把文件访问策略切为「完全权限」（danger-full-access）后重试"
+                "（常见于读取 %USERPROFILE%\\.dsh\\data\\bidgenie\\pylibs 被沙箱拒绝）；"
+                "否则关闭占用该文件的程序，或检查工作区是否可写"
+            ),
             detail=detail,
         )
     return BgError(

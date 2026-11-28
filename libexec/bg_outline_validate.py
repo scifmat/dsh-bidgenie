@@ -50,7 +50,7 @@ MERMAID_SUBTYPES: tuple[str, ...] = (
 )
 PRIORITIES = ("P0", "P1", "P2")
 COMPLETION_STATUS = ("pending", "writing", "done", "skipped", "blocked")
-REVIEW_COVERAGE = ("unreviewed", "pass", "weak", "missing")
+REVIEW_COVERAGE = ("unreviewed", "pass", "weak", "missing", "notApplicable")
 FLOOR_WORD = 800
 MAX_WORD = 8000
 SPECIAL_WORD_MIN = 100

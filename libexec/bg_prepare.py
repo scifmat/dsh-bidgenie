@@ -1196,6 +1196,22 @@ def _auto_plan_description(
     return commitment_value()
 
 
+#: BUG-06（VM 冒烟）：施工/货物类项目通常不需要终端模拟图；软件/信息化类才需要。
+#: 只在 auto 模式且能明确判断项目类型时把 terminal 参考值调成 0，并在 autoBasis 写明。
+_SOFTWARE_HINTS: tuple[str, ...] = ("软件", "平台", "信息化", "系统开发", "数据库", "接口开发", "算法", "小程序", "APP", "云平台", "数据中台")
+_CONSTRUCTION_GOODS_HINTS: tuple[str, ...] = ("施工", "安装", "供货", "货物", "采购清单", "工程量", "标线", "护栏", "路面", "土建", "材料", "设备采购")
+
+
+def _auto_terminal_quota(texts: Mapping[str, str], default: int) -> tuple[int, str]:
+    """按项目类型给终端图参考值：施工/货物类默认 0，其余沿用 user-settings。"""
+    text = " ".join(str(texts.get(key) or "") for key in ("06", "07", "09"))
+    software = any(token in text for token in _SOFTWARE_HINTS)
+    construction_goods = any(token in text for token in _CONSTRUCTION_GOODS_HINTS)
+    if construction_goods and not software:
+        return 0, "项目类型=施工/货物类（未识别到软件/系统/平台需求），terminal 默认 0（参考值，可按需调整）"
+    return default, ""
+
+
 def _auto_schedule_basis(plan: Mapping[str, Any]) -> str:
     """P2-9：auto 推导依据写清「哪个字段来自哪类期限」，避免 constructionPlan 语义错位。"""
     service = str(plan.get("servicePeriod") or "")
@@ -1232,6 +1248,8 @@ def build_auto_fill(
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 quota[key] = value
     quota["network"] = 0
+    terminal_value, terminal_basis = _auto_terminal_quota(texts, int(quota.get("terminal") or 0))
+    quota["terminal"] = terminal_value
     style = str((settings.get("styleProfiles") or {}).get("tech") or settings.get("styleProfile") or "official-tech")
     values = {
         "expectedWordCount": word_count,
@@ -1260,6 +1278,8 @@ def build_auto_fill(
     for key in FIGURE_KEYS:
         bases[key] = "user-settings.defaultFigureQuota"
     bases["network"] = "联网配图功能已移除（固定 0）"
+    if terminal_basis:
+        bases["terminal"] = terminal_basis
     return {
         "mode": "auto",
         "values": values,
@@ -1562,6 +1582,10 @@ def build_package_meta(
         assumptions.append(
             "figureQuota：用户提供 {}；其余采用默认值".format("、".join(f"{key}={value}" for key, value in user_quota.items()))
         )
+    auto_basis_map = auto_fill.get("autoBasis") if isinstance(auto_fill, Mapping) else None
+    terminal_basis = str((auto_basis_map or {}).get("terminal") or "") if isinstance(auto_basis_map, Mapping) else ""
+    if terminal_basis.startswith("项目类型="):
+        assumptions.append(f"figureQuota.terminal：{terminal_basis}")
     for key in FIGURE_KEYS:
         value = quota.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -2230,6 +2254,7 @@ def prepare_project(
                 "personnelBasis": auto_fill.get("personnelBasis"),
                 "equipmentBasis": auto_fill.get("equipmentBasis"),
                 "tiers": auto_fill.get("tiers"),
+                "autoBasis": auto_fill.get("autoBasis"),
                 "valueSource": auto_fill.get("valueSource"),
             }
             if auto_fill
@@ -3211,6 +3236,30 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         state_after = state_lib.load_state(project_dir)
         last = results[-1] if results else {}
         ready = bool(results) and bool(last.get("readyForT3"))
+        # BUG-03（VM 冒烟）：auto 模式各包人员/设备推导粒度可能不同（有的包提取到具体岗位，
+        # 有的包只能按履约承诺写）。不跨包强行复用数量（避免串包编造），但把差异显式列出，
+        # 供 Agent/用户决定是否用 record-override 统一口径。
+        tiers_by_package: dict[str, dict[str, Any]] = {}
+        for item in results:
+            auto = item.get("autoFill") if isinstance(item.get("autoFill"), Mapping) else {}
+            tiers = auto.get("tiers") if isinstance(auto.get("tiers"), Mapping) else {}
+            tiers_by_package[str(item.get("packageId") or "")] = dict(tiers)
+        mismatch_fields = [
+            field
+            for field in ("personnelPlan", "equipmentPlan")
+            if len({str((tiers or {}).get(field) or "") for tiers in tiers_by_package.values() if (tiers or {}).get(field)}) > 1
+        ]
+        auto_plan = {
+            "tiersByPackage": tiers_by_package,
+            "mismatchFields": mismatch_fields,
+            "granularityMismatch": bool(mismatch_fields),
+            "note": (
+                "各包人员/设备描述粒度不同（提取稿要求本身可能不同）；如需统一口径，"
+                "用 bg_prepare.py record-override 覆盖个别包，或写作任务书里明确同源表述"
+                if mismatch_fields
+                else "各包人员/设备描述粒度一致"
+            ),
+        }
         return {
             "ok": ready,
             "command": "prepare_all_selected",
@@ -3220,11 +3269,14 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
             "readyForT3": bool(last.get("readyForT3")),
             "sequenceInProgress": bool(pending_packages),
             "pendingPackages": pending_packages,
+            "autoPlan": auto_plan,
             "summary": {
                 "readyForT3": bool(last.get("readyForT3")),
                 "sequenceInProgress": bool(pending_packages),
                 "finalPackage": last.get("packageId"),
                 "pendingReason": "sequence-in-progress" if pending_packages else "",
+                "autoPlanGranularityMismatch": auto_plan["granularityMismatch"],
+                "autoPlanMismatchFields": mismatch_fields,
                 "note": (
                     "中间包 readyForT3=false 为顺序中间态（后续包未 prepare），非失败；最终以 readyForT3 为准"
                     if pending_packages

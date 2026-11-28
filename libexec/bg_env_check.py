@@ -262,7 +262,7 @@ def check_python_runtime(ctx: Mapping[str, Any]) -> dict[str, Any]:
 
 def check_python_packages(ctx: Mapping[str, Any]) -> dict[str, Any]:
     """python_packages：核心库 import + 深导入 + 版本比较（python-docx / Pillow / lxml）。"""
-    deps.ensure_dependency_path()
+    dep_path = deps.ensure_dependency_path()
     config = ctx["item"].get("config") or {}
     found: dict[str, str] = {}
     missing: list[str] = []
@@ -311,7 +311,11 @@ def check_python_packages(ctx: Mapping[str, Any]) -> dict[str, Any]:
     if problems:
         hint = config.get("installHint")
         detail: dict[str, Any] = {"found": found, "missing": missing, "mismatched": mismatched, "errors": errors, "deepImports": deep_checked, "modules": module_details, "pylibs": active["path"], "pylibsSource": active["source"]}
-        if hint:
+        if dep_path.get("sandboxDenied") or active.get("sandboxDenied"):
+            detail["permissionDenied"] = True
+            detail["cause"] = "sandbox_permission"
+            detail["deniedPaths"] = dep_path.get("deniedPaths") or active.get("deniedCandidates") or []
+        elif hint:
             detail["installHint"] = hint
         return _result(STATUS_FAILED, "；".join(problems), detail)
     return _result(
@@ -361,6 +365,12 @@ def check_pdf_libraries(ctx: Mapping[str, Any]) -> dict[str, Any]:
             missing.append(name)
             errors[name] = {"type": type(exc).__name__, "message": str(exc), "module": str(getattr(exc, "name", "") or name)}
     active = deps.active_pylibs()
+    sandbox_denied = bool(binary.get("sandboxDenied") or active.get("sandboxDenied"))
+    common_detail: dict[str, Any] = {"found": found, "missing": missing, "versions": versions, "errors": errors, "pylibs": active["path"], "pylibsSource": active["source"], "binaryIntegrity": binary}
+    if sandbox_denied and missing:
+        common_detail["permissionDenied"] = True
+        common_detail["cause"] = "sandbox_permission"
+        common_detail["deniedPaths"] = binary.get("deniedPaths") or active.get("deniedCandidates") or []
     if primary in found:
         version_text = " / ".join(
             f"{name} {versions[name]}" if name in versions else name for name in found
@@ -368,12 +378,15 @@ def check_pdf_libraries(ctx: Mapping[str, Any]) -> dict[str, Any]:
         return _result(
             STATUS_PASSED,
             f"可导入：{version_text}",
-            {"found": found, "missing": missing, "versions": versions, "errors": errors, "pylibs": active["path"], "pylibsSource": active["source"], "binaryIntegrity": binary},
+            common_detail,
         )
+    failed_detail: dict[str, Any] = dict(common_detail)
+    if not sandbox_denied:
+        failed_detail["installHint"] = config.get("installHint", "")
     return _result(
         STATUS_FAILED,
         f"缺少 PDF 读取组件：{', '.join(missing) or primary}",
-        {"found": found, "missing": missing, "versions": versions, "errors": errors, "pylibs": active["path"], "pylibsSource": active["source"], "binaryIntegrity": binary, "installHint": config.get("installHint", "")},
+        failed_detail,
     )
 
 
@@ -1132,6 +1145,20 @@ _PLUGIN_DEFECT_ITEMS = {"scripts_integrity", "templates_integrity", "skill_servi
 def failure_diagnosis(item_id: str, detail: Mapping[str, Any] | None) -> dict[str, Any]:
     """失败项 cause/causeDetail/remediable/repairAction 映射（env-check 与 repair plan 共用）。"""
     detail = detail or {}
+    if detail.get("permissionDenied") or detail.get("cause") == "sandbox_permission":
+        denied_paths = "；".join(
+            str(item.get("path") or "") for item in (detail.get("deniedPaths") or []) if isinstance(item, Mapping)
+        )[:300]
+        return {
+            "cause": "sandbox_permission",
+            "causeDetail": (
+                "插件依赖目录被文件权限拒绝（WinError 5/拒绝访问），疑似 DSH 沙箱限制"
+                + (f"：{denied_paths}" if denied_paths else "")
+            ),
+            "remediable": "manual",
+            "repairAction": "",
+            "hint": "把 DSH 会话的文件访问策略切为「完全权限」（danger-full-access）后重跑环境检查；这不是依赖缺失，不需要「修复环境」",
+        }
     errors = detail.get("errors") if isinstance(detail.get("errors"), Mapping) else {}
     binary = detail.get("binaryIntegrity") if isinstance(detail.get("binaryIntegrity"), Mapping) else {}
     if item_id == "scripts_integrity":
@@ -1259,9 +1286,9 @@ def build_report(
         if sandbox_failed:
             root_cause = {
                 "code": "sandbox_permission",
-                "message": "脚本自检被文件权限拒绝（WinError 5/拒绝访问），疑似 DSH 沙箱限制；请把文件策略切为「完全权限」后重跑环境检查",
+                "message": "自检/依赖读取被文件权限拒绝（WinError 5/拒绝访问），疑似 DSH 沙箱限制；请把文件策略切为「完全权限」后重跑环境检查（不是依赖缺失，无需修复环境）",
                 "items": [item["id"] for item in sandbox_failed],
-                "hint": "DSH 会话设置 → 文件访问策略 → 完全权限；或在可写环境设置 BIDGENIE_TEMP_DIR 后重试",
+                "hint": "DSH 会话设置 → 文件访问策略 → 完全权限；依赖无需重装。如仅临时目录受限，可在可写环境设置 BIDGENIE_TEMP_DIR 后重试",
                 "diagnoses": [
                     {"id": item["id"], **{key: item["detail"].get(key) for key in ("cause", "causeDetail", "remediable", "hint")}}
                     for item in sandbox_failed

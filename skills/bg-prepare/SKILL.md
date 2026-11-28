@@ -13,6 +13,7 @@ description: BidGenie 撰写前准备（F4）。当项目处于 package_prepare 
 - 工期字段语义分开（P2-9）：`schedulePlan.servicePeriod` = 合同履行期限/服务期（如「1 年」）；`schedulePlan.constructionPlan` = 施工/供货/交付工期；`startDate`/`deliveryDate` = 具体日期（YYYY-MM-DD，不编造）。auto 只在对应期限明确时填对应字段，`autoFill.autoBasis.schedulePlan` 记录映射来源；写作任务书不要引用 `constructionPlan` 当服务期。
 - 字数默认**动态**：`user-settings.defaultWordCountTier`（缺省 50000），提问卡显示实际值，并与提取要求下限取大值，不写死。
 - 图表配额：table/mermaid 是下限、上不封顶；terminal 是参考值（0=不生成，少规划不报错）；**施工/供货类项目通常不需要终端图（terminal 可设 0），软件/系统/接口/数据库类才需要**。人员/设备/工期 guided 每包必须有答案或「用默认」。
+  - **auto 模式（BUG-06）**：脚本会按提取稿关键词判断项目类型，施工/货物类把 terminal 参考值设为 0，并在 `autoFill.autoBasis.terminal` 写明原因；汇报时不要因为「默认配额曾是 5」就认为缺图。
 - `qualificationGaps` 是 **资格/证书要求提示（商务部分，供用户核对）**，`blocking=false`：按 02/08/09 资格硬项比对投标人资料，**按“第N包/第1—3包/第4、5包”过滤当前包，跳过“不适用于本包/本包未要求”**；每包 ≤5 条、`missingTokens` 为整条短语；**不阻断 F4/T3，技术方案不据此判定、不要求 Agent 补材料**。
 
 ## 偏好与选包（只问一次）
@@ -37,6 +38,7 @@ description: BidGenie 撰写前准备（F4）。当项目处于 package_prepare 
 
 1. 先对全部 `writingPackages` 执行 `bg_prepare.py --all-selected`（或循环 `--package`），逐包 `--verify`。
    - `--all-selected` 的中间包 `readyForT3=false` 是顺序中间态：结果带 `pendingReason="sequence-in-progress"`、`t3State="pending-sequence"`、`t3Pending=true`；顶层 `sequenceInProgress=true`、`pendingPackages`/`summary.note` 说明范围。**汇报只读顶层 `readyForT3`（最后一包）与 `sequenceInProgress`，不要只看逐包 `readyForT3` 判定 F4 失败**。批量准备只在首包切换一次 currentPackage（`summary.historyNote`），中间包不再写 set-package 事件，历史里不会被误读成来回切包。
+   - **人员/设备粒度（BUG-03）**：`autoPlan.granularityMismatch=true` 表示各包推导粒度不同（提取稿要求本身可能不同：有的包有具体岗位/设备，有的包只能写履约承诺）。汇报时说明这是原文差异、不是遗漏；用户要求统一口径时用 `record-override` 覆盖个别包，不要跨包复制数量（避免串包编造）。
    - `--verify` 与 prepare 输出同契约：`{ok,packageId,verified,readyForT3,packageTree,t3Check}`；单包时 `packageId` 为 `package-<N>`。
 2. 全部通过、且 guided 逐包人员/设备/工期有答案或默认后，对 `writingPackages[0]` **显式** `transition --to outline --package "<writingPackages[0]>"`（T3，不依赖 currentPackage）。
 3. T13 会**自动把 currentPackage 切到下一包**：严格顺序是「先 `transition --to package_prepare`（T13）→ 再 `--verify` → 再显式 T3」；**T13 前不要 `set-package`**。若误先切了包，新版 T13 会按上一已完成包自动识别并在 guard 里提示。

@@ -83,7 +83,7 @@ description: BidGenie（标代精灵）投标技术方案自动化总入口。�
 | 3 | guided 逐包问人员/设备/工期 | 每包回答或「用默认」并写 meta | 只问首包、其余沿用；缺项仍 T3 |
 | 4 | 正文按批/优化按章 | 正文 4–6 章一个子智能体；优化按章合并一批一个 | 每章一个 / 每 issue 一个 |
 | 5 | 图表配额：table/mermaid 是下限，terminal 是参考值 | 预设 5、实际 7 允许不返工；terminal 按适合章节规划 | 超 table/mermaid 配额要求删图；为凑数硬塞 terminal |
-| 6 | 沙箱失败提示切完全权限 | EPERM → 提示 danger-full-access/授权后重试 | 静默降级/伪造 png |
+| 6 | 沙箱权限失败先请求切「完全权限」 | env-check 报 `sandbox_permission` / `WinError 5`（pylibs 不可读）→ `ask_user_question` 请用户切 danger-full-access，切完重跑一次；不重装依赖、不逐条升级授权 | 反复重试/装依赖/改写临时脚本绕过 |
 | 7 | 特殊章节不写成普通方案 | 检测报告/偏离表写 handling + 三段模板，请用户补充 | 写成“我方已具备/已提供”、编造证书编号/检测结论 |
 
 ## 6. 环境修复入口

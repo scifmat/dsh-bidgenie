@@ -36,6 +36,7 @@ M3.2 起提取文件改为**人类可读结构**（Traecode 9 模板输出示例
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -1590,6 +1591,47 @@ def write_extraction_caveats(project_dir: Path, caveats: list[dict[str, Any]]) -
     return paths.rel_posix(project_dir, project_file) + ".extensions.extractionCaveats"
 
 
+def detect_shared_package_files(project_dir: Path) -> list[dict[str, Any]]:
+    """BUG-05（VM 冒烟）：识别多包之间内容完全相同的提取文件。
+
+    招标文件常明确「1、2 包共用评审标准」，此时两份 07 内容逐字节一致；重复让子智能体
+    各读一遍 79k 转换稿没有收益。这里只做只读提示，不阻断校验，供 Agent 复用已有文件。
+    """
+    root = project_dir / "extraction" / "packages"
+    if not root.is_dir():
+        return []
+    groups: dict[str, list[dict[str, str]]] = {}
+    for package_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        for path in sorted(package_dir.glob("*.md")):
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            groups.setdefault(digest, []).append(
+                {
+                    "packageId": package_dir.name,
+                    "file": path.name,
+                    "path": paths.rel_posix(project_dir, path),
+                    "sha256": digest,
+                }
+            )
+    shared: list[dict[str, Any]] = []
+    for files in groups.values():
+        packages = sorted({item["packageId"] for item in files})
+        if len(files) < 2 or len(packages) < 2:
+            continue
+        shared.append(
+            {
+                "file": files[0]["file"],
+                "packages": packages,
+                "paths": [item["path"] for item in files],
+                "sha256": files[0]["sha256"],
+                "note": f"{files[0]['file']} 在 {len(packages)} 个包中内容完全相同，可直接复用、无需重复提取/重读",
+            }
+        )
+    return shared
+
+
 def handle(args: argparse.Namespace) -> dict[str, Any]:
     """按参数分发。"""
     if getattr(args, "selftest", False):
@@ -1627,6 +1669,8 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         only_package=getattr(args, "package", None),
     )
     report = result["report"]
+    shared_files = detect_shared_package_files(project_dir)
+    report["sharedFiles"] = shared_files
     blockers = list(report.get("blockers") or [])
     warnings = list(report.get("warnings") or [])
     if getattr(args, "strict", False) and warnings:
@@ -1640,7 +1684,8 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
         warnings = []
-    report["fallbackReview"] = {"required": bool(risks), "risks": risks, "confirmedAt": confirmed_at}
+    risk_summary = extraction_risk.risk_summary(risks)
+    report["fallbackReview"] = {"required": bool(risks), "risks": risks, "summary": risk_summary, "confirmedAt": confirmed_at}
     if risks and not confirmed_at:
         blockers.append(
             {
@@ -1649,7 +1694,8 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                 "pointer": "",
                 "message": (
                     f"检测到 {len(risks)} 项需用户核对（回退页关键字段/跨页表格/复选框符号不可辨）；"
-                    "请先向用户确认受影响字段，再运行 bg_extract_validate.py --confirm-fallback --note \"<用户确认结论>\""
+                    "请按 fallbackReview.summary 给用户 3 行内摘要（说明新发现与已标注），确认后运行 "
+                    "--confirm-fallback --note \"<用户确认结论>\""
                 ),
             }
         )
@@ -1686,7 +1732,9 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
                     "required": bool((report.get("fallbackReview") or {}).get("required")),
                     "riskCount": len((report.get("fallbackReview") or {}).get("risks") or []),
                     "riskCodes": sorted({str(item.get("code") or "") for item in (report.get("fallbackReview") or {}).get("risks") or []}),
+                    "summary": risk_summary,
                 },
+                "sharedFiles": shared_files[:5],
                 "written": written,
             },
         )
@@ -1726,6 +1774,8 @@ def handle(args: argparse.Namespace) -> dict[str, Any]:
         "caveatsByPackage": caveat_stats,
         "caveatsWritten": caveats_written,
         "fallbackReview": report.get("fallbackReview"),
+        "sharedExtractionFiles": shared_files,
+        "sharedExtractionFileCount": len(shared_files),
         "blockers": [],
         "summary": summary,
         "reportPath": paths.rel_posix(project_dir, project_dir / "extraction" / "common" / REPORT_FILE_NAME),
