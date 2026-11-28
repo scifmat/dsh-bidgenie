@@ -1,13 +1,15 @@
 {
   "name": "dsh-bidgenie",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "type": "module",
   "description": "标代精灵（BidGenie）DSH 插件：投标技术方案自动化。",
+  "icon": "assets/brand/bidgenie-logo.svg",
   "exports": {
     ".": "./index.js",
     "./client": "./client/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "index.js",
@@ -15,12 +17,14 @@
     "lib/",
     "libexec/",
     "config/",
+    "locale/*.json",
     "skills/",
     "templates/",
     "cordis.patch.yml",
     "assets/",
     "tools/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "package.json"
   ],
