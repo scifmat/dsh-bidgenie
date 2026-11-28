@@ -2,6 +2,15 @@
 
 本文件记录 `dsh-bidgenie` 每个对外发布版本的变更。版本号规则见开发工作区 `docs/BidGenie-版本号与发布计划-20261128.md`；历史以 git tag + 本文件为准。
 
+## [0.1.0-alpha.3] - 2026-11-28
+
+首个 npm 发布版本（staged publish）。功能与 `0.1.0-alpha.2` 一致，仅增加发布能力。
+
+### Changed
+
+- 移除 `package.json` 的 `private` 限制并声明 `publishConfig.access=public`，可按 `dsh-bidgenie` 从 npm 安装/更新。
+- npm 包内容：135 个文件、约 2.4 MB（运行时代码、技能、模板、assets、tools、README/CHANGELOG/LICENSE；不含 tests/pylibs）。
+
 ## [0.1.0-alpha.2] - 2026-11-28
 
 修复 VM 流程冒烟（0.1.0-alpha.1）发现的 2 个 P0 与若干体验问题。
