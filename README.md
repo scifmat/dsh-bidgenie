@@ -4,11 +4,7 @@
 
 **把复杂的技术标交给它：解析、大纲、正文到定稿，一步步走完。**
 
-[![version](https://img.shields.io/github/package-json/v/scifmat/dsh-bidgenie?label=version&color=EC661A&style=flat-square)](https://github.com/scifmat/dsh-bidgenie/blob/main/package.json)
-[![npm](https://img.shields.io/npm/v/dsh-bidgenie?label=npm&color=CB3837&style=flat-square)](https://www.npmjs.com/package/dsh-bidgenie)
-![platform](https://img.shields.io/badge/platform-Windows%2010%2B-0B1220?style=flat-square)
-![host](https://img.shields.io/badge/host-DSH%200.2.x-4D6BFE?style=flat-square)
-![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-8A9AB8?style=flat-square)
+[![version](https://img.shields.io/github/package-json/v/scifmat/dsh-bidgenie?label=version&color=EC661A&style=flat-square)](https://github.com/scifmat/dsh-bidgenie/blob/main/package.json) [![npm](https://img.shields.io/npm/v/dsh-bidgenie?label=npm&color=CB3837&style=flat-square)](https://www.npmjs.com/package/dsh-bidgenie) ![platform](https://img.shields.io/badge/platform-Windows%2010%2B-0B1220?style=flat-square) ![host](https://img.shields.io/badge/host-DSH%200.2.x-4D6BFE?style=flat-square) ![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-8A9AB8?style=flat-square)
 
 BidGenie 是 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness) 的投标技术方案插件：读取招标文件，提取关键信息，生成大纲与正文，完成审查与优化，最后导出可直接交付的 Word。项目状态保存在本地工作区，随时可以中断，下次说一句「继续这个项目」就能接着写。
 

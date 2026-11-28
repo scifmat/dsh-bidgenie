@@ -2,6 +2,16 @@
 
 本文件记录 `dsh-bidgenie` 每个对外发布版本的变更。版本号规则见开发工作区 `docs/BidGenie-版本号与发布计划-20261128.md`；历史以 git tag + 本文件为准。
 
+## [0.1.0-alpha.4] - 2026-11-28
+
+README / 发布资料更新（无功能变更）。
+
+### Changed
+
+- 插件 README 徽章改为同一行（修复 DSH 插件详情页里徽章竖排、间距不均的问题），并保留 npm 徽章。
+- 安装说明以 npm 包名 `dsh-bidgenie` 为主，GitHub 地址作为备选；说明 npm 安装才会出现「更新」提示。
+- 同步刷新 npm 页面 README（alpha.3 打包后 README 才更新，本次补上）。
+
 ## [0.1.0-alpha.3] - 2026-11-28
 
 首个 npm 发布版本（staged publish）。功能与 `0.1.0-alpha.2` 一致，仅增加发布能力。

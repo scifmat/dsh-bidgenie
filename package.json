@@ -1,7 +1,10 @@
 {
   "name": "dsh-bidgenie",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "type": "module",
+  "scripts": {
+    "prepack": "node tools/clean-npm-artifacts.js"
+  },
   "description": "标代精灵（BidGenie）DSH 插件：投标技术方案自动化。",
   "icon": "assets/brand/bidgenie-logo.svg",
   "exports": {
